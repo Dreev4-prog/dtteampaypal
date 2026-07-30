@@ -671,9 +671,11 @@ async def resolve_paypal_return(return_id: int, action: str, admin_id: int, admi
             tag.status = "gestoppt"
             tag.issued_to_user_id = None
             req.status = "returned_gestoppt"
-        elif action == "rejected":
-            tag.status = "issued"
-            req.status = "paypal_issued"
+        elif action == "deleted":
+            tag.status = "deleted"
+            tag.issued_to_user_id = None
+            tag.issued_at = None
+            req.status = "returned_deleted"
         req.updated_at = now
         await session.commit()
         await session.refresh(item)
@@ -684,16 +686,49 @@ async def get_paypal_database_counts() -> dict[str, int]:
     async with SessionLocal() as session:
         result = {key: int(await session.scalar(select(func.count()).select_from(PaypalTag).where(PaypalTag.status == key)) or 0)
                   for key in ("available", "issued", "return_pending", "gestoppt")}
-        result["all"] = int(await session.scalar(select(func.count()).select_from(PaypalTag)) or 0)
+        result["all"] = int(await session.scalar(
+            select(func.count()).select_from(PaypalTag).where(PaypalTag.status != "deleted")
+        ) or 0)
         return result
 
 
 async def list_paypal_tags(filter_name: str = "all", limit: int = 50) -> list[PaypalTag]:
     async with SessionLocal() as session:
-        query = select(PaypalTag).order_by(PaypalTag.id.desc())
+        query = select(PaypalTag).where(PaypalTag.status != "deleted").order_by(PaypalTag.id.desc())
         if filter_name != "all":
             query = query.where(PaypalTag.status == filter_name)
         return list(await session.scalars(query.limit(limit)))
+
+
+async def delete_free_paypal_tag(tag_id: int) -> tuple[bool, str]:
+    """Delete a PayPal tag only when it is currently free.
+
+    Tags referenced by old requests are soft-deleted to preserve CRM history;
+    unreferenced tags are removed physically.
+    """
+    async with SessionLocal() as session:
+        tag = await session.get(PaypalTag, tag_id, with_for_update=True)
+        if tag is None or tag.status == "deleted":
+            return False, "not_found"
+        if tag.status != "available":
+            return False, "not_available"
+
+        request_refs = int(await session.scalar(
+            select(func.count()).select_from(Request).where(Request.paypal_tag_id == tag_id)
+        ) or 0)
+        return_refs = int(await session.scalar(
+            select(func.count()).select_from(PaypalReturn).where(PaypalReturn.paypal_tag_id == tag_id)
+        ) or 0)
+
+        if request_refs or return_refs:
+            tag.status = "deleted"
+            tag.issued_to_user_id = None
+            tag.issued_at = None
+        else:
+            await session.delete(tag)
+
+        await session.commit()
+        return True, "deleted"
 
 
 async def set_paypal_tag_status(tag_id: int, status: str) -> PaypalTag | None:

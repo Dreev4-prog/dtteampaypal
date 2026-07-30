@@ -298,10 +298,7 @@ def paid_or_return_menu(request_id: int) -> InlineKeyboardMarkup:
 def return_reasons_menu(request_id: int) -> InlineKeyboardMarkup:
     reasons = [
         ("❌ Передумал", "changed_mind"),
-        ("💳 Нет возможности оплатить", "cant_pay"),
-        ("💶 Нужна другая сумма", "another_amount"),
-        ("🚫 Gestoppt", "gestoppt"),
-        ("⏰ Не успеваю оплатить", "no_time"),
+        ("🚫 Gestop", "gestop"),
         ("✍️ Другая причина", "other"),
     ]
     rows = [[InlineKeyboardButton(text=label, callback_data=f"return_reason:{request_id}:{code}")] for label, code in reasons]
@@ -326,15 +323,15 @@ def return_card_menu(return_id: int, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Проверил PayPal", callback_data=f"return_checked:{return_id}")],
         [InlineKeyboardButton(text="💬 Написать пользователю", url=f"tg://user?id={user_id}")],
-        [InlineKeyboardButton(text="❌ Отклонить возврат", callback_data=f"return_reject:{return_id}")],
         [InlineKeyboardButton(text="⬅️ К возвратам", callback_data="returns_menu")],
     ])
 
 
 def return_checked_menu(return_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Пустой — вернуть в базу", callback_data=f"return_release:{return_id}")],
-        [InlineKeyboardButton(text="🚫 Пометить Gestoppt", callback_data=f"return_gestoppt:{return_id}")],
+        [InlineKeyboardButton(text="✅ Вернуть в базу", callback_data=f"return_release:{return_id}")],
+        [InlineKeyboardButton(text="🚫 Gestop", callback_data=f"return_gestoppt:{return_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"return_delete:{return_id}")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data=f"return_card:{return_id}")],
     ])
 
@@ -344,7 +341,7 @@ def paypal_database_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"🟢 Свободные ({counts.get('available', 0)})", callback_data="paypal_db_list:available:0")],
         [InlineKeyboardButton(text=f"👤 В работе ({counts.get('issued', 0)})", callback_data="working_dates")],
         [InlineKeyboardButton(text=f"↩️ Возвраты ({counts.get('return_pending', 0)})", callback_data="returns_menu")],
-        [InlineKeyboardButton(text=f"🚫 Gestoppt ({counts.get('gestoppt', 0)})", callback_data="paypal_db_list:gestoppt:0")],
+        [InlineKeyboardButton(text=f"🚫 Gestop ({counts.get('gestoppt', 0)})", callback_data="paypal_db_list:gestoppt:0")],
         [InlineKeyboardButton(text=f"📋 Все ({counts.get('all', 0)})", callback_data="paypal_db_list:all:0")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
     ])
@@ -356,11 +353,21 @@ def paypal_list_menu(tags: list, filter_name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def paypal_card_admin_menu(tag_id: int, filter_name: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚫 Пометить Gestoppt", callback_data=f"paypal_mark_gestoppt:{tag_id}:{filter_name}")],
+def paypal_card_admin_menu(tag_id: int, filter_name: str, status: str) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="🚫 Пометить Gestop", callback_data=f"paypal_mark_gestoppt:{tag_id}:{filter_name}")],
         [InlineKeyboardButton(text="🟢 Сделать свободным", callback_data=f"paypal_mark_available:{tag_id}:{filter_name}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"paypal_db_list:{filter_name}:0")],
+    ]
+    if status == "available":
+        rows.append([InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"paypal_delete_ask:{tag_id}:{filter_name}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"paypal_db_list:{filter_name}:0")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def paypal_delete_confirm_menu(tag_id: int, filter_name: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"paypal_delete_confirm:{tag_id}:{filter_name}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"paypal_card:{tag_id}:{filter_name}")],
     ])
 
 
