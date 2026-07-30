@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, select, text, func
@@ -479,7 +479,13 @@ PAYMENT_FILTERS = {
 
 
 async def get_payment_counts() -> dict[str, int]:
+    """Счётчики платёжных очередей.
+
+    В активной категории «Выплаченные» показываются только выплаты за последние
+    24 часа. Старые записи остаются в БД и продолжают участвовать в статистике.
+    """
     counts = {"check": 0, "payout": 0, "paidout": 0, "notfound": 0, "waiting": 0, "all": 0}
+    paid_cutoff = datetime.utcnow() - timedelta(hours=24)
     async with SessionLocal() as session:
         rows = await session.execute(
             select(Request.status, func.count(Request.id))
@@ -487,21 +493,36 @@ async def get_payment_counts() -> dict[str, int]:
             .group_by(Request.status)
         )
         raw = {status: int(count) for status, count in rows.all()}
+        recent_paid = int(await session.scalar(
+            select(func.count(Request.id)).where(
+                Request.status == "paid_out",
+                Request.payout_at.is_not(None),
+                Request.payout_at >= paid_cutoff,
+            )
+        ) or 0)
     counts["check"] = raw.get("waiting_check", 0)
     counts["payout"] = raw.get("payout_pending", 0)
-    counts["paidout"] = raw.get("paid_out", 0)
+    counts["paidout"] = recent_paid
     counts["notfound"] = raw.get("not_found", 0)
     counts["waiting"] = raw.get("paypal_issued", 0)
+    # «Все» остаётся полной историей платёжных заявок, включая старые выплаты.
     counts["all"] = sum(raw.values())
     return counts
 
 
 async def list_payment_requests(filter_name: str, offset: int = 0, limit: int = 10) -> tuple[list[Request], bool]:
     statuses = PAYMENT_FILTERS.get(filter_name, PAYMENT_FILTERS["all"])
+    query = select(Request).where(Request.status.in_(statuses))
+    if filter_name == "paidout":
+        # Не удаляем выплату из БД: спустя 24 часа она лишь исчезает из активного списка.
+        paid_cutoff = datetime.utcnow() - timedelta(hours=24)
+        query = query.where(
+            Request.payout_at.is_not(None),
+            Request.payout_at >= paid_cutoff,
+        )
     async with SessionLocal() as session:
         rows = list(await session.scalars(
-            select(Request)
-            .where(Request.status.in_(statuses))
+            query
             .order_by(Request.updated_at.desc(), Request.id.desc())
             .offset(offset)
             .limit(limit + 1)

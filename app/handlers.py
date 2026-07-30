@@ -1246,7 +1246,7 @@ async def payments_list_handler(callback: CallbackQuery) -> None:
     titles = {
         "check": "🟠 Ожидают проверки оплаты",
         "payout": "🟢 Нужно выплатить",
-        "paidout": "✅ Выплаченные",
+        "paidout": "✅ Выплаченные за последние 24 часа",
         "waiting": "🕓 Ожидают оплаты",
         "notfound": "🔴 Оплата не найдена",
         "all": "📋 Все платежные заявки",
