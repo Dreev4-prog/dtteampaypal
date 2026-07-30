@@ -334,8 +334,30 @@ def return_checked_menu(return_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+
+def paypal_add_photo_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭ Пропустить", callback_data="paypal_add_skip_photo")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="paypal_add_cancel")],
+    ])
+
+
+def paypal_add_confirm_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Сохранить", callback_data="paypal_add_save")],
+        [InlineKeyboardButton(text="✏️ Изменить", callback_data="paypal_add_restart")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="paypal_add_cancel")],
+    ])
+
+
+def paypal_add_cancel_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="paypal_add_cancel")],
+    ])
+
 def paypal_database_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить PayPal", callback_data="paypal_add_single"), InlineKeyboardButton(text="📥 Массовое добавление", callback_data="paypal_add_bulk")],
         [InlineKeyboardButton(text=f"🟢 Свободные ({counts.get('available', 0)})", callback_data="paypal_db_list:available:0")],
         [InlineKeyboardButton(text=f"👤 В работе ({counts.get('issued', 0)})", callback_data="working_dates")],
         [InlineKeyboardButton(text=f"↩️ Возвраты ({counts.get('return_pending', 0)})", callback_data="returns_menu")],

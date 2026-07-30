@@ -34,6 +34,7 @@ class PaypalTag(Base):
     issued_to_user_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     issued_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    photo_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
 
 class Request(Base):
@@ -133,6 +134,9 @@ async def init_db() -> None:
         # v1.6: автоматический расчёт процентов и суммы к выплате.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_percent INTEGER"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_amount NUMERIC(12,2)"))
+        # v1.6.8: изображение, прикреплённое к отдельному PayPal.
+        await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS photo_file_id VARCHAR(512)"))
+
         # v1.6.4: возвраты и массовый сбор PayPal.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS collection_notified_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS keep_confirmed_at TIMESTAMP"))
@@ -219,6 +223,19 @@ async def set_user_access_status(user_id: int, status: str, admin_id: int) -> Us
         await session.commit()
         await session.refresh(user)
         return user
+
+
+async def add_paypal_tag(tag: str, photo_file_id: str | None = None) -> tuple[PaypalTag | None, bool]:
+    """Добавляет один PayPal. Возвращает (объект, был_дубликат)."""
+    async with SessionLocal() as session:
+        exists = await session.scalar(select(PaypalTag).where(PaypalTag.tag == tag))
+        if exists:
+            return exists, True
+        item = PaypalTag(tag=tag, photo_file_id=photo_file_id)
+        session.add(item)
+        await session.commit()
+        await session.refresh(item)
+        return item, False
 
 
 async def add_paypal_tags(tags: list[str]) -> tuple[int, int]:

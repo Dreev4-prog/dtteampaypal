@@ -12,6 +12,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, InputMe
 
 from app.config import settings
 from app.db import (
+    add_paypal_tag,
     add_paypal_tags,
     count_available_tags,
     count_active_requests,
@@ -85,6 +86,7 @@ from app.keyboards import (
     paypal_card_admin_menu, paypal_delete_confirm_menu, working_dates_menu, working_day_menu, collection_choice_menu,
     working_card_menu, working_recall_confirm_menu, working_delete_day_confirm_menu, working_search_results_menu,
     working_search_cancel_menu, work_control_menu, work_edit_cancel_menu, work_image_edit_menu,
+    paypal_add_photo_menu, paypal_add_confirm_menu, paypal_add_cancel_menu,
 )
 
 router = Router()
@@ -122,6 +124,12 @@ class WorkingSearch(StatesGroup):
 class WorkMessageForm(StatesGroup):
     text = State()
     image = State()
+
+
+class PaypalAddForm(StatesGroup):
+    tag = State()
+    photo = State()
+    bulk = State()
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
@@ -1192,6 +1200,178 @@ async def member_search_result(message: Message, state: FSMContext) -> None:
     )
 
 
+def normalize_paypal_tag(raw: str) -> str | None:
+    tag = raw.strip().split()[0] if raw.strip() else ""
+    if not tag:
+        return None
+    if not tag.startswith("@"):
+        tag = "@" + tag
+    if len(tag) < 3 or len(tag) > 255 or any(ch.isspace() for ch in tag):
+        return None
+    return tag
+
+
+async def show_paypal_add_preview(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    tag = data.get("paypal_add_tag")
+    photo_file_id = data.get("paypal_add_photo")
+    caption = (
+        "<b>Проверьте данные</b>\n\n"
+        f"💳 <code>{tag}</code>\n"
+        f"🖼 Фото: <b>{'Есть' if photo_file_id else 'Нет'}</b>"
+    )
+    if photo_file_id:
+        await message.answer_photo(photo_file_id, caption=caption, reply_markup=paypal_add_confirm_menu())
+    else:
+        await message.answer(caption, reply_markup=paypal_add_confirm_menu())
+
+
+@router.callback_query(F.data == "paypal_add_single")
+async def paypal_add_single_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(PaypalAddForm.tag)
+    await callback.message.answer(
+        "➕ <b>Добавить PayPal</b>\n\nВведите один PayPal-тег.\nНапример: <code>@MaxMuller123</code>",
+        reply_markup=paypal_add_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(PaypalAddForm.tag)
+async def paypal_add_tag_input(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    tag = normalize_paypal_tag(message.text or "")
+    if not tag:
+        await message.answer("Введите корректный PayPal-тег, например <code>@MaxMuller123</code>.", reply_markup=paypal_add_cancel_menu())
+        return
+    await state.update_data(paypal_add_tag=tag, paypal_add_photo=None)
+    await state.set_state(PaypalAddForm.photo)
+    await message.answer(
+        f"💳 <code>{tag}</code>\n\n🖼 Прикрепите фотографию PayPal или нажмите «Пропустить».",
+        reply_markup=paypal_add_photo_menu(),
+    )
+
+
+@router.message(PaypalAddForm.photo, F.photo)
+async def paypal_add_photo_input(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    await state.update_data(paypal_add_photo=message.photo[-1].file_id)
+    await show_paypal_add_preview(message, state)
+
+
+@router.message(PaypalAddForm.photo)
+async def paypal_add_photo_wrong(message: Message) -> None:
+    await message.answer("Отправьте изображение именно как фотографию или нажмите «Пропустить».", reply_markup=paypal_add_photo_menu())
+
+
+@router.callback_query(F.data == "paypal_add_skip_photo")
+async def paypal_add_skip_photo(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    data = await state.get_data()
+    if not data.get("paypal_add_tag"):
+        await callback.answer("Начните добавление заново", show_alert=True)
+        return
+    await state.update_data(paypal_add_photo=None)
+    await show_paypal_add_preview(callback.message, state)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "paypal_add_save")
+async def paypal_add_save(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    data = await state.get_data()
+    tag = data.get("paypal_add_tag")
+    if not tag:
+        await callback.answer("Данные устарели. Начните заново.", show_alert=True)
+        return
+    item, duplicate = await add_paypal_tag(tag, data.get("paypal_add_photo"))
+    await state.clear()
+    if duplicate:
+        await callback.message.answer(f"⚠️ PayPal <code>{tag}</code> уже есть в базе.", reply_markup=paypal_database_menu(await get_paypal_database_counts()))
+        await callback.answer("Дубликат", show_alert=True)
+        return
+    await callback.message.answer(f"✅ PayPal <code>{tag}</code> сохранён и добавлен в свободную базу.", reply_markup=paypal_database_menu(await get_paypal_database_counts()))
+    await callback.answer("Сохранено")
+
+
+@router.callback_query(F.data == "paypal_add_restart")
+async def paypal_add_restart(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(PaypalAddForm.tag)
+    await callback.message.answer("Введите PayPal заново:", reply_markup=paypal_add_cancel_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "paypal_add_cancel")
+async def paypal_add_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.message.answer("Добавление отменено.", reply_markup=paypal_database_menu(await get_paypal_database_counts()))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "paypal_add_bulk")
+async def paypal_add_bulk_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(PaypalAddForm.bulk)
+    await callback.message.answer(
+        "📥 <b>Массовое добавление</b>\n\nОтправьте PayPal-теги списком — каждый с новой строки или через пробел.\nФотографии при массовом добавлении не прикрепляются.",
+        reply_markup=paypal_add_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(PaypalAddForm.bulk)
+async def paypal_add_bulk_input(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    raw_items = (message.text or "").replace(",", " ").replace(";", " ").split()
+    tags = []
+    seen = set()
+    invalid = 0
+    for raw in raw_items:
+        tag = normalize_paypal_tag(raw)
+        if not tag:
+            invalid += 1
+            continue
+        key = tag.lower()
+        if key not in seen:
+            seen.add(key)
+            tags.append(tag)
+    if not tags:
+        await message.answer("Не найдено ни одного корректного PayPal-тега.", reply_markup=paypal_add_cancel_menu())
+        return
+    added, duplicates = await add_paypal_tags(tags)
+    await state.clear()
+    await message.answer(
+        "✅ <b>Массовое добавление завершено</b>\n\n"
+        f"Добавлено: <b>{added}</b>\n"
+        f"Уже были в базе: <b>{duplicates}</b>\n"
+        f"Некорректных: <b>{invalid}</b>",
+        reply_markup=paypal_database_menu(await get_paypal_database_counts()),
+    )
+
+
 @router.message(Command("addtags"))
 async def add_tags_handler(message: Message) -> None:
     if not is_admin(message.from_user.id):
@@ -1441,16 +1621,17 @@ async def admin_issue(callback: CallbackQuery) -> None:
         return
     await set_request_status(request_id, "paypal_issued", callback.from_user.id)
 
+    issued_caption = (
+        "✅ <b>PayPal выдан</b>\n\n"
+        f"Заявка: <b>#{req.id}</b>\n"
+        f"Сумма: <b>{req.amount} €</b>\n"
+        f"PayPal: <code>{tag.tag}</code>\n\n"
+        "После оплаты нажмите кнопку ниже."
+    )
     await callback.bot.send_photo(
         req.user_id,
-        photo=FSInputFile(BANNERS["issued"]),
-        caption=(
-            "✅ <b>PayPal выдан</b>\n\n"
-            f"Заявка: <b>#{req.id}</b>\n"
-            f"Сумма: <b>{req.amount} €</b>\n"
-            f"PayPal: <code>{tag.tag}</code>\n\n"
-            "После оплаты нажмите кнопку ниже."
-        ),
+        photo=tag.photo_file_id or FSInputFile(BANNERS["issued"]),
+        caption=issued_caption,
         reply_markup=paid_button(req.id),
     )
     try:
