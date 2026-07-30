@@ -32,9 +32,11 @@ def membership_admin_menu(user_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def admin_main_menu(pending_count: int = 0) -> InlineKeyboardMarkup:
+def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeyboardMarkup:
     pending_label = f"👥 Участники · {pending_count} ждут" if pending_count else "👥 Участники"
+    queue_label = f"📥 Очередь PayPal ({queue_count})"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=queue_label, callback_data="paypal_queue:0")],
         [InlineKeyboardButton(text=pending_label, callback_data="members_menu")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_home")],
     ])
@@ -97,18 +99,41 @@ def cancel_search_menu() -> InlineKeyboardMarkup:
     ])
 
 
-def amounts_menu() -> InlineKeyboardMarkup:
+def request_cancel_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отменить заявку", callback_data="request_cancel")],
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="home")],
+    ])
+
+
+def paypal_queue_menu(requests: list, offset: int, page_size: int, has_next: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for req in requests:
+        rows.append([InlineKeyboardButton(
+            text=f"#{req.id} · {req.amount} € · ID {req.user_id}",
+            callback_data=f"queue_card:{req.id}"
+        )])
+    navigation: list[InlineKeyboardButton] = []
+    if offset > 0:
+        navigation.append(InlineKeyboardButton(text="⬅️", callback_data=f"paypal_queue:{max(0, offset-page_size)}"))
+    if has_next:
+        navigation.append(InlineKeyboardButton(text="➡️", callback_data=f"paypal_queue:{offset+page_size}"))
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"paypal_queue:{offset}")])
+    rows.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def queue_request_menu(request_id: int, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="50 €", callback_data="amount:50"),
-            InlineKeyboardButton(text="100 €", callback_data="amount:100"),
-            InlineKeyboardButton(text="150 €", callback_data="amount:150"),
+            InlineKeyboardButton(text="✅ Выдать PayPal", callback_data=f"admin_issue:{request_id}"),
+            InlineKeyboardButton(text="❌ Отказать", callback_data=f"admin_reject:{request_id}"),
         ],
-        [
-            InlineKeyboardButton(text="200 €", callback_data="amount:200"),
-            InlineKeyboardButton(text="300 €", callback_data="amount:300"),
-        ],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="home")],
+        [InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"queue_block:{request_id}:{user_id}")],
+        [InlineKeyboardButton(text="💬 Написать", url=f"tg://user?id={user_id}")],
+        [InlineKeyboardButton(text="⬅️ К очереди", callback_data="paypal_queue:0")],
     ])
 
 

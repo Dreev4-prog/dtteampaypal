@@ -11,6 +11,8 @@ from app.config import settings
 from app.db import (
     add_paypal_tags,
     count_available_tags,
+    count_active_requests,
+    count_waiting_requests,
     count_user_paypals,
     create_request,
     get_or_create_user,
@@ -19,6 +21,7 @@ from app.db import (
     get_user_requests,
     get_user_counts,
     list_users,
+    list_waiting_requests,
     search_users,
     issue_paypal,
     mark_paid_by_user,
@@ -30,7 +33,9 @@ from app.keyboards import (
     admin_check_menu,
     admin_main_menu,
     admin_request_menu,
-    amounts_menu,
+    request_cancel_menu,
+    paypal_queue_menu,
+    queue_request_menu,
     back_home,
     main_menu,
     membership_admin_menu,
@@ -47,6 +52,11 @@ router = Router()
 
 class MemberSearch(StatesGroup):
     query = State()
+
+
+class PaypalRequestForm(StatesGroup):
+    amount = State()
+    screenshot = State()
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
@@ -264,46 +274,117 @@ async def membership_block(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "paypal_request")
-async def paypal_request(callback: CallbackQuery) -> None:
+async def paypal_request(callback: CallbackQuery, state: FSMContext) -> None:
     if not await has_access(callback):
         return
+    active = await count_active_requests(callback.from_user.id)
+    if active >= 2:
+        await callback.answer(
+            "У вас уже есть 2 активные заявки. Дождитесь обработки одной из них.",
+            show_alert=True,
+        )
+        return
+    await state.clear()
+    await state.set_state(PaypalRequestForm.amount)
     await render_screen(
         callback,
         "paypal",
-        "<b>Запросить PayPal</b>\n\n"
-        "Выберите сумму, на которую хотите запросить PayPal:",
-        amounts_menu(),
+        "<b>Новая заявка PayPal</b>\n\n"
+        "Введите необходимую сумму в евро одним числом.\n"
+        "Например: <code>75</code>",
+        request_cancel_menu(),
     )
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("amount:"))
-async def choose_amount(callback: CallbackQuery) -> None:
-    if not await has_access(callback):
+@router.message(PaypalRequestForm.amount)
+async def paypal_amount_input(message: Message, state: FSMContext) -> None:
+    user = await get_user(message.from_user.id)
+    if user is None or user.status != "approved":
+        await state.clear()
         return
-    amount = int(callback.data.split(":")[1])
-    req = await create_request(callback.from_user.id, amount)
-
-    await render_screen(
-        callback,
-        "requests",
-        f"✅ Заявка <b>#{req.id}</b> создана.\n\n"
-        f"Сумма: <b>{amount} €</b>\n"
-        "Статус: ⏳ ожидает выдачи PayPal.",
-        back_home(),
+    raw = (message.text or "").strip().replace("€", "").replace(" ", "")
+    if not raw.isdigit():
+        await message.answer("Введите сумму целым числом, например: <code>75</code>", reply_markup=request_cancel_menu())
+        return
+    amount = int(raw)
+    if amount < 1 or amount > 100000:
+        await message.answer("Введите сумму от 1 до 100000 €.", reply_markup=request_cancel_menu())
+        return
+    active = await count_active_requests(message.from_user.id)
+    if active >= 2:
+        await state.clear()
+        await message.answer("❌ У вас уже есть 2 активные заявки. Дождитесь обработки одной из них.", reply_markup=back_home())
+        return
+    await state.update_data(amount=amount)
+    await state.set_state(PaypalRequestForm.screenshot)
+    await message.answer(
+        "📷 <b>Подтверждение</b>\n\n"
+        "Пришлите скриншот, подтверждающий, что вы готовы оплатить через "
+        "PayPal Friends & Family.\n\n"
+        "Нужно отправить именно фотографию или изображение.",
+        reply_markup=request_cancel_menu(),
     )
 
-    username = f"@{callback.from_user.username}" if callback.from_user.username else "без username"
+
+@router.message(PaypalRequestForm.screenshot, F.photo)
+async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
+    user = await get_user(message.from_user.id)
+    if user is None or user.status != "approved":
+        await state.clear()
+        return
+    active = await count_active_requests(message.from_user.id)
+    if active >= 2:
+        await state.clear()
+        await message.answer("❌ У вас уже есть 2 активные заявки.", reply_markup=back_home())
+        return
+    data = await state.get_data()
+    amount = int(data["amount"])
+    screenshot_file_id = message.photo[-1].file_id
+    req = await create_request(message.from_user.id, amount, screenshot_file_id)
+    await state.clear()
+
+    await message.answer(
+        f"✅ <b>Заявка #{req.id} принята</b>\n\n"
+        f"Сумма: <b>{amount} €</b>\n"
+        "Скриншот получен. Ожидайте выдачи PayPal.",
+        reply_markup=back_home(),
+    )
+
+    username = f"@{message.from_user.username}" if message.from_user.username else "без username"
+    caption = (
+        f"📥 <b>Новая заявка PayPal #{req.id}</b>\n\n"
+        f"👤 {message.from_user.full_name}\n"
+        f"Username: {username}\n"
+        f"🆔 <code>{message.from_user.id}</code>\n"
+        f"💶 Сумма: <b>{amount} €</b>\n"
+        "📷 Подтверждение Friends & Family приложено."
+    )
     for admin_id in settings.admin_ids:
-        await callback.bot.send_message(
-            admin_id,
-            f"🆕 <b>Новая заявка #{req.id}</b>\n"
-            f"Пользователь: {username}\n"
-            f"ID: <code>{callback.from_user.id}</code>\n"
-            f"Сумма: <b>{amount} €</b>",
-            reply_markup=admin_request_menu(req.id),
-        )
-    await callback.answer("Заявка создана")
+        try:
+            await message.bot.send_photo(
+                admin_id,
+                photo=screenshot_file_id,
+                caption=caption,
+                reply_markup=queue_request_menu(req.id, req.user_id),
+            )
+        except Exception:
+            pass
+
+
+@router.message(PaypalRequestForm.screenshot)
+async def paypal_screenshot_invalid(message: Message) -> None:
+    await message.answer(
+        "Пришлите скриншот как фотографию/изображение. Документ или текст не подойдут.",
+        reply_markup=request_cancel_menu(),
+    )
+
+
+@router.callback_query(F.data == "request_cancel")
+async def request_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await show_home(callback)
+    await callback.answer("Заявка отменена")
 
 
 @router.callback_query(F.data == "my_requests")
@@ -386,19 +467,28 @@ async def support(callback: CallbackQuery) -> None:
 async def show_admin_home(target: Message | CallbackQuery) -> None:
     available = await count_available_tags()
     counts = await get_user_counts()
+    queue_count = await count_waiting_requests()
     text = (
         "👨‍💼 <b>Админ-панель</b>\n\n"
         f"👥 Всего пользователей: <b>{counts['all']}</b>\n"
         f"🟡 Ожидают решения: <b>{counts['pending']}</b>\n"
-        f"💳 Свободных PayPal: <b>{available}</b>\n\n"
+        f"💳 Свободных PayPal: <b>{available}</b>\n"
+        f"📥 В очереди PayPal: <b>{queue_count}</b>\n\n"
         "Добавление тегов пока доступно командой:\n"
         "<code>/addtags @tag1 @tag2 @tag3</code>"
     )
-    markup = admin_main_menu(counts["pending"])
+    markup = admin_main_menu(counts["pending"], queue_count)
     if isinstance(target, Message):
         await target.answer(text, reply_markup=markup)
     else:
-        await target.message.edit_text(text, reply_markup=markup)
+        if target.message.photo:
+            try:
+                await target.message.delete()
+            except TelegramBadRequest:
+                pass
+            await target.bot.send_message(target.message.chat.id, text, reply_markup=markup)
+        else:
+            await target.message.edit_text(text, reply_markup=markup)
 
 
 @router.message(Command("admin"))
@@ -416,6 +506,92 @@ async def admin_home(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await show_admin_home(callback)
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("paypal_queue:"))
+async def paypal_queue_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    offset = max(0, int(callback.data.split(":", 1)[1]))
+    page_size = 10
+    requests, has_next = await list_waiting_requests(offset=offset, limit=page_size)
+    page = offset // page_size + 1
+    text = f"📥 <b>Очередь PayPal</b>\nСтраница: <b>{page}</b>\n\n"
+    text += "Нажмите на заявку для просмотра скриншота и обработки." if requests else "Очередь пуста."
+    markup = paypal_queue_menu(requests, offset, page_size, has_next)
+    if callback.message.photo:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
+        await callback.bot.send_message(callback.message.chat.id, text, reply_markup=markup)
+    else:
+        await callback.message.edit_text(text, reply_markup=markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("queue_card:"))
+async def queue_card_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":", 1)[1])
+    req = await get_request(request_id)
+    if req is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    user = await get_user(req.user_id)
+    username = f"@{user.username}" if user and user.username else "не указан"
+    name = user.full_name if user and user.full_name else "не указано"
+    caption = (
+        f"📄 <b>Заявка PayPal #{req.id}</b>\n\n"
+        f"👤 {name}\n"
+        f"Username: {username}\n"
+        f"🆔 <code>{req.user_id}</code>\n"
+        f"💶 Сумма: <b>{req.amount} €</b>\n"
+        f"Статус: <b>{req.status}</b>\n"
+        f"Создана: {format_dt(req.created_at)}"
+    )
+    if req.screenshot_file_id:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
+        await callback.bot.send_photo(
+            callback.message.chat.id,
+            photo=req.screenshot_file_id,
+            caption=caption,
+            reply_markup=queue_request_menu(req.id, req.user_id),
+        )
+    else:
+        await callback.message.edit_text(caption, reply_markup=queue_request_menu(req.id, req.user_id))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("queue_block:"))
+async def queue_block_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, request_id_raw, user_id_raw = callback.data.split(":", 2)
+    request_id = int(request_id_raw)
+    user_id = int(user_id_raw)
+    await set_user_access_status(user_id, "blocked", callback.from_user.id)
+    req = await set_request_status(request_id, "rejected", callback.from_user.id)
+    try:
+        await callback.bot.send_message(user_id, "🚫 Ваш доступ заблокирован. Заявка PayPal отклонена.")
+    except Exception:
+        pass
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=(callback.message.html_text or callback.message.caption or "") + "\n\n🚫 Пользователь заблокирован")
+        else:
+            await callback.message.edit_text((callback.message.html_text or "") + "\n\n🚫 Пользователь заблокирован")
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Пользователь заблокирован")
 
 
 @router.callback_query(F.data == "members_menu")
@@ -609,6 +785,7 @@ async def admin_issue(callback: CallbackQuery) -> None:
     if tag is None:
         await callback.answer("Нет свободных PayPal или заявка уже обработана", show_alert=True)
         return
+    await set_request_status(request_id, "paypal_issued", callback.from_user.id)
 
     await callback.bot.send_photo(
         req.user_id,
@@ -622,9 +799,15 @@ async def admin_issue(callback: CallbackQuery) -> None:
         ),
         reply_markup=paid_button(req.id),
     )
-    await callback.message.edit_text(
-        callback.message.html_text + f"\n\n✅ Выдан: <code>{tag.tag}</code>"
-    )
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(
+                caption=(callback.message.html_text or callback.message.caption or "") + f"\n\n✅ Выдан: <code>{tag.tag}</code>"
+            )
+        else:
+            await callback.message.edit_text((callback.message.html_text or "") + f"\n\n✅ Выдан: <code>{tag.tag}</code>")
+    except TelegramBadRequest:
+        pass
     await callback.answer("PayPal выдан")
 
 
@@ -664,7 +847,7 @@ async def admin_confirm(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         return
     request_id = int(callback.data.split(":")[1])
-    req = await set_request_status(request_id, "paid")
+    req = await set_request_status(request_id, "paid", callback.from_user.id)
     if req is None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
@@ -683,7 +866,7 @@ async def admin_not_found(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         return
     request_id = int(callback.data.split(":")[1])
-    req = await set_request_status(request_id, "not_found")
+    req = await set_request_status(request_id, "not_found", callback.from_user.id)
     if req is None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
@@ -702,7 +885,7 @@ async def admin_reject(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         return
     request_id = int(callback.data.split(":")[1])
-    req = await set_request_status(request_id, "rejected")
+    req = await set_request_status(request_id, "rejected", callback.from_user.id)
     if req is None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
@@ -712,5 +895,11 @@ async def admin_reject(callback: CallbackQuery) -> None:
         caption=f"❌ Заявка #{req.id} отклонена администратором.",
         reply_markup=back_home(),
     )
-    await callback.message.edit_text(callback.message.html_text + "\n\n❌ Отклонено")
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(caption=(callback.message.html_text or callback.message.caption or "") + "\n\n❌ Отклонено")
+        else:
+            await callback.message.edit_text((callback.message.html_text or "") + "\n\n❌ Отклонено")
+    except TelegramBadRequest:
+        pass
     await callback.answer()

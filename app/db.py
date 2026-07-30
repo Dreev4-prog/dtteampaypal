@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, select, text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -44,6 +44,9 @@ class Request(Base):
     amount: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), default="waiting_issue", index=True)
     paypal_tag_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("paypal_tags.id"), nullable=True)
+    screenshot_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    processed_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -69,6 +72,11 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE users ALTER COLUMN status SET DEFAULT 'pending'"))
         await conn.execute(text("ALTER TABLE users ALTER COLUMN status SET NOT NULL"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_status ON users (status)"))
+
+        # v1.4: произвольная сумма, скриншот и история обработки заявок.
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS screenshot_file_id VARCHAR(512)"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS processed_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS processed_by BIGINT"))
 
 
 async def get_or_create_user(user_id: int, username: str | None, full_name: str | None = None) -> User:
@@ -134,9 +142,19 @@ async def add_paypal_tags(tags: list[str]) -> tuple[int, int]:
     return added, duplicates
 
 
-async def create_request(user_id: int, amount: int) -> Request:
+async def count_active_requests(user_id: int) -> int:
+    active_statuses = {"waiting_issue", "paypal_issued", "waiting_check"}
     async with SessionLocal() as session:
-        req = Request(user_id=user_id, amount=amount)
+        return int(await session.scalar(
+            select(func.count()).select_from(Request).where(
+                Request.user_id == user_id, Request.status.in_(active_statuses)
+            )
+        ) or 0)
+
+
+async def create_request(user_id: int, amount: int, screenshot_file_id: str | None = None) -> Request:
+    async with SessionLocal() as session:
+        req = Request(user_id=user_id, amount=amount, screenshot_file_id=screenshot_file_id)
         session.add(req)
         await session.commit()
         await session.refresh(req)
@@ -171,6 +189,7 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
 
             req.paypal_tag_id = tag.id
             req.status = "paypal_issued"
+            req.processed_at = datetime.utcnow()
             req.updated_at = datetime.utcnow()
 
         await session.refresh(req)
@@ -189,13 +208,16 @@ async def mark_paid_by_user(request_id: int, user_id: int) -> bool:
         return True
 
 
-async def set_request_status(request_id: int, status: str) -> Request | None:
+async def set_request_status(request_id: int, status: str, admin_id: int | None = None) -> Request | None:
     async with SessionLocal() as session:
         req = await session.get(Request, request_id)
         if req is None:
             return None
         req.status = status
         req.updated_at = datetime.utcnow()
+        if admin_id is not None:
+            req.processed_by = admin_id
+            req.processed_at = datetime.utcnow()
         await session.commit()
         await session.refresh(req)
         return req
@@ -264,3 +286,22 @@ async def count_user_paypals(user_id: int) -> int:
         return int(await session.scalar(
             select(func.count()).select_from(PaypalTag).where(PaypalTag.issued_to_user_id == user_id)
         ) or 0)
+
+
+async def count_waiting_requests() -> int:
+    async with SessionLocal() as session:
+        return int(await session.scalar(
+            select(func.count()).select_from(Request).where(Request.status == "waiting_issue")
+        ) or 0)
+
+
+async def list_waiting_requests(offset: int = 0, limit: int = 10) -> tuple[list[Request], bool]:
+    async with SessionLocal() as session:
+        rows = list(await session.scalars(
+            select(Request)
+            .where(Request.status == "waiting_issue")
+            .order_by(Request.created_at.asc(), Request.id.asc())
+            .offset(offset)
+            .limit(limit + 1)
+        ))
+        return rows[:limit], len(rows) > limit
