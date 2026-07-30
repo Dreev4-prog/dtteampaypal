@@ -197,7 +197,7 @@ async def add_paypal_tags(tags: list[str]) -> tuple[int, int]:
 
 
 async def count_active_requests(user_id: int) -> int:
-    active_statuses = {"waiting_issue", "paypal_issued", "waiting_check", "payout_pending", "not_found"}
+    active_statuses = {"waiting_issue"}
     async with SessionLocal() as session:
         return int(await session.scalar(
             select(func.count()).select_from(Request).where(
@@ -310,6 +310,42 @@ async def get_user_requests(user_id: int) -> list[Request]:
             .limit(10)
         )
         return list(rows)
+
+
+async def get_user_requests_by_statuses(user_id: int, statuses: tuple[str, ...], limit: int = 50) -> list[Request]:
+    async with SessionLocal() as session:
+        rows = await session.scalars(
+            select(Request)
+            .where(Request.user_id == user_id, Request.status.in_(statuses))
+            .order_by(Request.updated_at.desc(), Request.id.desc())
+            .limit(limit)
+        )
+        return list(rows)
+
+
+async def get_user_profit_summary(user_id: int) -> dict[str, float | int | datetime | None]:
+    async with SessionLocal() as session:
+        total, count, last_at = (await session.execute(
+            select(
+                func.coalesce(func.sum(Request.payout_amount), 0),
+                func.count(Request.id),
+                func.max(Request.payout_at),
+            ).where(Request.user_id == user_id, Request.status == "paid_out")
+        )).one()
+        pending = await session.scalar(
+            select(func.coalesce(func.sum(Request.payout_amount), 0)).where(
+                Request.user_id == user_id, Request.status == "payout_pending"
+            )
+        )
+        count_int = int(count or 0)
+        total_float = float(total or 0)
+        return {
+            "total": total_float,
+            "count": count_int,
+            "average": total_float / count_int if count_int else 0.0,
+            "last_at": last_at,
+            "pending": float(pending or 0),
+        }
 
 
 async def count_available_tags() -> int:

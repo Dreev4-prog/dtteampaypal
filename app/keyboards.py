@@ -3,9 +3,10 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Запросить PayPal", callback_data="paypal_request")],
         [
-            InlineKeyboardButton(text="💳 Запросить PayPal", callback_data="paypal_request"),
-            InlineKeyboardButton(text="📋 Мои заявки", callback_data="my_requests"),
+            InlineKeyboardButton(text="📂 Мои PayPal", callback_data="my_paypals"),
+            InlineKeyboardButton(text="📈 Мои профиты", callback_data="my_profits"),
         ],
         [
             InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
@@ -267,3 +268,22 @@ def finance_menu() -> InlineKeyboardMarkup:
 
 def rate_cancel_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="rates_menu")]])
+
+
+def my_paypals_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📨 Запросы на PayPal ({counts.get('requests', 0)})", callback_data="my_paypals_list:requests")],
+        [InlineKeyboardButton(text=f"💳 Ожидают оплаты ({counts.get('waiting', 0)})", callback_data="my_paypals_list:waiting")],
+        [InlineKeyboardButton(text=f"🟠 На проверке ({counts.get('check', 0)})", callback_data="my_paypals_list:check")],
+        [InlineKeyboardButton(text=f"🟢 Ожидают выплату ({counts.get('payout', 0)})", callback_data="my_paypals_list:payout")],
+        [InlineKeyboardButton(text=f"✅ Выплаченные ({counts.get('paid', 0)})", callback_data="my_paypals_list:paid")],
+        [InlineKeyboardButton(text=f"❌ Не оплаченные/отклонённые ({counts.get('closed', 0)})", callback_data="my_paypals_list:closed")],
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="home")],
+    ])
+
+
+def my_paypals_back_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Мои PayPal", callback_data="my_paypals")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+    ])

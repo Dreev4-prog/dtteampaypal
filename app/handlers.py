@@ -19,6 +19,8 @@ from app.db import (
     get_user,
     get_request,
     get_user_requests,
+    get_user_requests_by_statuses,
+    get_user_profit_summary,
     get_user_counts,
     list_users,
     list_waiting_requests,
@@ -67,6 +69,8 @@ from app.keyboards import (
     rates_menu,
     finance_menu,
     rate_cancel_menu,
+    my_paypals_menu,
+    my_paypals_back_menu,
 )
 
 router = Router()
@@ -420,7 +424,112 @@ async def request_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Заявка отменена")
 
 
-@router.callback_query(F.data == "my_requests")
+MY_PAYPAL_GROUPS = {
+    "requests": (("waiting_issue",), "📨 Запросы на PayPal"),
+    "waiting": (("paypal_issued",), "💳 Ожидают оплаты"),
+    "check": (("waiting_check",), "🟠 На проверке"),
+    "payout": (("payout_pending", "paid"), "🟢 Ожидают выплату"),
+    "paid": (("paid_out",), "✅ Выплаченные"),
+    "closed": (("not_found", "rejected"), "❌ Не оплаченные/отклонённые"),
+}
+
+
+def _user_request_line(req, paypal_tag: str | None = None) -> str:
+    tag_line = f"\n💳 PayPal: <code>{paypal_tag}</code>" if paypal_tag else ""
+    payout_line = ""
+    if req.payout_amount is not None:
+        payout_line = f"\n💸 К выплате: <b>{float(req.payout_amount):.2f} €</b>"
+    return (
+        f"<b>Заявка #{req.id}</b>\n"
+        f"💶 Сумма: <b>{req.amount} €</b>"
+        f"{tag_line}{payout_line}\n"
+        f"🕒 Обновлено: {format_dt(req.updated_at)}"
+    )
+
+
+@router.callback_query(F.data.in_({"my_paypals", "my_requests"}))
+async def my_paypals(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+
+    counts: dict[str, int] = {}
+    for key, (statuses, _) in MY_PAYPAL_GROUPS.items():
+        counts[key] = len(await get_user_requests_by_statuses(callback.from_user.id, statuses, limit=1000))
+
+    summary = await get_user_profit_summary(callback.from_user.id)
+    text = (
+        "<b>💳 Мои PayPal</b>\n\n"
+        "Здесь отображаются все ваши заявки по этапам.\n\n"
+        f"📨 Запросов, ожидающих выдачи: <b>{counts['requests']}</b> из 2\n"
+        f"💰 Сейчас ожидает выплаты: <b>{summary['pending']:.2f} €</b>\n\n"
+        "Лимит в 2 заявки учитывает только запросы, по которым PayPal ещё не выдан."
+    )
+    await render_screen(callback, "requests", text, my_paypals_menu(counts))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("my_paypals_list:"))
+async def my_paypals_list(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+    group = callback.data.split(":", 1)[1]
+    config = MY_PAYPAL_GROUPS.get(group)
+    if config is None:
+        await callback.answer("Раздел не найден", show_alert=True)
+        return
+
+    statuses, title = config
+    requests = await get_user_requests_by_statuses(callback.from_user.id, statuses, limit=8)
+    if not requests:
+        text = f"<b>{title}</b>\n\nВ этом разделе пока нет заявок."
+    else:
+        status_names = {
+            "waiting_issue": "ожидает выдачи PayPal",
+            "paypal_issued": "ожидает оплаты",
+            "waiting_check": "платёж проверяется",
+            "payout_pending": "ожидает выплаты",
+            "paid": "ожидает выплаты",
+            "paid_out": "выплачено",
+            "not_found": "оплата не найдена",
+            "rejected": "отклонено",
+        }
+        blocks = [f"<b>{title}</b>", ""]
+        for req in requests:
+            tag = await get_paypal_tag(req.paypal_tag_id)
+            blocks.append(_user_request_line(req, tag.tag if tag else None))
+            blocks.append(f"📌 Статус: <b>{status_names.get(req.status, req.status)}</b>")
+            blocks.append("━━━━━━━━━━━━")
+        text = "\n".join(blocks)
+
+    await render_screen(callback, "requests", text, my_paypals_back_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "my_profits")
+async def my_profits(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+    summary = await get_user_profit_summary(callback.from_user.id)
+    paid_requests = await get_user_requests_by_statuses(callback.from_user.id, ("paid_out",), limit=10)
+    last_payment = format_dt(summary["last_at"]) if summary["last_at"] else "пока не было"
+    lines = [
+        "<b>📈 Мои профиты</b>",
+        "",
+        f"💰 Выплачено всего: <b>{summary['total']:.2f} €</b>",
+        f"📄 Всего выплат: <b>{summary['count']}</b>",
+        f"💶 Средняя выплата: <b>{summary['average']:.2f} €</b>",
+        f"🟢 Ожидает выплаты: <b>{summary['pending']:.2f} €</b>",
+        f"📅 Последняя выплата: <b>{last_payment}</b>",
+    ]
+    if paid_requests:
+        lines.extend(["", "<b>Последние выплаты:</b>"])
+        for req in paid_requests:
+            lines.append(f"• #{req.id} · <b>{float(req.payout_amount or 0):.2f} €</b> · {format_dt(req.payout_at)}")
+    await render_screen(callback, "profile", "\n".join(lines), back_home())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "my_requests_legacy")
 async def my_requests(callback: CallbackQuery) -> None:
     if not await has_access(callback):
         return
