@@ -36,6 +36,11 @@ from app.db import (
     return_to_payment_check,
     mark_payout_done,
     update_request_amount,
+    get_rate_for_amount,
+    list_rate_rules,
+    upsert_rate_rule,
+    delete_rate_rule,
+    get_finance_summary,
 )
 from app.keyboards import (
     admin_check_menu,
@@ -59,6 +64,9 @@ from app.keyboards import (
     payout_confirmation_menu,
     user_amount_confirmation_menu,
     admin_amount_confirmation_menu,
+    rates_menu,
+    finance_menu,
+    rate_cancel_menu,
 )
 
 router = Router()
@@ -77,6 +85,11 @@ class PaymentAmountForm(StatesGroup):
     user_amount = State()
     admin_amount = State()
     admin_edit_amount = State()
+
+
+class RateForm(StatesGroup):
+    add_rule = State()
+    edit_rule = State()
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
@@ -491,6 +504,7 @@ async def show_admin_home(target: Message | CallbackQuery) -> None:
     counts = await get_user_counts()
     queue_count = await count_waiting_requests()
     payment_counts = await get_payment_counts()
+    finance = await get_finance_summary()
     text = (
         "👨‍💼 <b>Админ-панель</b>\n\n"
         f"👥 Всего пользователей: <b>{counts['all']}</b>\n"
@@ -498,7 +512,9 @@ async def show_admin_home(target: Message | CallbackQuery) -> None:
         f"💳 Свободных PayPal: <b>{available}</b>\n"
         f"📥 В очереди PayPal: <b>{queue_count}</b>\n"
         f"🟠 Оплат на проверке: <b>{payment_counts['check']}</b>\n"
-        f"🟢 Нужно выплатить: <b>{payment_counts['payout']}</b>\n\n"
+        f"🟢 Нужно выплатить: <b>{payment_counts['payout']}</b>\n"
+        f"💸 Сумма к выплате: <b>{finance['pending']:.2f} €</b>\n"
+        f"📈 Общая прибыль: <b>{finance['profit']:.2f} €</b>\n\n"
         "Добавление тегов пока доступно командой:\n"
         "<code>/addtags @tag1 @tag2 @tag3</code>"
     )
@@ -878,8 +894,9 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
         f"Username: {username}\n"
         f"🆔 <code>{req.user_id}</code>\n\n"
         f"💳 PayPal: <code>{tag.tag if tag else 'не найден'}</code>\n"
-        f"💶 Сумма: <b>{req.amount} €</b>\n\n"
-        f"Статус: <b>{status_names.get(req.status, req.status)}</b>\n\n"
+        f"💶 Сумма: <b>{req.amount} €</b>\n"
+        + (f"📊 Процент: <b>{req.payout_percent}%</b>\n💸 К выплате: <b>{float(req.payout_amount):.2f} €</b>\n" if req.payout_percent is not None and req.payout_amount is not None else "")
+        + f"\nСтатус: <b>{status_names.get(req.status, req.status)}</b>\n\n"
         f"📅 Создана: {format_dt(req.created_at)}\n"
         f"📤 PayPal выдан: {format_dt(req.processed_at)}\n"
         f"✅ Нажал «Я оплатил»: {format_dt(req.paid_clicked_at)}\n"
@@ -957,7 +974,8 @@ async def payout_confirm_handler(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
         "💸 <b>Подтверждение выплаты</b>\n\n"
         f"Клиент: {username}\n"
-        f"Сумма: <b>{req.amount} €</b>\n\n"
+        f"Получено: <b>{req.amount} €</b>\n"
+        f"К выплате: <b>{float(req.payout_amount or 0):.2f} €</b>\n\n"
         "Подтвердите, что деньги действительно отправлены клиенту.",
         reply_markup=payout_confirmation_menu(req.id),
     )
@@ -977,7 +995,7 @@ async def payout_done_handler(callback: CallbackQuery) -> None:
     try:
         await callback.bot.send_message(
             req.user_id,
-            f"✅ <b>Выплата по заявке #{req.id} выполнена</b>\n\nСумма: <b>{req.amount} €</b>",
+            f"✅ <b>Выплата по заявке #{req.id} выполнена</b>\n\nСумма выплаты: <b>{float(req.payout_amount or 0):.2f} €</b>",
             reply_markup=back_home(),
         )
     except Exception:
@@ -1163,7 +1181,7 @@ async def finish_admin_confirm(callback_or_message, request_id: int, admin_id: i
         await callback_or_message.bot.send_photo(
             req.user_id,
             photo=FSInputFile(BANNERS["issued"]),
-            caption=(f"✅ <b>Оплата по заявке #{req.id} подтверждена</b>\n\nСумма: <b>{req.amount} €</b>\nЗаявка передана на выплату."),
+            caption=(f"✅ <b>Платёж произведён успешно</b>\n\nСумма: <b>{req.amount} €</b>\nВаш процент: <b>{req.payout_percent}%</b>\nСумма к выплате: <b>{float(req.payout_amount or 0):.2f} €</b>\n\nОжидайте выплату от администрации."),
             reply_markup=back_home(),
         )
     except Exception:
@@ -1182,7 +1200,7 @@ async def admin_confirm_same(callback: CallbackQuery) -> None:
         await callback.answer("Заявка уже обработана", show_alert=True)
         return
     await callback.message.edit_text(
-        f"✅ Оплата по заявке #{req.id} подтверждена.\nСумма: <b>{req.amount} €</b>\n\nЗаявка перемещена в «🟢 Нужно выплатить».",
+        f"✅ Оплата по заявке #{req.id} подтверждена.\nСумма: <b>{req.amount} €</b>\nПроцент: <b>{req.payout_percent}%</b>\nК выплате: <b>{float(req.payout_amount or 0):.2f} €</b>\n\nЗаявка перемещена в «🟢 Нужно выплатить».",
         reply_markup=payments_menu(await get_payment_counts()),
     )
     await callback.answer("Оплата подтверждена")
@@ -1230,7 +1248,7 @@ async def admin_paid_amount_input(message: Message, state: FSMContext) -> None:
         await message.answer("Заявка уже обработана или недоступна.")
         return
     await message.answer(
-        f"✅ Оплата по заявке #{req.id} подтверждена.\nСумма обновлена: <b>{amount} €</b>.\nЗаявка перемещена в «🟢 Нужно выплатить».",
+        f"✅ Оплата по заявке #{req.id} подтверждена.\nСумма: <b>{amount} €</b>\nПроцент: <b>{req.payout_percent}%</b>\nК выплате: <b>{float(req.payout_amount or 0):.2f} €</b>\n\nЗаявка перемещена в «🟢 Нужно выплатить».",
         reply_markup=payments_menu(await get_payment_counts()),
     )
 
@@ -1283,4 +1301,106 @@ async def admin_reject(callback: CallbackQuery) -> None:
             await callback.message.edit_text((callback.message.html_text or "") + "\n\n❌ Отклонено")
     except TelegramBadRequest:
         pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rates_menu")
+async def rates_panel(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    rules = await list_rate_rules()
+    text = "⚙️ <b>Проценты выплат</b>\n\nБот выбирает самый высокий порог, который не превышает сумму.\nНапример: от 50 € — 60%, от 100 € — 70%."
+    await callback.message.edit_text(text, reply_markup=rates_menu(rules))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rate_add")
+async def rate_add_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(RateForm.add_rule)
+    await callback.message.edit_text(
+        "➕ <b>Новый диапазон</b>\n\nВведите минимальную сумму и процент через пробел.\nНапример: <code>150 80</code>",
+        reply_markup=rate_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rate_edit:"))
+async def rate_edit_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    rule_id = int(callback.data.split(":")[1])
+    rules = await list_rate_rules()
+    rule = next((r for r in rules if r.id == rule_id), None)
+    if rule is None:
+        await callback.answer("Правило не найдено", show_alert=True)
+        return
+    await state.set_state(RateForm.edit_rule)
+    await state.update_data(rate_min_amount=rule.min_amount)
+    await callback.message.edit_text(
+        f"✏️ Порог: <b>от {rule.min_amount} €</b>\nТекущий процент: <b>{rule.percent}%</b>\n\nВведите новый процент одним числом.",
+        reply_markup=rate_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(RateForm.add_rule)
+async def rate_add_input(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear(); return
+    parts = (message.text or "").replace("€", "").replace("%", "").split()
+    if len(parts) != 2 or not all(x.isdigit() for x in parts):
+        await message.answer("Введите два числа, например: <code>150 80</code>", reply_markup=rate_cancel_menu()); return
+    minimum, percent = map(int, parts)
+    if minimum < 1 or minimum > 100000 or percent < 1 or percent > 100:
+        await message.answer("Сумма: 1–100000 €, процент: 1–100.", reply_markup=rate_cancel_menu()); return
+    await upsert_rate_rule(minimum, percent)
+    await state.clear()
+    await message.answer(f"✅ Добавлено: от <b>{minimum} €</b> — <b>{percent}%</b>.", reply_markup=rates_menu(await list_rate_rules()))
+
+
+@router.message(RateForm.edit_rule)
+async def rate_edit_input(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear(); return
+    raw = (message.text or "").replace("%", "").strip()
+    if not raw.isdigit() or not 1 <= int(raw) <= 100:
+        await message.answer("Введите процент от 1 до 100.", reply_markup=rate_cancel_menu()); return
+    data = await state.get_data()
+    minimum, percent = int(data["rate_min_amount"]), int(raw)
+    await upsert_rate_rule(minimum, percent)
+    await state.clear()
+    await message.answer(f"✅ Для суммы от <b>{minimum} €</b> установлен процент <b>{percent}%</b>.", reply_markup=rates_menu(await list_rate_rules()))
+
+
+@router.callback_query(F.data.startswith("rate_delete:"))
+async def rate_delete_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    ok = await delete_rate_rule(int(callback.data.split(":")[1]))
+    if not ok:
+        await callback.answer("Нельзя удалить последнее правило", show_alert=True); return
+    await callback.message.edit_text("⚙️ <b>Проценты выплат</b>", reply_markup=rates_menu(await list_rate_rules()))
+    await callback.answer("Диапазон удалён")
+
+
+@router.callback_query(F.data == "finance_menu")
+async def finance_panel(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    data = await get_finance_summary()
+    text = (
+        "📊 <b>Финансы</b>\n\n"
+        f"💶 Подтверждено: <b>{data['received']:.2f} €</b>\n"
+        f"💸 Начислено клиентам: <b>{data['payout']:.2f} €</b>\n"
+        f"🟢 Сейчас к выплате: <b>{data['pending']:.2f} €</b>\n"
+        f"✅ Уже выплачено: <b>{data['paid']:.2f} €</b>\n"
+        f"📈 Прибыль DT Team: <b>{data['profit']:.2f} €</b>"
+    )
+    await callback.message.edit_text(text, reply_markup=finance_menu())
     await callback.answer()

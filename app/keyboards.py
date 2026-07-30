@@ -37,6 +37,7 @@ def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeybo
     queue_label = f"📥 Очередь PayPal ({queue_count})"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Платежи", callback_data="payments_menu")],
+        [InlineKeyboardButton(text="📊 Финансы", callback_data="finance_menu"), InlineKeyboardButton(text="⚙️ Проценты", callback_data="rates_menu")],
         [InlineKeyboardButton(text=queue_label, callback_data="paypal_queue:0")],
         [InlineKeyboardButton(text=pending_label, callback_data="members_menu")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_home")],
@@ -244,3 +245,25 @@ def admin_amount_confirmation_menu(request_id: int, amount: int) -> InlineKeyboa
         [InlineKeyboardButton(text="✏️ Изменить сумму", callback_data=f"admin_confirm_change:{request_id}")],
         [InlineKeyboardButton(text="↩️ Отмена", callback_data=f"payment_card:{request_id}:check:0")],
     ])
+
+
+def rates_menu(rules: list) -> InlineKeyboardMarkup:
+    rows = []
+    for rule in rules:
+        rows.append([
+            InlineKeyboardButton(text=f"От {rule.min_amount} € — {rule.percent}%", callback_data=f"rate_edit:{rule.id}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"rate_delete:{rule.id}"),
+        ])
+    rows.append([InlineKeyboardButton(text="➕ Добавить диапазон", callback_data="rate_add")])
+    rows.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def finance_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="finance_menu")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
+    ])
+
+def rate_cancel_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="rates_menu")]])

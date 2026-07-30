@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, select, text, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -52,8 +52,19 @@ class Request(Base):
     payment_confirmed_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     payout_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     payout_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    payout_percent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    payout_amount: Mapped[Optional[float]] = mapped_column(Numeric(12, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class RateRule(Base):
+    __tablename__ = "rate_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    min_amount: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    percent: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
@@ -92,6 +103,24 @@ async def init_db() -> None:
         # Старые подтверждённые оплаты становятся ожидающими выплаты.
         await conn.execute(text("UPDATE requests SET status = 'payout_pending' WHERE status = 'paid'"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_requests_status ON requests (status)"))
+
+        # v1.6: автоматический расчёт процентов и суммы к выплате.
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_percent INTEGER"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_amount NUMERIC(12,2)"))
+        await conn.execute(text("INSERT INTO rate_rules (min_amount, percent) VALUES (50, 60) ON CONFLICT (min_amount) DO NOTHING"))
+        await conn.execute(text("INSERT INTO rate_rules (min_amount, percent) VALUES (100, 70) ON CONFLICT (min_amount) DO NOTHING"))
+        await conn.execute(text("""
+            UPDATE requests r
+            SET payout_percent = rr.percent,
+                payout_amount = ROUND((r.amount * rr.percent / 100.0)::numeric, 2)
+            FROM LATERAL (
+                SELECT percent FROM rate_rules
+                WHERE min_amount <= r.amount
+                ORDER BY min_amount DESC LIMIT 1
+            ) rr
+            WHERE r.status IN ('payout_pending', 'paid_out')
+              AND (r.payout_percent IS NULL OR r.payout_amount IS NULL)
+        """))
 
 
 async def get_or_create_user(user_id: int, username: str | None, full_name: str | None = None) -> User:
@@ -225,6 +254,10 @@ async def update_request_amount(request_id: int, amount: int, user_id: int | Non
         if user_id is not None and (req.user_id != user_id or req.status != "paypal_issued"):
             return None
         req.amount = amount
+        if req.status in {"payout_pending", "paid_out"}:
+            percent = await _get_rate_percent(session, amount)
+            req.payout_percent = percent
+            req.payout_amount = round(amount * percent / 100, 2) if percent is not None else None
         req.updated_at = datetime.utcnow()
         await session.commit()
         await session.refresh(req)
@@ -395,7 +428,12 @@ async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
         req = await session.get(Request, request_id, with_for_update=True)
         if req is None or req.status != "waiting_check":
             return None
+        percent = await _get_rate_percent(session, req.amount)
+        if percent is None:
+            return None
         req.status = "payout_pending"
+        req.payout_percent = percent
+        req.payout_amount = round(req.amount * percent / 100, 2)
         req.payment_confirmed_at = datetime.utcnow()
         req.payment_confirmed_by = admin_id
         req.updated_at = datetime.utcnow()
@@ -444,3 +482,67 @@ async def mark_payout_done(request_id: int, admin_id: int) -> Request | None:
         await session.commit()
         await session.refresh(req)
         return req
+
+
+async def _get_rate_percent(session: AsyncSession, amount: int) -> int | None:
+    return await session.scalar(
+        select(RateRule.percent)
+        .where(RateRule.min_amount <= amount)
+        .order_by(RateRule.min_amount.desc())
+        .limit(1)
+    )
+
+
+async def get_rate_for_amount(amount: int) -> tuple[int | None, float | None]:
+    async with SessionLocal() as session:
+        percent = await _get_rate_percent(session, amount)
+        payout = round(amount * percent / 100, 2) if percent is not None else None
+        return percent, payout
+
+
+async def list_rate_rules() -> list[RateRule]:
+    async with SessionLocal() as session:
+        return list(await session.scalars(select(RateRule).order_by(RateRule.min_amount.asc())))
+
+
+async def upsert_rate_rule(min_amount: int, percent: int) -> RateRule:
+    async with SessionLocal() as session:
+        rule = await session.scalar(select(RateRule).where(RateRule.min_amount == min_amount))
+        if rule is None:
+            rule = RateRule(min_amount=min_amount, percent=percent)
+            session.add(rule)
+        else:
+            rule.percent = percent
+        await session.commit()
+        await session.refresh(rule)
+        return rule
+
+
+async def delete_rate_rule(rule_id: int) -> bool:
+    async with SessionLocal() as session:
+        rule = await session.get(RateRule, rule_id)
+        if rule is None:
+            return False
+        count = int(await session.scalar(select(func.count()).select_from(RateRule)) or 0)
+        if count <= 1:
+            return False
+        await session.delete(rule)
+        await session.commit()
+        return True
+
+
+async def get_finance_summary() -> dict[str, float | int]:
+    async with SessionLocal() as session:
+        received = float(await session.scalar(
+            select(func.coalesce(func.sum(Request.amount), 0)).where(Request.status.in_(("payout_pending", "paid_out")))
+        ) or 0)
+        payout = float(await session.scalar(
+            select(func.coalesce(func.sum(Request.payout_amount), 0)).where(Request.status.in_(("payout_pending", "paid_out")))
+        ) or 0)
+        pending = float(await session.scalar(
+            select(func.coalesce(func.sum(Request.payout_amount), 0)).where(Request.status == "payout_pending")
+        ) or 0)
+        paid = float(await session.scalar(
+            select(func.coalesce(func.sum(Request.payout_amount), 0)).where(Request.status == "paid_out")
+        ) or 0)
+        return {"received": received, "payout": payout, "profit": received-payout, "pending": pending, "paid": paid}
