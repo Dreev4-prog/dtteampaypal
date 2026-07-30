@@ -112,16 +112,24 @@ async def init_db() -> None:
         await conn.execute(text("INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (50, 60, CURRENT_TIMESTAMP) ON CONFLICT (min_amount) DO NOTHING"))
         await conn.execute(text("INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (100, 70, CURRENT_TIMESTAMP) ON CONFLICT (min_amount) DO NOTHING"))
         await conn.execute(text("""
-            UPDATE requests r
-            SET payout_percent = rr.percent,
-                payout_amount = ROUND((r.amount * rr.percent / 100.0)::numeric, 2)
-            FROM LATERAL (
-                SELECT percent FROM rate_rules
-                WHERE min_amount <= r.amount
-                ORDER BY min_amount DESC LIMIT 1
-            ) rr
-            WHERE r.status IN ('payout_pending', 'paid_out')
-              AND (r.payout_percent IS NULL OR r.payout_amount IS NULL)
+            WITH matched_rates AS (
+                SELECT req.id AS request_id, rule.percent
+                FROM requests AS req
+                JOIN LATERAL (
+                    SELECT rr.percent
+                    FROM rate_rules AS rr
+                    WHERE rr.min_amount <= req.amount
+                    ORDER BY rr.min_amount DESC
+                    LIMIT 1
+                ) AS rule ON TRUE
+                WHERE req.status IN ('payout_pending', 'paid_out')
+                  AND (req.payout_percent IS NULL OR req.payout_amount IS NULL)
+            )
+            UPDATE requests AS req
+            SET payout_percent = matched_rates.percent,
+                payout_amount = ROUND((req.amount * matched_rates.percent / 100.0)::numeric, 2)
+            FROM matched_rates
+            WHERE req.id = matched_rates.request_id
         """))
 
 
