@@ -85,6 +85,14 @@ class RateRule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
 
 
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(4096), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
@@ -128,6 +136,14 @@ async def init_db() -> None:
         # v1.6.4: возвраты и массовый сбор PayPal.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS collection_notified_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS keep_confirmed_at TIMESTAMP"))
+        # v1.6.5: режим Start Work / Stop Work и редактируемые уведомления.
+        await conn.execute(text("""
+            INSERT INTO app_settings (key, value, updated_at) VALUES
+            ('work_enabled', '0', CURRENT_TIMESTAMP),
+            ('start_work_message', '🚀 <b>START WORK</b>\n\nПриём заявок на PayPal открыт. Можно создавать новые заявки.', CURRENT_TIMESTAMP),
+            ('stop_work_message', '🛑 <b>STOP WORK</b>\n\nПриём новых заявок на PayPal остановлен. Продолжайте работу только с уже выданными PayPal.', CURRENT_TIMESTAMP)
+            ON CONFLICT (key) DO NOTHING
+        """))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_paypal_returns_status ON paypal_returns (status)"))
         # Для существующей таблицы задаём серверное значение даты: raw SQL INSERT иначе не применяет Python default.
         await conn.execute(text("ALTER TABLE rate_rules ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP"))
@@ -879,3 +895,33 @@ async def search_working_requests(query: str, limit: int = 50) -> list[Request]:
             .limit(limit)
         )
         return list(await session.scalars(stmt))
+
+
+async def get_app_setting(key: str, default: str = "") -> str:
+    async with SessionLocal() as session:
+        row = await session.get(AppSetting, key)
+        return row.value if row else default
+
+
+async def set_app_setting(key: str, value: str) -> None:
+    async with SessionLocal() as session:
+        row = await session.get(AppSetting, key)
+        if row is None:
+            session.add(AppSetting(key=key, value=value, updated_at=datetime.utcnow()))
+        else:
+            row.value = value
+            row.updated_at = datetime.utcnow()
+        await session.commit()
+
+
+async def is_work_enabled() -> bool:
+    return (await get_app_setting("work_enabled", "0")) == "1"
+
+
+async def set_work_enabled(enabled: bool) -> None:
+    await set_app_setting("work_enabled", "1" if enabled else "0")
+
+
+async def list_approved_user_ids() -> list[int]:
+    async with SessionLocal() as session:
+        return list(await session.scalars(select(User.id).where(User.status == "approved")))

@@ -37,6 +37,7 @@ def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeybo
     pending_label = f"👥 Участники · {pending_count} ждут" if pending_count else "👥 Участники"
     queue_label = f"📥 Очередь PayPal ({queue_count})"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Start Work / 🔴 Stop Work", callback_data="work_control")],
         [InlineKeyboardButton(text="💰 Платежи", callback_data="payments_menu")],
         [InlineKeyboardButton(text="💳 База PayPal", callback_data="paypal_database"), InlineKeyboardButton(text="↩️ Возвраты", callback_data="returns_menu")],
         [InlineKeyboardButton(text="📊 Финансы", callback_data="finance_menu"), InlineKeyboardButton(text="⚙️ Проценты", callback_data="rates_menu")],
@@ -431,4 +432,26 @@ def collection_choice_menu(request_id: int) -> InlineKeyboardMarkup:
 def working_search_cancel_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="working_dates")]
+    ])
+
+
+def work_control_menu(enabled: bool) -> InlineKeyboardMarkup:
+    status = "🟢 Работа запущена" if enabled else "🔴 Работа остановлена"
+    action = (
+        InlineKeyboardButton(text="🛑 STOP WORK", callback_data="work_stop")
+        if enabled else
+        InlineKeyboardButton(text="🚀 START WORK", callback_data="work_start")
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=status, callback_data="work_control")],
+        [action],
+        [InlineKeyboardButton(text="✏️ Текст Start Work", callback_data="work_edit:start")],
+        [InlineKeyboardButton(text="✏️ Текст Stop Work", callback_data="work_edit:stop")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
+    ])
+
+
+def work_edit_cancel_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="work_control")]
     ])

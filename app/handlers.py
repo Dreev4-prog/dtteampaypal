@@ -51,6 +51,7 @@ from app.db import (
     get_working_dates, get_working_requests_by_date, mark_collection_notified,
     confirm_paypal_keep, list_unconfirmed_collection,
     admin_recall_working_request, bulk_delete_working_day, search_working_requests,
+    get_app_setting, set_app_setting, is_work_enabled, set_work_enabled, list_approved_user_ids,
 )
 from app.keyboards import (
     admin_check_menu,
@@ -83,7 +84,7 @@ from app.keyboards import (
     return_card_menu, return_checked_menu, paypal_database_menu, paypal_list_menu,
     paypal_card_admin_menu, paypal_delete_confirm_menu, working_dates_menu, working_day_menu, collection_choice_menu,
     working_card_menu, working_recall_confirm_menu, working_delete_day_confirm_menu, working_search_results_menu,
-    working_search_cancel_menu,
+    working_search_cancel_menu, work_control_menu, work_edit_cancel_menu,
 )
 
 router = Router()
@@ -116,6 +117,10 @@ class ReturnForm(StatesGroup):
 
 class WorkingSearch(StatesGroup):
     query = State()
+
+
+class WorkMessageForm(StatesGroup):
+    text = State()
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
@@ -336,6 +341,9 @@ async def membership_block(callback: CallbackQuery) -> None:
 async def paypal_request(callback: CallbackQuery, state: FSMContext) -> None:
     if not await has_access(callback):
         return
+    if not await is_work_enabled():
+        await callback.answer("Сейчас STOP WORK. Новые заявки временно отключены.", show_alert=True)
+        return
     active = await count_active_requests(callback.from_user.id)
     if active >= 2:
         await callback.answer(
@@ -361,6 +369,10 @@ async def paypal_amount_input(message: Message, state: FSMContext) -> None:
     user = await get_user(message.from_user.id)
     if user is None or user.status != "approved":
         await state.clear()
+        return
+    if not await is_work_enabled():
+        await state.clear()
+        await message.answer("🛑 Сейчас STOP WORK. Создание новых заявок остановлено.", reply_markup=back_home())
         return
     raw = (message.text or "").strip().replace("€", "").replace(" ", "")
     if not raw.isdigit():
@@ -391,6 +403,10 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
     user = await get_user(message.from_user.id)
     if user is None or user.status != "approved":
         await state.clear()
+        return
+    if not await is_work_enabled():
+        await state.clear()
+        await message.answer("🛑 Сейчас STOP WORK. Создание новых заявок остановлено.", reply_markup=back_home())
         return
     active = await count_active_requests(message.from_user.id)
     if active >= 2:
@@ -639,8 +655,11 @@ async def show_admin_home(target: Message | CallbackQuery) -> None:
     queue_count = await count_waiting_requests()
     payment_counts = await get_payment_counts()
     finance = await get_finance_summary()
+    work_enabled = await is_work_enabled()
+    work_status = "🟢 START WORK" if work_enabled else "🔴 STOP WORK"
     text = (
         "👨‍💼 <b>Админ-панель</b>\n\n"
+        f"Режим работы: <b>{work_status}</b>\n"
         f"👥 Всего пользователей: <b>{counts['all']}</b>\n"
         f"🟡 Ожидают решения: <b>{counts['pending']}</b>\n"
         f"💳 Свободных PayPal: <b>{available}</b>\n"
@@ -681,6 +700,112 @@ async def admin_home(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await show_admin_home(callback)
     await callback.answer()
+
+
+@router.callback_query(F.data == "work_control")
+async def work_control_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    enabled = await is_work_enabled()
+    start_text = await get_app_setting("start_work_message")
+    stop_text = await get_app_setting("stop_work_message")
+    text = (
+        "⚙️ <b>Управление работой</b>\n\n"
+        f"Текущий режим: <b>{'🟢 START WORK' if enabled else '🔴 STOP WORK'}</b>\n\n"
+        "<b>Сообщение Start Work:</b>\n" + start_text +
+        "\n\n<b>Сообщение Stop Work:</b>\n" + stop_text
+    )
+    await callback.message.edit_text(text, reply_markup=work_control_menu(enabled))
+    await callback.answer()
+
+
+async def _broadcast_work_message(callback: CallbackQuery, text: str) -> tuple[int, int]:
+    sent = 0
+    failed = 0
+    for user_id in await list_approved_user_ids():
+        try:
+            await callback.bot.send_message(user_id, text, reply_markup=main_menu())
+            sent += 1
+        except Exception:
+            failed += 1
+    return sent, failed
+
+
+@router.callback_query(F.data == "work_start")
+async def work_start_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await set_work_enabled(True)
+    text = await get_app_setting("start_work_message")
+    sent, failed = await _broadcast_work_message(callback, text)
+    await callback.message.edit_text(
+        f"🚀 <b>START WORK включён</b>\n\nУведомлено: <b>{sent}</b>\nНе доставлено: <b>{failed}</b>",
+        reply_markup=work_control_menu(True),
+    )
+    await callback.answer("Приём заявок открыт")
+
+
+@router.callback_query(F.data == "work_stop")
+async def work_stop_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await set_work_enabled(False)
+    text = await get_app_setting("stop_work_message")
+    sent, failed = await _broadcast_work_message(callback, text)
+    await callback.message.edit_text(
+        f"🛑 <b>STOP WORK включён</b>\n\nНовые заявки отключены. Уже выданные PayPal и текущие оплаты продолжают работать.\n\nУведомлено: <b>{sent}</b>\nНе доставлено: <b>{failed}</b>",
+        reply_markup=work_control_menu(False),
+    )
+    await callback.answer("Приём новых заявок остановлен")
+
+
+@router.callback_query(F.data.startswith("work_edit:"))
+async def work_edit_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    kind = callback.data.split(":", 1)[1]
+    if kind not in {"start", "stop"}:
+        await callback.answer("Неизвестный шаблон", show_alert=True)
+        return
+    await state.set_state(WorkMessageForm.text)
+    await state.update_data(work_message_kind=kind)
+    current = await get_app_setting(f"{kind}_work_message")
+    await callback.message.edit_text(
+        f"✏️ <b>Изменение текста {'Start Work' if kind == 'start' else 'Stop Work'}</b>\n\n"
+        f"Текущий текст:\n{current}\n\nОтправьте новый текст одним сообщением. HTML-разметка поддерживается.",
+        reply_markup=work_edit_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(WorkMessageForm.text)
+async def work_edit_save(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Текст не может быть пустым.", reply_markup=work_edit_cancel_menu())
+        return
+    if len(text) > 4000:
+        await message.answer("Текст слишком длинный. Максимум 4000 символов.", reply_markup=work_edit_cancel_menu())
+        return
+    data = await state.get_data()
+    kind = data.get("work_message_kind")
+    if kind not in {"start", "stop"}:
+        await state.clear()
+        return
+    await set_app_setting(f"{kind}_work_message", text)
+    await state.clear()
+    await message.answer(
+        f"✅ Текст {'Start Work' if kind == 'start' else 'Stop Work'} сохранён.",
+        reply_markup=work_control_menu(await is_work_enabled()),
+    )
 
 
 @router.callback_query(F.data.startswith("paypal_queue:"))
