@@ -383,13 +383,20 @@ def working_day_menu(date_label: str, requests: list) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f"#{req.id} · {req.amount} € · ID {req.user_id}", callback_data=f"working_card:{req.id}:{date_label}")] for req in requests[:50]]
     rows += [
         [InlineKeyboardButton(text="🔔 Уведомить: сбор через 30 минут", callback_data=f"collect_notify:{date_label}")],
-        [InlineKeyboardButton(text="📥 Забрать неподтверждённые", callback_data=f"collect_take:{date_label}")],
+        [InlineKeyboardButton(text="📥 Забрать PayPal в ожидании оплаты", callback_data=f"collect_take_ask:{date_label}")],
         [InlineKeyboardButton(text="🗑 Удалить все PayPal за день", callback_data=f"working_delete_day_ask:{date_label}")],
         [InlineKeyboardButton(text="📄 Экспорт Excel", callback_data=f"working_export:{date_label}")],
         [InlineKeyboardButton(text="⬅️ К датам", callback_data="working_dates")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+
+def collect_take_confirm_menu(date_label: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Забрать", callback_data=f"collect_take_confirm:{date_label}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"working_day:{date_label}")],
+    ])
 
 def working_card_menu(request_id: int, day: str, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[

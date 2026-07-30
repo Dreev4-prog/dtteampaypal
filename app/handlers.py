@@ -236,9 +236,74 @@ async def has_access(callback: CallbackQuery) -> bool:
 
 
 @router.message(CommandStart())
-async def start(message: Message) -> None:
+async def start(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
     await show_home(message)
+
+
+@router.message(Command("menu"))
+async def menu_command(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    await show_home(message)
+
+
+@router.message(Command("paypal"))
+async def paypal_command(message: Message, state: FSMContext) -> None:
+    await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    user = await get_user(message.from_user.id)
+    if user is None or user.status != "approved":
+        await state.clear()
+        await show_home(message)
+        return
+    if not await is_work_enabled():
+        await state.clear()
+        await message.answer(
+            "🔴 <b>Сейчас STOP WORK</b>\n\n"
+            "Новые заявки на PayPal временно отключены. Вы можете продолжить работу "
+            "с PayPal, которые уже получили.",
+            reply_markup=back_home(),
+        )
+        return
+    active = await count_active_requests(message.from_user.id)
+    if active >= 2:
+        await state.clear()
+        await message.answer(
+            "❌ У вас уже есть 2 заявки, ожидающие выдачи. Дождитесь обработки одной из них.",
+            reply_markup=back_home(),
+        )
+        return
+    await state.clear()
+    await state.set_state(PaypalRequestForm.amount)
+    await message.answer_photo(
+        photo=FSInputFile(BANNERS["paypal"]),
+        caption=(
+            "<b>Новая заявка PayPal</b>\n\n"
+            "Введите необходимую сумму в евро одним числом.\n"
+            "Например: <code>75</code>"
+        ),
+        reply_markup=request_cancel_menu(),
+    )
+
+
+@router.message(Command("support"))
+async def support_command(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    user = await get_user(message.from_user.id)
+    if user is None or user.status != "approved":
+        await show_home(message)
+        return
+    await message.answer_photo(
+        photo=FSInputFile(BANNERS["support"]),
+        caption=(
+            "<b>Поддержка DT Team</b>\n\n"
+            "По вопросам заявок напишите администратору:\n"
+            "@your_support"
+        ),
+        reply_markup=back_home(),
+    )
 
 
 @router.callback_query(F.data == "home")
@@ -1968,7 +2033,7 @@ async def collect_notify_handler(callback: CallbackQuery) -> None:
         tag=await get_paypal_tag(req.paypal_tag_id)
         try:
             await callback.bot.send_message(req.user_id,
-                f"⚠️ <b>Через 30 минут администрация заберёт неподтверждённые PayPal</b>\n\n"
+                f"⚠️ <b>Через 30 минут администрация заберёт PayPal, которые ожидают оплаты</b>\n\n"
                 f"Дата выдачи: <b>{day}</b>\nPayPal: <code>{tag.tag if tag else '—'}</code>\nСумма: <b>{req.amount} €</b>\n\n"
                 "Выберите: он ещё нужен или его можно вернуть.", reply_markup=collection_choice_menu(req.id)); sent+=1
         except Exception: pass
@@ -1982,16 +2047,57 @@ async def collect_keep_handler(callback: CallbackQuery) -> None:
     await callback.message.edit_text("✅ Подтверждено: этот PayPal вам ещё нужен."); await callback.answer()
 
 
-@router.callback_query(F.data.startswith("collect_take:"))
-async def collect_take_handler(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id): return
-    day=callback.data.split(":",1)[1]; reqs=await list_unconfirmed_collection(day); created=0
+@router.callback_query(F.data.startswith("collect_take_ask:"))
+async def collect_take_ask_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    day = callback.data.split(":", 1)[1]
+    reqs = await get_working_requests_by_date(day)
+    total = sum(req.amount for req in reqs)
+    await callback.message.edit_caption(
+        caption=(
+            f"<b>⚠️ Забрать все PayPal в ожидании оплаты за {day}?</b>\n\n"
+            f"Количество: <b>{len(reqs)}</b>\n"
+            f"Общая сумма: <b>{total} €</b>\n\n"
+            "Будут забраны только PayPal со статусом «ожидает оплаты». "
+            "Заявки на проверке, ожидающие выплаты и завершённые заявки не затрагиваются."
+        ),
+        reply_markup=collect_take_confirm_menu(day),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("collect_take_confirm:"))
+async def collect_take_confirm_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    day = callback.data.split(":", 1)[1]
+    reqs = await get_working_requests_by_date(day)
+    recalled = 0
     for req in reqs:
-        item=await create_paypal_return(req.id, req.user_id, "collection_timeout", "Не подтверждён после уведомления о сборе")
-        if item: created+=1
-    items = await list_paypal_returns()
-    await render_screen(callback, "paypal", f"<b>↩️ Возвраты PayPal</b>\n\nОжидают проверки: <b>{len(items)}</b>", returns_menu(items))
-    await callback.answer(f"Передано в возвраты: {created}", show_alert=True)
+        recalled_req, tag = await admin_recall_working_request(req.id, "available", callback.from_user.id)
+        if recalled_req is None:
+            continue
+        recalled += 1
+        try:
+            await callback.bot.send_message(
+                req.user_id,
+                f"ℹ️ Администратор забрал PayPal <code>{tag.tag if tag else '—'}</code>, "
+                "который ожидал оплаты. После следующего Start Work вы сможете создать новую заявку."
+            )
+        except Exception:
+            pass
+    remaining = await get_working_requests_by_date(day)
+    await callback.message.edit_caption(
+        caption=(
+            f"<b>✅ PayPal в ожидании оплаты забраны</b>\n\n"
+            f"Дата: <b>{day}</b>\n"
+            f"Забрано: <b>{recalled}</b>\n"
+            f"Осталось в ожидании оплаты: <b>{len(remaining)}</b>"
+        ),
+        reply_markup=working_day_menu(day, remaining),
+    )
+    await callback.answer(f"Забрано PayPal: {recalled}", show_alert=True)
 
 @router.callback_query(F.data.startswith("working_card:"))
 async def working_card_handler(callback: CallbackQuery) -> None:
