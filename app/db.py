@@ -64,7 +64,7 @@ class RateRule(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     min_amount: Mapped[int] = mapped_column(Integer, unique=True, index=True)
     percent: Mapped[int] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
 
 
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
@@ -107,8 +107,10 @@ async def init_db() -> None:
         # v1.6: автоматический расчёт процентов и суммы к выплате.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_percent INTEGER"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_amount NUMERIC(12,2)"))
-        await conn.execute(text("INSERT INTO rate_rules (min_amount, percent) VALUES (50, 60) ON CONFLICT (min_amount) DO NOTHING"))
-        await conn.execute(text("INSERT INTO rate_rules (min_amount, percent) VALUES (100, 70) ON CONFLICT (min_amount) DO NOTHING"))
+        # Для существующей таблицы задаём серверное значение даты: raw SQL INSERT иначе не применяет Python default.
+        await conn.execute(text("ALTER TABLE rate_rules ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP"))
+        await conn.execute(text("INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (50, 60, CURRENT_TIMESTAMP) ON CONFLICT (min_amount) DO NOTHING"))
+        await conn.execute(text("INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (100, 70, CURRENT_TIMESTAMP) ON CONFLICT (min_amount) DO NOTHING"))
         await conn.execute(text("""
             UPDATE requests r
             SET payout_percent = rr.percent,
