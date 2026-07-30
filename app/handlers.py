@@ -35,6 +35,7 @@ from app.db import (
     mark_payment_not_found,
     return_to_payment_check,
     mark_payout_done,
+    update_request_amount,
 )
 from app.keyboards import (
     admin_check_menu,
@@ -56,6 +57,8 @@ from app.keyboards import (
     payments_list_menu,
     payment_card_menu,
     payout_confirmation_menu,
+    user_amount_confirmation_menu,
+    admin_amount_confirmation_menu,
 )
 
 router = Router()
@@ -68,6 +71,12 @@ class MemberSearch(StatesGroup):
 class PaypalRequestForm(StatesGroup):
     amount = State()
     screenshot = State()
+
+
+class PaymentAmountForm(StatesGroup):
+    user_amount = State()
+    admin_amount = State()
+    admin_edit_amount = State()
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
@@ -889,6 +898,50 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("payment_amount_edit:"))
+async def payment_amount_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":")[1])
+    req = await get_request(request_id)
+    if req is None or req.status not in {"payout_pending", "waiting_check"}:
+        await callback.answer("Сумму этой заявки уже нельзя изменить", show_alert=True)
+        return
+    await state.set_state(PaymentAmountForm.admin_edit_amount)
+    await state.update_data(payment_request_id=request_id)
+    await callback.message.answer(
+        f"✏️ Текущая сумма: <b>{req.amount} €</b>\n\nВведите новую актуальную сумму, например: <code>75</code>"
+    )
+    await callback.answer()
+
+
+@router.message(PaymentAmountForm.admin_edit_amount)
+async def payment_amount_edit_input(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    raw = (message.text or "").strip().replace("€", "").replace(" ", "")
+    if not raw.isdigit():
+        await message.answer("Введите сумму целым числом, например: <code>75</code>")
+        return
+    amount = int(raw)
+    if amount < 1 or amount > 100000:
+        await message.answer("Сумма должна быть от 1 до 100000 €.")
+        return
+    data = await state.get_data()
+    request_id = int(data["payment_request_id"])
+    req = await update_request_amount(request_id, amount)
+    await state.clear()
+    if req is None:
+        await message.answer("Заявка не найдена.")
+        return
+    await message.answer(
+        f"✅ Сумма заявки #{req.id} изменена на <b>{amount} €</b>.",
+        reply_markup=payment_card_menu(req.id, req.user_id, req.status),
+    )
+
+
 @router.callback_query(F.data.startswith("payout_confirm:"))
 async def payout_confirm_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
@@ -999,30 +1052,88 @@ async def user_paid(callback: CallbackQuery) -> None:
     if not await has_access(callback):
         return
     request_id = int(callback.data.split(":")[1])
-    ok = await mark_paid_by_user(request_id, callback.from_user.id)
-    if not ok:
+    req = await get_request(request_id)
+    if req is None or req.user_id != callback.from_user.id or req.status != "paypal_issued":
         await callback.answer("Заявка уже обработана или недоступна", show_alert=True)
         return
+    await callback.message.edit_caption(
+        caption=(
+            "💶 <b>Подтвердите сумму оплаты</b>\n\n"
+            f"Текущая сумма: <b>{req.amount} €</b>\n\n"
+            "Если оплатили другую сумму — нажмите «Изменить сумму»."
+        ),
+        reply_markup=user_amount_confirmation_menu(req.id, req.amount),
+    )
+    await callback.answer()
 
+
+async def finish_user_paid(callback_or_message, request_id: int, user_id: int) -> bool:
+    ok = await mark_paid_by_user(request_id, user_id)
+    if not ok:
+        return False
     req = await get_request(request_id)
+    bot = callback_or_message.bot
     for admin_id in settings.admin_ids:
-        await callback.bot.send_message(
+        await bot.send_message(
             admin_id,
             "💰 <b>Пользователь сообщил об оплате</b>\n\n"
             f"Заявка: #{request_id}\n"
-            f"Пользователь ID: <code>{callback.from_user.id}</code>\n"
+            f"Пользователь ID: <code>{user_id}</code>\n"
             f"Сумма: <b>{req.amount} €</b>",
             reply_markup=admin_check_menu(request_id),
         )
+    return True
 
-    await render_screen(
-        callback,
-        "requests",
-        "🔎 <b>Оплата отправлена на проверку</b>\n\n"
-        "Администратор проверит поступление и подтвердит заявку.",
-        back_home(),
-    )
+
+@router.callback_query(F.data.startswith("user_paid_confirm:"))
+async def user_paid_confirm(callback: CallbackQuery) -> None:
+    request_id = int(callback.data.split(":")[1])
+    if not await finish_user_paid(callback, request_id, callback.from_user.id):
+        await callback.answer("Заявка уже обработана или недоступна", show_alert=True)
+        return
+    await render_screen(callback, "requests", "🔎 <b>Оплата отправлена на проверку</b>\n\nАдминистратор проверит поступление и подтвердит заявку.", back_home())
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("user_paid_change:"))
+async def user_paid_change(callback: CallbackQuery, state: FSMContext) -> None:
+    request_id = int(callback.data.split(":")[1])
+    req = await get_request(request_id)
+    if req is None or req.user_id != callback.from_user.id or req.status != "paypal_issued":
+        await callback.answer("Заявка недоступна", show_alert=True)
+        return
+    await state.set_state(PaymentAmountForm.user_amount)
+    await state.update_data(payment_request_id=request_id)
+    await callback.message.answer("✏️ Введите актуальную сумму оплаты в евро, только число. Например: <code>75</code>")
+    await callback.answer()
+
+
+@router.message(PaymentAmountForm.user_amount)
+async def user_paid_amount_input(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip().replace("€", "").replace(" ", "")
+    if not raw.isdigit():
+        await message.answer("Введите сумму целым числом, например: <code>75</code>")
+        return
+    amount = int(raw)
+    if amount < 1 or amount > 100000:
+        await message.answer("Сумма должна быть от 1 до 100000 €.")
+        return
+    data = await state.get_data()
+    request_id = int(data["payment_request_id"])
+    req = await update_request_amount(request_id, amount, message.from_user.id)
+    if req is None:
+        await state.clear()
+        await message.answer("Заявка уже обработана или недоступна.")
+        return
+    if not await finish_user_paid(message, request_id, message.from_user.id):
+        await state.clear()
+        await message.answer("Заявка уже обработана или недоступна.")
+        return
+    await state.clear()
+    await message.answer(
+        f"🔎 <b>Оплата отправлена на проверку</b>\n\nСумма заявки обновлена: <b>{amount} €</b>.",
+        reply_markup=back_home(),
+    )
 
 
 @router.callback_query(F.data.startswith("admin_confirm:"))
@@ -1031,28 +1142,97 @@ async def admin_confirm(callback: CallbackQuery) -> None:
         await callback.answer("Нет доступа", show_alert=True)
         return
     request_id = int(callback.data.split(":")[1])
-    req = await confirm_payment(request_id, callback.from_user.id)
-    if req is None:
+    req = await get_request(request_id)
+    if req is None or req.status != "waiting_check":
         await callback.answer("Заявка уже обработана или не найдена", show_alert=True)
         return
+    await callback.message.edit_text(
+        "💶 <b>Подтвердите полученную сумму</b>\n\n"
+        f"Сумма в заявке: <b>{req.amount} €</b>\n\n"
+        "Если на PayPal поступила другая сумма — измените её.",
+        reply_markup=admin_amount_confirmation_menu(req.id, req.amount),
+    )
+    await callback.answer()
+
+
+async def finish_admin_confirm(callback_or_message, request_id: int, admin_id: int):
+    req = await confirm_payment(request_id, admin_id)
+    if req is None:
+        return None
     try:
-        await callback.bot.send_photo(
+        await callback_or_message.bot.send_photo(
             req.user_id,
             photo=FSInputFile(BANNERS["issued"]),
-            caption=(
-                f"✅ <b>Оплата по заявке #{req.id} подтверждена</b>\n\n"
-                "Заявка передана на выплату. Ожидайте уведомления."
-            ),
+            caption=(f"✅ <b>Оплата по заявке #{req.id} подтверждена</b>\n\nСумма: <b>{req.amount} €</b>\nЗаявка передана на выплату."),
             reply_markup=back_home(),
         )
     except Exception:
         pass
+    return req
+
+
+@router.callback_query(F.data.startswith("admin_confirm_same:"))
+async def admin_confirm_same(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":")[1])
+    req = await finish_admin_confirm(callback, request_id, callback.from_user.id)
+    if req is None:
+        await callback.answer("Заявка уже обработана", show_alert=True)
+        return
     await callback.message.edit_text(
-        f"✅ Оплата по заявке #{req.id} подтверждена.\n\n"
-        "Заявка перемещена в раздел «🟢 Нужно выплатить».",
+        f"✅ Оплата по заявке #{req.id} подтверждена.\nСумма: <b>{req.amount} €</b>\n\nЗаявка перемещена в «🟢 Нужно выплатить».",
         reply_markup=payments_menu(await get_payment_counts()),
     )
     await callback.answer("Оплата подтверждена")
+
+
+@router.callback_query(F.data.startswith("admin_confirm_change:"))
+async def admin_confirm_change(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":")[1])
+    req = await get_request(request_id)
+    if req is None or req.status != "waiting_check":
+        await callback.answer("Заявка недоступна", show_alert=True)
+        return
+    await state.set_state(PaymentAmountForm.admin_amount)
+    await state.update_data(payment_request_id=request_id)
+    await callback.message.answer("✏️ Введите сумму, которая поступила на PayPal. Например: <code>75</code>")
+    await callback.answer()
+
+
+@router.message(PaymentAmountForm.admin_amount)
+async def admin_paid_amount_input(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    raw = (message.text or "").strip().replace("€", "").replace(" ", "")
+    if not raw.isdigit():
+        await message.answer("Введите сумму целым числом, например: <code>75</code>")
+        return
+    amount = int(raw)
+    if amount < 1 or amount > 100000:
+        await message.answer("Сумма должна быть от 1 до 100000 €.")
+        return
+    data = await state.get_data()
+    request_id = int(data["payment_request_id"])
+    req = await update_request_amount(request_id, amount)
+    if req is None or req.status != "waiting_check":
+        await state.clear()
+        await message.answer("Заявка уже обработана или недоступна.")
+        return
+    req = await finish_admin_confirm(message, request_id, message.from_user.id)
+    await state.clear()
+    if req is None:
+        await message.answer("Заявка уже обработана или недоступна.")
+        return
+    await message.answer(
+        f"✅ Оплата по заявке #{req.id} подтверждена.\nСумма обновлена: <b>{amount} €</b>.\nЗаявка перемещена в «🟢 Нужно выплатить».",
+        reply_markup=payments_menu(await get_payment_counts()),
+    )
 
 
 @router.callback_query(F.data.startswith("admin_not_found:"))

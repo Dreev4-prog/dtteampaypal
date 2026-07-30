@@ -212,6 +212,25 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
         return req, tag
 
 
+async def update_request_amount(request_id: int, amount: int, user_id: int | None = None) -> Request | None:
+    """Replace the single current amount for a request.
+
+    When user_id is supplied, only the request owner may change it and only
+    while PayPal has been issued. Admin flows call it without user_id.
+    """
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if req is None:
+            return None
+        if user_id is not None and (req.user_id != user_id or req.status != "paypal_issued"):
+            return None
+        req.amount = amount
+        req.updated_at = datetime.utcnow()
+        await session.commit()
+        await session.refresh(req)
+        return req
+
+
 async def mark_paid_by_user(request_id: int, user_id: int) -> bool:
     async with SessionLocal() as session:
         req = await session.get(Request, request_id)

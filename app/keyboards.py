@@ -215,6 +215,7 @@ def payment_card_menu(request_id: int, user_id: int, status: str, filter_name: s
         ])
     elif status == "payout_pending":
         rows.append([InlineKeyboardButton(text="💸 Я выплатил", callback_data=f"payout_confirm:{request_id}")])
+        rows.append([InlineKeyboardButton(text="✏️ Изменить сумму", callback_data=f"payment_amount_edit:{request_id}")])
     elif status == "not_found":
         rows.append([InlineKeyboardButton(text="↩️ Вернуть на проверку", callback_data=f"payment_recheck:{request_id}")])
     rows.append([InlineKeyboardButton(text="💬 Написать клиенту", url=f"tg://user?id={user_id}")])
@@ -226,4 +227,20 @@ def payout_confirmation_menu(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Да, выплатил", callback_data=f"payout_done:{request_id}")],
         [InlineKeyboardButton(text="↩️ Отмена", callback_data=f"payment_card:{request_id}:payout:0")],
+    ])
+
+
+def user_amount_confirmation_menu(request_id: int, amount: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Подтвердить {amount} €", callback_data=f"user_paid_confirm:{request_id}")],
+        [InlineKeyboardButton(text="✏️ Изменить сумму", callback_data=f"user_paid_change:{request_id}")],
+        [InlineKeyboardButton(text="↩️ Отмена", callback_data="home")],
+    ])
+
+
+def admin_amount_confirmation_menu(request_id: int, amount: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Подтвердить {amount} €", callback_data=f"admin_confirm_same:{request_id}")],
+        [InlineKeyboardButton(text="✏️ Изменить сумму", callback_data=f"admin_confirm_change:{request_id}")],
+        [InlineKeyboardButton(text="↩️ Отмена", callback_data=f"payment_card:{request_id}:check:0")],
     ])
