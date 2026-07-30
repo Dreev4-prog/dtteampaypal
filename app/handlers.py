@@ -43,6 +43,10 @@ from app.db import (
     upsert_rate_rule,
     delete_rate_rule,
     get_finance_summary,
+    create_paypal_return, list_paypal_returns, get_paypal_return, resolve_paypal_return,
+    get_paypal_database_counts, list_paypal_tags, set_paypal_tag_status,
+    get_working_dates, get_working_requests_by_date, mark_collection_notified,
+    confirm_paypal_keep, list_unconfirmed_collection,
 )
 from app.keyboards import (
     admin_check_menu,
@@ -71,6 +75,9 @@ from app.keyboards import (
     rate_cancel_menu,
     my_paypals_menu,
     my_paypals_back_menu,
+    paid_or_return_menu, return_reasons_menu, return_confirm_menu, returns_menu,
+    return_card_menu, return_checked_menu, paypal_database_menu, paypal_list_menu,
+    paypal_card_admin_menu, working_dates_menu, working_day_menu, collection_choice_menu,
 )
 
 router = Router()
@@ -94,6 +101,11 @@ class PaymentAmountForm(StatesGroup):
 class RateForm(StatesGroup):
     add_rule = State()
     edit_rule = State()
+
+
+class ReturnForm(StatesGroup):
+    custom_reason = State()
+    reject_reason = State()
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
@@ -492,6 +504,9 @@ async def my_paypals_list(callback: CallbackQuery) -> None:
             "paid_out": "выплачено",
             "not_found": "оплата не найдена",
             "rejected": "отклонено",
+            "return_pending": "ожидает проверки возврата",
+            "returned": "возвращён",
+            "returned_gestoppt": "возвращён как Gestoppt",
         }
         blocks = [f"<b>{title}</b>", ""]
         for req in requests:
@@ -1513,3 +1528,230 @@ async def finance_panel(callback: CallbackQuery) -> None:
     )
     await callback.message.edit_text(text, reply_markup=finance_menu())
     await callback.answer()
+
+
+RETURN_REASON_LABELS = {
+    "changed_mind": "❌ Передумал",
+    "cant_pay": "💳 Нет возможности оплатить",
+    "another_amount": "💶 Нужна другая сумма",
+    "gestoppt": "🚫 Gestoppt",
+    "no_time": "⏰ Не успеваю оплатить",
+    "other": "✍️ Другая причина",
+}
+
+
+@router.callback_query(F.data.startswith("return_start:"))
+async def return_start_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    request_id = int(callback.data.split(":")[1])
+    req = await get_request(request_id)
+    if req is None or req.user_id != callback.from_user.id or req.status != "paypal_issued":
+        await callback.answer("PayPal уже обработан или недоступен", show_alert=True)
+        return
+    await state.clear()
+    await callback.message.answer("↩️ <b>Выберите причину возврата PayPal</b>", reply_markup=return_reasons_menu(request_id))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("return_reason:"))
+async def return_reason_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    _, request_id_raw, reason_code = callback.data.split(":", 2)
+    request_id = int(request_id_raw)
+    req = await get_request(request_id)
+    if req is None or req.user_id != callback.from_user.id or req.status != "paypal_issued":
+        await callback.answer("PayPal недоступен", show_alert=True); return
+    if reason_code == "other":
+        await state.set_state(ReturnForm.custom_reason)
+        await state.update_data(return_request_id=request_id, return_reason_code=reason_code)
+        await callback.message.answer("✍️ Напишите причину возврата одним сообщением.")
+        await callback.answer(); return
+    reason_text = RETURN_REASON_LABELS.get(reason_code, reason_code)
+    await state.update_data(return_request_id=request_id, return_reason_code=reason_code, return_reason_text=reason_text)
+    await callback.message.answer(f"↩️ <b>Вернуть PayPal?</b>\n\nПричина: {reason_text}", reply_markup=return_confirm_menu(request_id))
+    await callback.answer()
+
+
+@router.message(ReturnForm.custom_reason)
+async def return_custom_reason_handler(message: Message, state: FSMContext) -> None:
+    reason = (message.text or "").strip()
+    if len(reason) < 3:
+        await message.answer("Опишите причину подробнее."); return
+    data = await state.get_data(); request_id = int(data["return_request_id"])
+    await state.update_data(return_reason_text=reason[:500])
+    await message.answer(f"↩️ <b>Вернуть PayPal?</b>\n\nПричина: {reason[:500]}", reply_markup=return_confirm_menu(request_id))
+
+
+@router.callback_query(F.data.startswith("return_confirm:"))
+async def return_confirm_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    request_id = int(callback.data.split(":")[1]); data = await state.get_data()
+    reason_code = data.get("return_reason_code"); reason_text = data.get("return_reason_text")
+    if int(data.get("return_request_id", 0)) != request_id or not reason_code or not reason_text:
+        await callback.answer("Выберите причину заново", show_alert=True); return
+    item = await create_paypal_return(request_id, callback.from_user.id, reason_code, reason_text)
+    if item is None:
+        await callback.answer("PayPal уже обработан", show_alert=True); return
+    req = await get_request(request_id); tag = await get_paypal_tag(req.paypal_tag_id if req else None)
+    for admin_id in settings.admin_ids:
+        await callback.bot.send_message(admin_id,
+            "↩️ <b>Новый запрос на возврат</b>\n\n"
+            f"Заявка: #{request_id}\nПользователь: <code>{callback.from_user.id}</code>\n"
+            f"PayPal: <code>{tag.tag if tag else '—'}</code>\nСумма: <b>{req.amount if req else 0} €</b>\nПричина: {reason_text}",
+            reply_markup=return_card_menu(item.id, callback.from_user.id))
+    await state.clear()
+    await callback.message.answer("✅ Запрос на возврат отправлен. PayPal будет проверен администратором.", reply_markup=back_home())
+    await callback.answer("Запрос отправлен")
+
+
+@router.callback_query(F.data == "returns_menu")
+async def returns_panel_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): await callback.answer("Нет доступа", show_alert=True); return
+    items = await list_paypal_returns()
+    await render_screen(callback, "paypal", f"<b>↩️ Возвраты PayPal</b>\n\nОжидают проверки: <b>{len(items)}</b>", returns_menu(items))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("return_card:"))
+async def return_card_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): await callback.answer("Нет доступа", show_alert=True); return
+    item = await get_paypal_return(int(callback.data.split(":")[1]))
+    if item is None: await callback.answer("Возврат не найден", show_alert=True); return
+    req = await get_request(item.request_id); tag = await get_paypal_tag(item.paypal_tag_id)
+    text = (f"<b>↩️ Возврат #{item.id}</b>\n\n👤 ID: <code>{item.user_id}</code>\n"
+            f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n💶 Сумма: <b>{req.amount if req else 0} €</b>\n"
+            f"🕒 Выдан: {format_dt(tag.issued_at if tag else None)}\n📝 Причина: {item.reason_text}\n"
+            f"📌 Статус: {item.status}")
+    await callback.message.edit_text(text, reply_markup=return_card_menu(item.id, item.user_id)); await callback.answer()
+
+
+@router.callback_query(F.data.startswith("return_checked:"))
+async def return_checked_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): await callback.answer("Нет доступа", show_alert=True); return
+    rid = int(callback.data.split(":")[1])
+    await callback.message.edit_text("🔍 <b>PayPal проверен. Как поступить?</b>", reply_markup=return_checked_menu(rid)); await callback.answer()
+
+
+async def _finish_return(callback: CallbackQuery, action: str, reason: str) -> None:
+    rid = int(callback.data.split(":")[1]); item = await resolve_paypal_return(rid, action, callback.from_user.id, reason)
+    if item is None: await callback.answer("Возврат уже обработан", show_alert=True); return
+    messages = {"returned": "✅ PayPal проверен и возвращён в свободную базу.", "gestoppt": "🚫 PayPal отмечен как Gestoppt и исключён из выдачи.", "rejected": f"❌ Возврат отклонён. Причина: {reason}"}
+    try: await callback.bot.send_message(item.user_id, messages[action], reply_markup=back_home())
+    except Exception: pass
+    await callback.message.edit_text(messages[action], reply_markup=returns_menu(await list_paypal_returns())); await callback.answer("Готово")
+
+
+@router.callback_query(F.data.startswith("return_release:"))
+async def return_release_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): return
+    await _finish_return(callback, "returned", "PayPal пустой. Возвращён в базу.")
+
+
+@router.callback_query(F.data.startswith("return_gestoppt:"))
+async def return_gestoppt_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): return
+    await _finish_return(callback, "gestoppt", "PayPal отмечен Gestoppt. В выдачу не возвращён.")
+
+
+@router.callback_query(F.data.startswith("return_reject:"))
+async def return_reject_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id): return
+    await state.set_state(ReturnForm.reject_reason); await state.update_data(reject_return_id=int(callback.data.split(":")[1]))
+    await callback.message.answer("✍️ Укажите причину отклонения возврата."); await callback.answer()
+
+
+@router.message(ReturnForm.reject_reason)
+async def return_reject_reason_handler(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id): await state.clear(); return
+    reason = (message.text or "").strip()[:500]
+    if len(reason) < 3: await message.answer("Введите причину подробнее."); return
+    data = await state.get_data(); rid = int(data["reject_return_id"])
+    item = await resolve_paypal_return(rid, "rejected", message.from_user.id, reason)
+    await state.clear()
+    if item is None: await message.answer("Возврат уже обработан."); return
+    try: await message.bot.send_message(item.user_id, f"❌ <b>Возврат отклонён</b>\n\nПричина: {reason}", reply_markup=back_home())
+    except Exception: pass
+    await message.answer("Возврат отклонён.", reply_markup=returns_menu(await list_paypal_returns()))
+
+
+@router.callback_query(F.data == "paypal_database")
+async def paypal_database_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): await callback.answer("Нет доступа", show_alert=True); return
+    counts = await get_paypal_database_counts()
+    await render_screen(callback, "paypal", "<b>💳 База PayPal</b>\n\nПросмотр тегов, статусов и PayPal в работе по датам.", paypal_database_menu(counts)); await callback.answer()
+
+
+@router.callback_query(F.data.startswith("paypal_db_list:"))
+async def paypal_db_list_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): return
+    filter_name = callback.data.split(":")[1]; tags = await list_paypal_tags(filter_name)
+    await callback.message.edit_caption(caption=f"<b>💳 PayPal: {filter_name}</b>\n\nНайдено: <b>{len(tags)}</b>", reply_markup=paypal_list_menu(tags, filter_name)); await callback.answer()
+
+
+@router.callback_query(F.data.startswith("paypal_card:"))
+async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): return
+    _, tid, filter_name = callback.data.split(":", 2); tag = await get_paypal_tag(int(tid))
+    if tag is None: await callback.answer("Не найден", show_alert=True); return
+    text=(f"<b>💳 {tag.tag}</b>\n\nСтатус: <b>{tag.status}</b>\nПользователь ID: <code>{tag.issued_to_user_id or '—'}</code>\n"
+          f"Выдан: {format_dt(tag.issued_at)}\nДобавлен: {format_dt(tag.created_at)}")
+    await callback.message.edit_caption(caption=text, reply_markup=paypal_card_admin_menu(tag.id, filter_name)); await callback.answer()
+
+
+@router.callback_query(F.data.startswith("paypal_mark_"))
+async def paypal_mark_status_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): return
+    parts=callback.data.split(":"); action=parts[0]; tid=int(parts[1]); filter_name=parts[2]
+    status="gestoppt" if action=="paypal_mark_gestoppt" else "available"
+    await set_paypal_tag_status(tid,status)
+    tags = await list_paypal_tags(filter_name)
+    await callback.message.edit_caption(caption=f"<b>💳 PayPal: {filter_name}</b>\n\nНайдено: <b>{len(tags)}</b>", reply_markup=paypal_list_menu(tags, filter_name))
+    await callback.answer("Статус обновлён")
+
+
+@router.callback_query(F.data == "working_dates")
+async def working_dates_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): return
+    rows=await get_working_dates()
+    await callback.message.edit_caption(caption="<b>👤 PayPal в работе по датам</b>\n\nВыберите дату выдачи:", reply_markup=working_dates_menu(rows)); await callback.answer()
+
+
+@router.callback_query(F.data.startswith("working_day:"))
+async def working_day_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): return
+    day=callback.data.split(":",1)[1]; reqs=await get_working_requests_by_date(day)
+    total=sum(r.amount for r in reqs)
+    await callback.message.edit_caption(caption=f"<b>📅 PayPal в работе за {day}</b>\n\nКоличество: <b>{len(reqs)}</b>\nОбщая сумма: <b>{total} €</b>", reply_markup=working_day_menu(day,reqs)); await callback.answer()
+
+
+@router.callback_query(F.data.startswith("collect_notify:"))
+async def collect_notify_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): return
+    day=callback.data.split(":",1)[1]; reqs=await get_working_requests_by_date(day); sent=0
+    for req in reqs:
+        marked=await mark_collection_notified(req.id)
+        if not marked: continue
+        tag=await get_paypal_tag(req.paypal_tag_id)
+        try:
+            await callback.bot.send_message(req.user_id,
+                f"⚠️ <b>Через 30 минут администрация заберёт неподтверждённые PayPal</b>\n\n"
+                f"Дата выдачи: <b>{day}</b>\nPayPal: <code>{tag.tag if tag else '—'}</code>\nСумма: <b>{req.amount} €</b>\n\n"
+                "Выберите: он ещё нужен или его можно вернуть.", reply_markup=collection_choice_menu(req.id)); sent+=1
+        except Exception: pass
+    await callback.answer(f"Уведомлено: {sent}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("collect_keep:"))
+async def collect_keep_handler(callback: CallbackQuery) -> None:
+    req=await confirm_paypal_keep(int(callback.data.split(":")[1]), callback.from_user.id)
+    if req is None: await callback.answer("PayPal недоступен", show_alert=True); return
+    await callback.message.edit_text("✅ Подтверждено: этот PayPal вам ещё нужен."); await callback.answer()
+
+
+@router.callback_query(F.data.startswith("collect_take:"))
+async def collect_take_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id): return
+    day=callback.data.split(":",1)[1]; reqs=await list_unconfirmed_collection(day); created=0
+    for req in reqs:
+        item=await create_paypal_return(req.id, req.user_id, "collection_timeout", "Не подтверждён после уведомления о сборе")
+        if item: created+=1
+    items = await list_paypal_returns()
+    await render_screen(callback, "paypal", f"<b>↩️ Возвраты PayPal</b>\n\nОжидают проверки: <b>{len(items)}</b>", returns_menu(items))
+    await callback.answer(f"Передано в возвраты: {created}", show_alert=True)

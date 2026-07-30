@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, select, text, func
@@ -56,6 +56,24 @@ class Request(Base):
     payout_amount: Mapped[Optional[float]] = mapped_column(Numeric(12, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    collection_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    keep_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class PaypalReturn(Base):
+    __tablename__ = "paypal_returns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[int] = mapped_column(Integer, ForeignKey("requests.id"), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    paypal_tag_id: Mapped[int] = mapped_column(Integer, ForeignKey("paypal_tags.id"), index=True)
+    reason_code: Mapped[str] = mapped_column(String(32))
+    reason_text: Mapped[str] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    admin_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    resolved_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
 
 class RateRule(Base):
@@ -107,6 +125,10 @@ async def init_db() -> None:
         # v1.6: автоматический расчёт процентов и суммы к выплате.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_percent INTEGER"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_amount NUMERIC(12,2)"))
+        # v1.6.4: возвраты и массовый сбор PayPal.
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS collection_notified_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS keep_confirmed_at TIMESTAMP"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_paypal_returns_status ON paypal_returns (status)"))
         # Для существующей таблицы задаём серверное значение даты: raw SQL INSERT иначе не применяет Python default.
         await conn.execute(text("ALTER TABLE rate_rules ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP"))
         await conn.execute(text("INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (50, 60, CURRENT_TIMESTAMP) ON CONFLICT (min_amount) DO NOTHING"))
@@ -592,3 +614,153 @@ async def get_finance_summary() -> dict[str, float | int]:
             select(func.coalesce(func.sum(Request.payout_amount), 0)).where(Request.status == "paid_out")
         ) or 0)
         return {"received": received, "payout": payout, "profit": received-payout, "pending": pending, "paid": paid}
+
+
+async def create_paypal_return(request_id: int, user_id: int, reason_code: str, reason_text: str) -> PaypalReturn | None:
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if req is None or req.user_id != user_id or req.status != "paypal_issued" or req.paypal_tag_id is None:
+            return None
+        existing = await session.scalar(select(PaypalReturn).where(PaypalReturn.request_id == request_id))
+        if existing:
+            return existing
+        item = PaypalReturn(request_id=request_id, user_id=user_id, paypal_tag_id=req.paypal_tag_id,
+                            reason_code=reason_code, reason_text=reason_text, status="pending")
+        session.add(item)
+        req.status = "return_pending"
+        req.updated_at = datetime.utcnow()
+        tag = await session.get(PaypalTag, req.paypal_tag_id)
+        if tag:
+            tag.status = "return_pending"
+        await session.commit()
+        await session.refresh(item)
+        return item
+
+
+async def list_paypal_returns(status: str = "pending", limit: int = 50) -> list[PaypalReturn]:
+    async with SessionLocal() as session:
+        rows = await session.scalars(select(PaypalReturn).where(PaypalReturn.status == status).order_by(PaypalReturn.created_at.asc()).limit(limit))
+        return list(rows)
+
+
+async def get_paypal_return(return_id: int) -> PaypalReturn | None:
+    async with SessionLocal() as session:
+        return await session.get(PaypalReturn, return_id)
+
+
+async def resolve_paypal_return(return_id: int, action: str, admin_id: int, admin_reason: str) -> PaypalReturn | None:
+    async with SessionLocal() as session:
+        item = await session.get(PaypalReturn, return_id, with_for_update=True)
+        if item is None or item.status != "pending":
+            return None
+        req = await session.get(Request, item.request_id, with_for_update=True)
+        tag = await session.get(PaypalTag, item.paypal_tag_id, with_for_update=True)
+        if req is None or tag is None:
+            return None
+        now = datetime.utcnow()
+        item.status = action
+        item.admin_reason = admin_reason
+        item.resolved_at = now
+        item.resolved_by = admin_id
+        if action == "returned":
+            tag.status = "available"
+            tag.issued_to_user_id = None
+            tag.issued_at = None
+            req.status = "returned"
+        elif action == "gestoppt":
+            tag.status = "gestoppt"
+            tag.issued_to_user_id = None
+            req.status = "returned_gestoppt"
+        elif action == "rejected":
+            tag.status = "issued"
+            req.status = "paypal_issued"
+        req.updated_at = now
+        await session.commit()
+        await session.refresh(item)
+        return item
+
+
+async def get_paypal_database_counts() -> dict[str, int]:
+    async with SessionLocal() as session:
+        result = {key: int(await session.scalar(select(func.count()).select_from(PaypalTag).where(PaypalTag.status == key)) or 0)
+                  for key in ("available", "issued", "return_pending", "gestoppt")}
+        result["all"] = int(await session.scalar(select(func.count()).select_from(PaypalTag)) or 0)
+        return result
+
+
+async def list_paypal_tags(filter_name: str = "all", limit: int = 50) -> list[PaypalTag]:
+    async with SessionLocal() as session:
+        query = select(PaypalTag).order_by(PaypalTag.id.desc())
+        if filter_name != "all":
+            query = query.where(PaypalTag.status == filter_name)
+        return list(await session.scalars(query.limit(limit)))
+
+
+async def set_paypal_tag_status(tag_id: int, status: str) -> PaypalTag | None:
+    if status not in {"available", "gestoppt"}:
+        raise ValueError("Unsupported PayPal status")
+    async with SessionLocal() as session:
+        tag = await session.get(PaypalTag, tag_id)
+        if tag is None:
+            return None
+        tag.status = status
+        if status in {"available", "gestoppt"}:
+            tag.issued_to_user_id = None
+            if status == "available":
+                tag.issued_at = None
+        await session.commit()
+        await session.refresh(tag)
+        return tag
+
+
+async def get_working_dates() -> list[tuple[str, int]]:
+    async with SessionLocal() as session:
+        rows = (await session.execute(text("""
+            SELECT TO_CHAR(issued_at, 'YYYY-MM-DD') AS day, COUNT(*)
+            FROM paypal_tags
+            WHERE status = 'issued' AND issued_at IS NOT NULL
+            GROUP BY day ORDER BY day DESC
+        """))).all()
+        return [(str(day), int(count)) for day, count in rows]
+
+
+async def get_working_requests_by_date(day: str) -> list[Request]:
+    async with SessionLocal() as session:
+        rows = await session.scalars(
+            select(Request).join(PaypalTag, PaypalTag.id == Request.paypal_tag_id).where(
+                PaypalTag.status == "issued", func.to_char(PaypalTag.issued_at, 'YYYY-MM-DD') == day,
+                Request.status == "paypal_issued"
+            ).order_by(PaypalTag.issued_at.asc())
+        )
+        return list(rows)
+
+
+async def mark_collection_notified(request_id: int) -> Request | None:
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id)
+        if req is None or req.status != "paypal_issued":
+            return None
+        req.collection_notified_at = datetime.utcnow()
+        req.keep_confirmed_at = None
+        await session.commit(); await session.refresh(req); return req
+
+
+async def confirm_paypal_keep(request_id: int, user_id: int) -> Request | None:
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id)
+        if req is None or req.user_id != user_id or req.status != "paypal_issued":
+            return None
+        req.keep_confirmed_at = datetime.utcnow()
+        await session.commit(); await session.refresh(req); return req
+
+
+async def list_unconfirmed_collection(day: str) -> list[Request]:
+    async with SessionLocal() as session:
+        rows = await session.scalars(
+            select(Request).join(PaypalTag, PaypalTag.id == Request.paypal_tag_id).where(
+                PaypalTag.status == "issued", func.to_char(PaypalTag.issued_at, 'YYYY-MM-DD') == day,
+                Request.status == "paypal_issued", Request.collection_notified_at.is_not(None),
+                Request.keep_confirmed_at.is_(None)
+            )
+        )
+        return list(rows)
