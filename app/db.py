@@ -1,7 +1,7 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, func, select
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -18,6 +18,10 @@ class User(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    decided_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
 
 class PaypalTag(Base):
@@ -51,30 +55,77 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+        # create_all не добавляет новые столбцы в уже существующие таблицы.
+        # Поэтому обновляем таблицу users безопасными ALTER TABLE.
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20)"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS applied_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS decided_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS decided_by BIGINT"))
 
-async def get_or_create_user(user_id: int, username: str | None) -> None:
+        # Все пользователи, которые были в базе до v1.3, сохраняют доступ.
+        await conn.execute(text("UPDATE users SET status = 'approved' WHERE status IS NULL"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN status SET DEFAULT 'pending'"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN status SET NOT NULL"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_status ON users (status)"))
+
+
+async def get_or_create_user(user_id: int, username: str | None) -> User:
     async with SessionLocal() as session:
         user = await session.get(User, user_id)
         if user is None:
-            session.add(User(id=user_id, username=username))
+            user = User(id=user_id, username=username, status="pending")
+            session.add(user)
         else:
             user.username = username
         await session.commit()
+        await session.refresh(user)
+        return user
+
+
+async def get_user(user_id: int) -> User | None:
+    async with SessionLocal() as session:
+        return await session.get(User, user_id)
+
+
+async def submit_membership_application(user_id: int) -> User | None:
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id)
+        if user is None or user.status in {"approved", "blocked"}:
+            return user
+        if user.applied_at is None:
+            user.applied_at = datetime.utcnow()
+        user.status = "pending"
+        await session.commit()
+        await session.refresh(user)
+        return user
+
+
+async def set_user_access_status(user_id: int, status: str, admin_id: int) -> User | None:
+    if status not in {"approved", "rejected", "blocked", "pending"}:
+        raise ValueError("Unsupported user status")
+
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            return None
+        user.status = status
+        user.decided_at = datetime.utcnow()
+        user.decided_by = admin_id
+        await session.commit()
+        await session.refresh(user)
+        return user
 
 
 async def add_paypal_tags(tags: list[str]) -> tuple[int, int]:
     added = 0
     duplicates = 0
     async with SessionLocal() as session:
-        existing = set(
-            await session.scalars(select(PaypalTag.tag).where(PaypalTag.tag.in_(tags)))
-        ) if tags else set()
         for tag in tags:
-            if tag in existing:
+            exists = await session.scalar(select(PaypalTag).where(PaypalTag.tag == tag))
+            if exists:
                 duplicates += 1
                 continue
             session.add(PaypalTag(tag=tag))
-            existing.add(tag)
             added += 1
         await session.commit()
     return added, duplicates
@@ -100,6 +151,7 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
             req = await session.get(Request, request_id, with_for_update=True)
             if req is None or req.status != "waiting_issue":
                 return req, None
+
             tag = await session.scalar(
                 select(PaypalTag)
                 .where(PaypalTag.status == "available")
@@ -109,12 +161,15 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
             )
             if tag is None:
                 return req, None
+
             tag.status = "issued"
             tag.issued_to_user_id = req.user_id
             tag.issued_at = datetime.utcnow()
+
             req.paypal_tag_id = tag.id
             req.status = "paypal_issued"
             req.updated_at = datetime.utcnow()
+
         await session.refresh(req)
         await session.refresh(tag)
         return req, tag
@@ -143,84 +198,18 @@ async def set_request_status(request_id: int, status: str) -> Request | None:
         return req
 
 
-async def get_user_requests(user_id: int, limit: int = 10) -> list[Request]:
+async def get_user_requests(user_id: int) -> list[Request]:
     async with SessionLocal() as session:
         rows = await session.scalars(
-            select(Request).where(Request.user_id == user_id).order_by(Request.id.desc()).limit(limit)
+            select(Request)
+            .where(Request.user_id == user_id)
+            .order_by(Request.id.desc())
+            .limit(10)
         )
         return list(rows)
 
 
-async def get_requests(status: str | None = None, limit: int = 20) -> list[Request]:
-    async with SessionLocal() as session:
-        query = select(Request).order_by(Request.id.desc()).limit(limit)
-        if status:
-            query = query.where(Request.status == status)
-        return list(await session.scalars(query))
-
-
-async def get_user(user_id: int) -> User | None:
-    async with SessionLocal() as session:
-        return await session.get(User, user_id)
-
-
-async def get_recent_users(limit: int = 20) -> list[User]:
-    async with SessionLocal() as session:
-        return list(await session.scalars(select(User).order_by(User.created_at.desc()).limit(limit)))
-
-
-async def get_paypal_tags(status: str | None = None, limit: int = 30) -> list[PaypalTag]:
-    async with SessionLocal() as session:
-        query = select(PaypalTag).order_by(PaypalTag.id.desc()).limit(limit)
-        if status:
-            query = query.where(PaypalTag.status == status)
-        return list(await session.scalars(query))
-
-
-async def find_paypal_tag(value: str) -> PaypalTag | None:
-    normalized = value.strip()
-    if normalized and not normalized.startswith("@"):
-        normalized = "@" + normalized
-    async with SessionLocal() as session:
-        return await session.scalar(select(PaypalTag).where(func.lower(PaypalTag.tag) == normalized.lower()))
-
-
-async def delete_paypal_tag(value: str) -> tuple[bool, str]:
-    normalized = value.strip()
-    if normalized and not normalized.startswith("@"):
-        normalized = "@" + normalized
-    async with SessionLocal() as session:
-        tag = await session.scalar(select(PaypalTag).where(func.lower(PaypalTag.tag) == normalized.lower()))
-        if tag is None:
-            return False, "not_found"
-        if tag.status != "available":
-            return False, "issued"
-        await session.delete(tag)
-        await session.commit()
-        return True, "deleted"
-
-
 async def count_available_tags() -> int:
     async with SessionLocal() as session:
-        return int(await session.scalar(select(func.count()).select_from(PaypalTag).where(PaypalTag.status == "available")) or 0)
-
-
-async def get_admin_stats() -> dict[str, int]:
-    today = datetime.utcnow() - timedelta(hours=24)
-    async with SessionLocal() as session:
-        users = int(await session.scalar(select(func.count()).select_from(User)) or 0)
-        available = int(await session.scalar(select(func.count()).select_from(PaypalTag).where(PaypalTag.status == "available")) or 0)
-        issued = int(await session.scalar(select(func.count()).select_from(PaypalTag).where(PaypalTag.status == "issued")) or 0)
-        waiting_issue = int(await session.scalar(select(func.count()).select_from(Request).where(Request.status == "waiting_issue")) or 0)
-        waiting_check = int(await session.scalar(select(func.count()).select_from(Request).where(Request.status == "waiting_check")) or 0)
-        paid = int(await session.scalar(select(func.count()).select_from(Request).where(Request.status == "paid")) or 0)
-        paid_24h = int(await session.scalar(select(func.count()).select_from(Request).where(Request.status == "paid", Request.updated_at >= today)) or 0)
-    return {
-        "users": users,
-        "available": available,
-        "issued": issued,
-        "waiting_issue": waiting_issue,
-        "waiting_check": waiting_check,
-        "paid": paid,
-        "paid_24h": paid_24h,
-    }
+        rows = await session.scalars(select(PaypalTag).where(PaypalTag.status == "available"))
+        return len(list(rows))
