@@ -8,10 +8,7 @@ def main_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📂 Мои PayPal", callback_data="my_paypals"),
             InlineKeyboardButton(text="📈 Мои профиты", callback_data="my_profits"),
         ],
-        [
-            InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
-            InlineKeyboardButton(text="🔗 Наши ссылки", callback_data="links"),
-        ],
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
         [InlineKeyboardButton(text="🛟 Поддержка", callback_data="support")],
     ])
 

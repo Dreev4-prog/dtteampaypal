@@ -298,9 +298,12 @@ async def support_command(message: Message, state: FSMContext) -> None:
     await message.answer_photo(
         photo=FSInputFile(BANNERS["support"]),
         caption=(
-            "<b>Поддержка DT Team</b>\n\n"
-            "По вопросам заявок напишите администратору:\n"
-            "@your_support"
+            "<b>🛟 Поддержка</b>\n\n"
+            "Если у вас возникли вопросы или проблемы, свяжитесь с нами.\n\n"
+            "💬 <b>Чат поддержки</b>\n"
+            "@workzin\n\n"
+            "📢 <b>Новости</b>\n"
+            "@profitgeld"
         ),
         reply_markup=back_home(),
     )
@@ -684,22 +687,6 @@ async def profile(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data == "links")
-async def links(callback: CallbackQuery) -> None:
-    if not await has_access(callback):
-        return
-    await render_screen(
-        callback,
-        "links",
-        "<b>Наши ссылки</b>\n\n"
-        "📢 Telegram-канал: @your_channel\n"
-        "🌐 Сайт: your-site.com\n"
-        "💬 Чат поддержки: @your_support",
-        back_home(),
-    )
-    await callback.answer()
-
-
 @router.callback_query(F.data == "support")
 async def support(callback: CallbackQuery) -> None:
     if not await has_access(callback):
@@ -707,9 +694,12 @@ async def support(callback: CallbackQuery) -> None:
     await render_screen(
         callback,
         "support",
-        "<b>Поддержка DT Team</b>\n\n"
-        "По вопросам заявок напишите администратору:\n"
-        "@your_support",
+        "<b>🛟 Поддержка</b>\n\n"
+        "Если у вас возникли вопросы или проблемы, свяжитесь с нами.\n\n"
+        "💬 <b>Чат поддержки</b>\n"
+        "@workzin\n\n"
+        "📢 <b>Новости</b>\n"
+        "@profitgeld",
         back_home(),
     )
     await callback.answer()
