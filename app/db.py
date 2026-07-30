@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, select
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -66,12 +66,15 @@ async def add_paypal_tags(tags: list[str]) -> tuple[int, int]:
     added = 0
     duplicates = 0
     async with SessionLocal() as session:
+        existing = set(
+            await session.scalars(select(PaypalTag.tag).where(PaypalTag.tag.in_(tags)))
+        ) if tags else set()
         for tag in tags:
-            exists = await session.scalar(select(PaypalTag).where(PaypalTag.tag == tag))
-            if exists:
+            if tag in existing:
                 duplicates += 1
                 continue
             session.add(PaypalTag(tag=tag))
+            existing.add(tag)
             added += 1
         await session.commit()
     return added, duplicates
@@ -97,7 +100,6 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
             req = await session.get(Request, request_id, with_for_update=True)
             if req is None or req.status != "waiting_issue":
                 return req, None
-
             tag = await session.scalar(
                 select(PaypalTag)
                 .where(PaypalTag.status == "available")
@@ -107,15 +109,12 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
             )
             if tag is None:
                 return req, None
-
             tag.status = "issued"
             tag.issued_to_user_id = req.user_id
             tag.issued_at = datetime.utcnow()
-
             req.paypal_tag_id = tag.id
             req.status = "paypal_issued"
             req.updated_at = datetime.utcnow()
-
         await session.refresh(req)
         await session.refresh(tag)
         return req, tag
@@ -144,18 +143,84 @@ async def set_request_status(request_id: int, status: str) -> Request | None:
         return req
 
 
-async def get_user_requests(user_id: int) -> list[Request]:
+async def get_user_requests(user_id: int, limit: int = 10) -> list[Request]:
     async with SessionLocal() as session:
         rows = await session.scalars(
-            select(Request)
-            .where(Request.user_id == user_id)
-            .order_by(Request.id.desc())
-            .limit(10)
+            select(Request).where(Request.user_id == user_id).order_by(Request.id.desc()).limit(limit)
         )
         return list(rows)
 
 
+async def get_requests(status: str | None = None, limit: int = 20) -> list[Request]:
+    async with SessionLocal() as session:
+        query = select(Request).order_by(Request.id.desc()).limit(limit)
+        if status:
+            query = query.where(Request.status == status)
+        return list(await session.scalars(query))
+
+
+async def get_user(user_id: int) -> User | None:
+    async with SessionLocal() as session:
+        return await session.get(User, user_id)
+
+
+async def get_recent_users(limit: int = 20) -> list[User]:
+    async with SessionLocal() as session:
+        return list(await session.scalars(select(User).order_by(User.created_at.desc()).limit(limit)))
+
+
+async def get_paypal_tags(status: str | None = None, limit: int = 30) -> list[PaypalTag]:
+    async with SessionLocal() as session:
+        query = select(PaypalTag).order_by(PaypalTag.id.desc()).limit(limit)
+        if status:
+            query = query.where(PaypalTag.status == status)
+        return list(await session.scalars(query))
+
+
+async def find_paypal_tag(value: str) -> PaypalTag | None:
+    normalized = value.strip()
+    if normalized and not normalized.startswith("@"):
+        normalized = "@" + normalized
+    async with SessionLocal() as session:
+        return await session.scalar(select(PaypalTag).where(func.lower(PaypalTag.tag) == normalized.lower()))
+
+
+async def delete_paypal_tag(value: str) -> tuple[bool, str]:
+    normalized = value.strip()
+    if normalized and not normalized.startswith("@"):
+        normalized = "@" + normalized
+    async with SessionLocal() as session:
+        tag = await session.scalar(select(PaypalTag).where(func.lower(PaypalTag.tag) == normalized.lower()))
+        if tag is None:
+            return False, "not_found"
+        if tag.status != "available":
+            return False, "issued"
+        await session.delete(tag)
+        await session.commit()
+        return True, "deleted"
+
+
 async def count_available_tags() -> int:
     async with SessionLocal() as session:
-        rows = await session.scalars(select(PaypalTag).where(PaypalTag.status == "available"))
-        return len(list(rows))
+        return int(await session.scalar(select(func.count()).select_from(PaypalTag).where(PaypalTag.status == "available")) or 0)
+
+
+async def get_admin_stats() -> dict[str, int]:
+    today = datetime.utcnow() - timedelta(hours=24)
+    async with SessionLocal() as session:
+        users = int(await session.scalar(select(func.count()).select_from(User)) or 0)
+        available = int(await session.scalar(select(func.count()).select_from(PaypalTag).where(PaypalTag.status == "available")) or 0)
+        issued = int(await session.scalar(select(func.count()).select_from(PaypalTag).where(PaypalTag.status == "issued")) or 0)
+        waiting_issue = int(await session.scalar(select(func.count()).select_from(Request).where(Request.status == "waiting_issue")) or 0)
+        waiting_check = int(await session.scalar(select(func.count()).select_from(Request).where(Request.status == "waiting_check")) or 0)
+        paid = int(await session.scalar(select(func.count()).select_from(Request).where(Request.status == "paid")) or 0)
+        paid_24h = int(await session.scalar(select(func.count()).select_from(Request).where(Request.status == "paid", Request.updated_at >= today)) or 0)
+    return {
+        "users": users,
+        "available": available,
+        "issued": issued,
+        "waiting_issue": waiting_issue,
+        "waiting_check": waiting_check,
+        "paid": paid,
+        "paid_24h": paid_24h,
+    }
