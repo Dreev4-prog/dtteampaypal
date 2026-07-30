@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, FSInputFile, InputMediaPhoto, Message
@@ -9,11 +11,15 @@ from app.config import settings
 from app.db import (
     add_paypal_tags,
     count_available_tags,
+    count_user_paypals,
     create_request,
     get_or_create_user,
     get_user,
     get_request,
     get_user_requests,
+    get_user_counts,
+    list_users,
+    search_users,
     issue_paypal,
     mark_paid_by_user,
     set_request_status,
@@ -22,16 +28,25 @@ from app.db import (
 )
 from app.keyboards import (
     admin_check_menu,
+    admin_main_menu,
     admin_request_menu,
     amounts_menu,
     back_home,
     main_menu,
     membership_admin_menu,
     membership_apply_menu,
+    member_card_menu,
+    members_list_menu,
+    members_menu,
+    cancel_search_menu,
     paid_button,
 )
 
 router = Router()
+
+
+class MemberSearch(StatesGroup):
+    query = State()
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
@@ -89,7 +104,7 @@ async def show_home(target: Message | CallbackQuery) -> None:
 
     if user is None:
         username = target.from_user.username
-        user = await get_or_create_user(user_id, username)
+        user = await get_or_create_user(user_id, username, target.from_user.full_name)
 
     if user.status == "blocked":
         await render_screen(
@@ -147,7 +162,7 @@ async def has_access(callback: CallbackQuery) -> bool:
 
 @router.message(CommandStart())
 async def start(message: Message) -> None:
-    await get_or_create_user(message.from_user.id, message.from_user.username)
+    await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
     await show_home(message)
 
 
@@ -368,16 +383,195 @@ async def support(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+async def show_admin_home(target: Message | CallbackQuery) -> None:
+    available = await count_available_tags()
+    counts = await get_user_counts()
+    text = (
+        "👨‍💼 <b>Админ-панель</b>\n\n"
+        f"👥 Всего пользователей: <b>{counts['all']}</b>\n"
+        f"🟡 Ожидают решения: <b>{counts['pending']}</b>\n"
+        f"💳 Свободных PayPal: <b>{available}</b>\n\n"
+        "Добавление тегов пока доступно командой:\n"
+        "<code>/addtags @tag1 @tag2 @tag3</code>"
+    )
+    markup = admin_main_menu(counts["pending"])
+    if isinstance(target, Message):
+        await target.answer(text, reply_markup=markup)
+    else:
+        await target.message.edit_text(text, reply_markup=markup)
+
+
 @router.message(Command("admin"))
 async def admin_panel(message: Message) -> None:
     if not is_admin(message.from_user.id):
         return
-    available = await count_available_tags()
+    await show_admin_home(message)
+
+
+@router.callback_query(F.data == "admin_home")
+async def admin_home(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await show_admin_home(callback)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "members_menu")
+async def members_panel(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    counts = await get_user_counts()
+    await callback.message.edit_text(
+        "👥 <b>Участники</b>\n\n"
+        "Выберите список или найдите пользователя по ID, username либо имени.",
+        reply_markup=members_menu(counts),
+    )
+    await callback.answer()
+
+
+STATUS_TITLES = {
+    "all": "Все участники",
+    "approved": "Активные участники",
+    "pending": "Ожидают решения",
+    "rejected": "Отклонённые",
+    "blocked": "Заблокированные",
+}
+
+
+@router.callback_query(F.data.startswith("members_list:"))
+async def members_list_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, status, offset_raw = callback.data.split(":", 2)
+    if status not in STATUS_TITLES:
+        await callback.answer("Неизвестный фильтр", show_alert=True)
+        return
+    offset = max(0, int(offset_raw))
+    page_size = 10
+    users, has_next = await list_users(status=status, offset=offset, limit=page_size)
+    page = offset // page_size + 1
+    text = f"👥 <b>{STATUS_TITLES[status]}</b>\nСтраница: <b>{page}</b>\n\n"
+    if not users:
+        text += "Пользователи не найдены."
+    else:
+        text += "Нажмите на пользователя, чтобы открыть карточку."
+    await callback.message.edit_text(
+        text,
+        reply_markup=members_list_menu(users, status, offset, page_size, has_next),
+    )
+    await callback.answer()
+
+
+def format_dt(value) -> str:
+    return value.strftime("%d.%m.%Y %H:%M") if value else "—"
+
+
+async def show_member_card(callback: CallbackQuery, user_id: int) -> None:
+    user = await get_user(user_id)
+    if user is None:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    issued_count = await count_user_paypals(user_id)
+    status_names = {
+        "pending": "🟡 Ожидает",
+        "approved": "🟢 Активен",
+        "rejected": "❌ Отклонён",
+        "blocked": "🚫 Заблокирован",
+    }
+    username = f"@{user.username}" if user.username else "не указан"
+    name = user.full_name or "не указано"
+    approver = f"<code>{user.decided_by}</code>" if user.decided_by else "—"
+    text = (
+        "👤 <b>Карточка участника</b>\n\n"
+        f"Имя: <b>{name}</b>\n"
+        f"Username: {username}\n"
+        f"Telegram ID: <code>{user.id}</code>\n"
+        f"Статус: <b>{status_names.get(user.status, user.status)}</b>\n\n"
+        f"Регистрация: {format_dt(user.created_at)}\n"
+        f"Заявка подана: {format_dt(user.applied_at)}\n"
+        f"Решение принято: {format_dt(user.decided_at)}\n"
+        f"Администратор: {approver}\n\n"
+        f"Выдано PayPal: <b>{issued_count}</b>"
+    )
+    await callback.message.edit_text(text, reply_markup=member_card_menu(user.id, user.status))
+
+
+@router.callback_query(F.data.startswith("member_card:"))
+async def member_card_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    user_id = int(callback.data.split(":", 1)[1])
+    await show_member_card(callback, user_id)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("member_set:"))
+async def member_set_status_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, status, user_id_raw = callback.data.split(":", 2)
+    user_id = int(user_id_raw)
+    user = await set_user_access_status(user_id, status, callback.from_user.id)
+    if user is None:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+
+    notifications = {
+        "approved": ("🎉 <b>Доступ одобрен</b>\n\nДобро пожаловать в DT Team!", main_menu()),
+        "pending": ("↩️ Ваш доступ временно отозван. Ожидайте решения администратора.", None),
+        "rejected": ("❌ Ваша заявка отклонена. По вопросам обратитесь в поддержку.", None),
+        "blocked": ("🚫 Ваш доступ к сервису заблокирован.", None),
+    }
+    text, markup = notifications[status]
+    try:
+        await callback.bot.send_message(user_id, text, reply_markup=markup)
+    except Exception:
+        pass
+    await show_member_card(callback, user_id)
+    await callback.answer("Статус обновлён")
+
+
+@router.callback_query(F.data == "member_search")
+async def member_search_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(MemberSearch.query)
+    await callback.message.edit_text(
+        "🔍 <b>Поиск пользователя</b>\n\n"
+        "Отправьте Telegram ID, @username или имя пользователя.",
+        reply_markup=cancel_search_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(MemberSearch.query)
+async def member_search_result(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    query = (message.text or "").strip()
+    if not query:
+        await message.answer("Введите ID, username или имя.", reply_markup=cancel_search_menu())
+        return
+    users = await search_users(query)
+    await state.clear()
+    if not users:
+        await message.answer(
+            "🔍 Пользователь не найден.",
+            reply_markup=members_menu(await get_user_counts()),
+        )
+        return
     await message.answer(
-        "<b>Админ-панель</b>\n\n"
-        f"Свободных PayPal: <b>{available}</b>\n\n"
-        "Чтобы добавить теги, отправьте команду:\n"
-        "<code>/addtags @tag1 @tag2 @tag3</code>"
+        f"🔍 <b>Результаты поиска</b>\n\nНайдено: <b>{len(users)}</b>",
+        reply_markup=members_list_menu(users, "all", 0, 10, False),
     )
 
 

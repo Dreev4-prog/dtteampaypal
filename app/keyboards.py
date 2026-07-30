@@ -28,6 +28,72 @@ def membership_admin_menu(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="❌ Отклонить", callback_data=f"membership_reject:{user_id}"),
         ],
         [InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"membership_block:{user_id}")],
+        [InlineKeyboardButton(text="👤 Открыть карточку", callback_data=f"member_card:{user_id}")],
+    ])
+
+
+def admin_main_menu(pending_count: int = 0) -> InlineKeyboardMarkup:
+    pending_label = f"👥 Участники · {pending_count} ждут" if pending_count else "👥 Участники"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=pending_label, callback_data="members_menu")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_home")],
+    ])
+
+
+def members_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📋 Все ({counts.get('all', 0)})", callback_data="members_list:all:0")],
+        [
+            InlineKeyboardButton(text=f"🟢 Активные ({counts.get('approved', 0)})", callback_data="members_list:approved:0"),
+            InlineKeyboardButton(text=f"🟡 Ожидают ({counts.get('pending', 0)})", callback_data="members_list:pending:0"),
+        ],
+        [
+            InlineKeyboardButton(text=f"❌ Отклонённые ({counts.get('rejected', 0)})", callback_data="members_list:rejected:0"),
+            InlineKeyboardButton(text=f"🚫 Заблокированные ({counts.get('blocked', 0)})", callback_data="members_list:blocked:0"),
+        ],
+        [InlineKeyboardButton(text="🔍 Поиск пользователя", callback_data="member_search")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
+    ])
+
+
+def members_list_menu(users: list, status: str, offset: int, page_size: int, has_next: bool) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for user in users:
+        username = f"@{user.username}" if user.username else str(user.id)
+        rows.append([InlineKeyboardButton(text=username, callback_data=f"member_card:{user.id}")])
+
+    navigation: list[InlineKeyboardButton] = []
+    if offset > 0:
+        navigation.append(InlineKeyboardButton(text="⬅️", callback_data=f"members_list:{status}:{max(0, offset-page_size)}"))
+    if has_next:
+        navigation.append(InlineKeyboardButton(text="➡️", callback_data=f"members_list:{status}:{offset+page_size}"))
+    if navigation:
+        rows.append(navigation)
+
+    rows.append([InlineKeyboardButton(text="⬅️ Участники", callback_data="members_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def member_card_menu(user_id: int, status: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if status != "approved":
+        rows.append([InlineKeyboardButton(text="✅ Одобрить", callback_data=f"member_set:approved:{user_id}")])
+    if status != "rejected":
+        rows.append([InlineKeyboardButton(text="❌ Отклонить", callback_data=f"member_set:rejected:{user_id}")])
+    if status != "blocked":
+        rows.append([InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"member_set:blocked:{user_id}")])
+    if status == "blocked":
+        rows.append([InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"member_set:approved:{user_id}")])
+    if status == "approved":
+        rows.append([InlineKeyboardButton(text="↩️ Отозвать доступ", callback_data=f"member_set:pending:{user_id}")])
+    rows.append([InlineKeyboardButton(text="💬 Написать пользователю", url=f"tg://user?id={user_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К участникам", callback_data="members_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def cancel_search_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="members_menu")]
     ])
 
 

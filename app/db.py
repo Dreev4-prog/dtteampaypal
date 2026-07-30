@@ -17,6 +17,7 @@ class User(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
     applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -57,6 +58,7 @@ async def init_db() -> None:
 
         # create_all не добавляет новые столбцы в уже существующие таблицы.
         # Поэтому обновляем таблицу users безопасными ALTER TABLE.
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(255)"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20)"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS applied_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS decided_at TIMESTAMP"))
@@ -69,14 +71,15 @@ async def init_db() -> None:
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_status ON users (status)"))
 
 
-async def get_or_create_user(user_id: int, username: str | None) -> User:
+async def get_or_create_user(user_id: int, username: str | None, full_name: str | None = None) -> User:
     async with SessionLocal() as session:
         user = await session.get(User, user_id)
         if user is None:
-            user = User(id=user_id, username=username, status="pending")
+            user = User(id=user_id, username=username, full_name=full_name, status="pending")
             session.add(user)
         else:
             user.username = username
+            user.full_name = full_name
         await session.commit()
         await session.refresh(user)
         return user
@@ -213,3 +216,51 @@ async def count_available_tags() -> int:
     async with SessionLocal() as session:
         rows = await session.scalars(select(PaypalTag).where(PaypalTag.status == "available"))
         return len(list(rows))
+
+
+async def get_user_counts() -> dict[str, int]:
+    from sqlalchemy import func
+
+    counts = {"all": 0, "pending": 0, "approved": 0, "rejected": 0, "blocked": 0}
+    async with SessionLocal() as session:
+        counts["all"] = int(await session.scalar(select(func.count()).select_from(User)) or 0)
+        rows = await session.execute(select(User.status, func.count(User.id)).group_by(User.status))
+        for status, count in rows.all():
+            if status in counts:
+                counts[status] = int(count)
+    return counts
+
+
+async def list_users(status: str = "all", offset: int = 0, limit: int = 10) -> tuple[list[User], bool]:
+    async with SessionLocal() as session:
+        query = select(User)
+        if status != "all":
+            query = query.where(User.status == status)
+        query = query.order_by(User.created_at.desc(), User.id.desc()).offset(offset).limit(limit + 1)
+        rows = list(await session.scalars(query))
+        return rows[:limit], len(rows) > limit
+
+
+async def search_users(query_text: str, limit: int = 10) -> list[User]:
+    from sqlalchemy import or_
+
+    value = query_text.strip()
+    if value.startswith("@"):
+        value = value[1:]
+    async with SessionLocal() as session:
+        conditions = [User.username.ilike(f"%{value}%"), User.full_name.ilike(f"%{value}%")]
+        if value.isdigit():
+            conditions.append(User.id == int(value))
+        rows = await session.scalars(
+            select(User).where(or_(*conditions)).order_by(User.created_at.desc()).limit(limit)
+        )
+        return list(rows)
+
+
+async def count_user_paypals(user_id: int) -> int:
+    from sqlalchemy import func
+
+    async with SessionLocal() as session:
+        return int(await session.scalar(
+            select(func.count()).select_from(PaypalTag).where(PaypalTag.issued_to_user_id == user_id)
+        ) or 0)
