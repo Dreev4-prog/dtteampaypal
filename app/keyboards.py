@@ -36,6 +36,7 @@ def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeybo
     pending_label = f"👥 Участники · {pending_count} ждут" if pending_count else "👥 Участники"
     queue_label = f"📥 Очередь PayPal ({queue_count})"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Платежи", callback_data="payments_menu")],
         [InlineKeyboardButton(text=queue_label, callback_data="paypal_queue:0")],
         [InlineKeyboardButton(text=pending_label, callback_data="members_menu")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_home")],
@@ -165,4 +166,64 @@ def admin_check_menu(request_id: int) -> InlineKeyboardMarkup:
 def back_home() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="home")]
+    ])
+
+
+def payments_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🟠 Проверить оплату ({counts.get('check', 0)})", callback_data="payments_list:check:0")],
+        [InlineKeyboardButton(text=f"🟢 Нужно выплатить ({counts.get('payout', 0)})", callback_data="payments_list:payout:0")],
+        [InlineKeyboardButton(text=f"✅ Выплаченные ({counts.get('paidout', 0)})", callback_data="payments_list:paidout:0")],
+        [InlineKeyboardButton(text=f"🕓 Ожидают оплаты ({counts.get('waiting', 0)})", callback_data="payments_list:waiting:0")],
+        [InlineKeyboardButton(text=f"🔴 Оплата не найдена ({counts.get('notfound', 0)})", callback_data="payments_list:notfound:0")],
+        [InlineKeyboardButton(text=f"📋 Все ({counts.get('all', 0)})", callback_data="payments_list:all:0")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="payments_menu")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
+    ])
+
+
+def payments_list_menu(requests: list, filter_name: str, offset: int, page_size: int, has_next: bool) -> InlineKeyboardMarkup:
+    status_icons = {
+        "paypal_issued": "🕓", "waiting_check": "🟠", "payout_pending": "🟢",
+        "paid_out": "✅", "not_found": "🔴",
+    }
+    rows = []
+    for req in requests:
+        icon = status_icons.get(req.status, "•")
+        rows.append([InlineKeyboardButton(
+            text=f"{icon} #{req.id} · {req.amount} € · ID {req.user_id}",
+            callback_data=f"payment_card:{req.id}:{filter_name}:{offset}",
+        )])
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"payments_list:{filter_name}:{max(0, offset-page_size)}"))
+    if has_next:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"payments_list:{filter_name}:{offset+page_size}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"payments_list:{filter_name}:{offset}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К платежам", callback_data="payments_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def payment_card_menu(request_id: int, user_id: int, status: str, filter_name: str = "all", offset: int = 0) -> InlineKeyboardMarkup:
+    rows = []
+    if status == "waiting_check":
+        rows.append([
+            InlineKeyboardButton(text="✅ Подтвердить оплату", callback_data=f"admin_confirm:{request_id}"),
+            InlineKeyboardButton(text="❌ Не найдено", callback_data=f"admin_not_found:{request_id}"),
+        ])
+    elif status == "payout_pending":
+        rows.append([InlineKeyboardButton(text="💸 Я выплатил", callback_data=f"payout_confirm:{request_id}")])
+    elif status == "not_found":
+        rows.append([InlineKeyboardButton(text="↩️ Вернуть на проверку", callback_data=f"payment_recheck:{request_id}")])
+    rows.append([InlineKeyboardButton(text="💬 Написать клиенту", url=f"tg://user?id={user_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К списку", callback_data=f"payments_list:{filter_name}:{offset}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def payout_confirmation_menu(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, выплатил", callback_data=f"payout_done:{request_id}")],
+        [InlineKeyboardButton(text="↩️ Отмена", callback_data=f"payment_card:{request_id}:payout:0")],
     ])

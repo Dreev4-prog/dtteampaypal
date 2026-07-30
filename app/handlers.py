@@ -28,6 +28,13 @@ from app.db import (
     set_request_status,
     set_user_access_status,
     submit_membership_application,
+    get_paypal_tag,
+    get_payment_counts,
+    list_payment_requests,
+    confirm_payment,
+    mark_payment_not_found,
+    return_to_payment_check,
+    mark_payout_done,
 )
 from app.keyboards import (
     admin_check_menu,
@@ -45,6 +52,10 @@ from app.keyboards import (
     members_menu,
     cancel_search_menu,
     paid_button,
+    payments_menu,
+    payments_list_menu,
+    payment_card_menu,
+    payout_confirmation_menu,
 )
 
 router = Router()
@@ -399,7 +410,9 @@ async def my_requests(callback: CallbackQuery) -> None:
             "waiting_issue": "⏳ ожидает выдачи",
             "paypal_issued": "💳 PayPal выдан",
             "waiting_check": "🔎 ожидает проверки",
-            "paid": "✅ оплачено",
+            "payout_pending": "💸 ожидает выплаты",
+            "paid_out": "✅ выплачено",
+            "paid": "💸 ожидает выплаты",
             "rejected": "❌ отклонено",
             "not_found": "⚠️ оплата не найдена",
         }
@@ -468,12 +481,15 @@ async def show_admin_home(target: Message | CallbackQuery) -> None:
     available = await count_available_tags()
     counts = await get_user_counts()
     queue_count = await count_waiting_requests()
+    payment_counts = await get_payment_counts()
     text = (
         "👨‍💼 <b>Админ-панель</b>\n\n"
         f"👥 Всего пользователей: <b>{counts['all']}</b>\n"
         f"🟡 Ожидают решения: <b>{counts['pending']}</b>\n"
         f"💳 Свободных PayPal: <b>{available}</b>\n"
-        f"📥 В очереди PayPal: <b>{queue_count}</b>\n\n"
+        f"📥 В очереди PayPal: <b>{queue_count}</b>\n"
+        f"🟠 Оплат на проверке: <b>{payment_counts['check']}</b>\n"
+        f"🟢 Нужно выплатить: <b>{payment_counts['payout']}</b>\n\n"
         "Добавление тегов пока доступно командой:\n"
         "<code>/addtags @tag1 @tag2 @tag3</code>"
     )
@@ -771,6 +787,173 @@ async def add_tags_handler(message: Message) -> None:
     await message.answer(f"✅ Добавлено: {added}\n⚠️ Дубликатов: {duplicates}")
 
 
+@router.callback_query(F.data == "payments_menu")
+async def payments_panel(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    counts = await get_payment_counts()
+    text = (
+        "💰 <b>Платежи</b>\n\n"
+        "Здесь сохраняются все заявки после выдачи PayPal. "
+        "Откройте нужную категорию и обработайте карточку."
+    )
+    if callback.message.photo:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
+        await callback.bot.send_message(callback.message.chat.id, text, reply_markup=payments_menu(counts))
+    else:
+        await callback.message.edit_text(text, reply_markup=payments_menu(counts))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("payments_list:"))
+async def payments_list_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, filter_name, offset_text = callback.data.split(":", 2)
+    offset = max(0, int(offset_text))
+    page_size = 10
+    requests, has_next = await list_payment_requests(filter_name, offset, page_size)
+    titles = {
+        "check": "🟠 Ожидают проверки оплаты",
+        "payout": "🟢 Нужно выплатить",
+        "paidout": "✅ Выплаченные",
+        "waiting": "🕓 Ожидают оплаты",
+        "notfound": "🔴 Оплата не найдена",
+        "all": "📋 Все платежные заявки",
+    }
+    text = f"{titles.get(filter_name, titles['all'])}\nСтраница: <b>{offset // page_size + 1}</b>\n\n"
+    text += "Выберите заявку." if requests else "В этой категории заявок нет."
+    markup = payments_list_menu(requests, filter_name, offset, page_size, has_next)
+    if callback.message.photo:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
+        await callback.bot.send_message(callback.message.chat.id, text, reply_markup=markup)
+    else:
+        await callback.message.edit_text(text, reply_markup=markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("payment_card:"))
+async def payment_card_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    request_id = int(parts[1])
+    filter_name = parts[2] if len(parts) > 2 else "all"
+    offset = int(parts[3]) if len(parts) > 3 else 0
+    req = await get_request(request_id)
+    if req is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    user = await get_user(req.user_id)
+    tag = await get_paypal_tag(req.paypal_tag_id)
+    status_names = {
+        "paypal_issued": "🕓 PayPal выдан — ожидается оплата",
+        "waiting_check": "🟠 Ожидает проверки оплаты",
+        "payout_pending": "🟢 Оплата получена — нужно выплатить клиенту",
+        "paid_out": "✅ Выплачено клиенту",
+        "not_found": "🔴 Оплата не найдена",
+    }
+    username = f"@{user.username}" if user and user.username else "не указан"
+    text = (
+        f"💰 <b>Платёжная заявка #{req.id}</b>\n\n"
+        f"👤 {user.full_name if user and user.full_name else 'не указано'}\n"
+        f"Username: {username}\n"
+        f"🆔 <code>{req.user_id}</code>\n\n"
+        f"💳 PayPal: <code>{tag.tag if tag else 'не найден'}</code>\n"
+        f"💶 Сумма: <b>{req.amount} €</b>\n\n"
+        f"Статус: <b>{status_names.get(req.status, req.status)}</b>\n\n"
+        f"📅 Создана: {format_dt(req.created_at)}\n"
+        f"📤 PayPal выдан: {format_dt(req.processed_at)}\n"
+        f"✅ Нажал «Я оплатил»: {format_dt(req.paid_clicked_at)}\n"
+        f"🔎 Оплата подтверждена: {format_dt(req.payment_confirmed_at)}\n"
+        f"💸 Выплата клиенту: {format_dt(req.payout_at)}"
+    )
+    markup = payment_card_menu(req.id, req.user_id, req.status, filter_name, offset)
+    if callback.message.photo:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
+        await callback.bot.send_message(callback.message.chat.id, text, reply_markup=markup)
+    else:
+        await callback.message.edit_text(text, reply_markup=markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("payout_confirm:"))
+async def payout_confirm_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":", 1)[1])
+    req = await get_request(request_id)
+    if req is None or req.status != "payout_pending":
+        await callback.answer("Заявка уже обработана", show_alert=True)
+        return
+    user = await get_user(req.user_id)
+    username = f"@{user.username}" if user and user.username else str(req.user_id)
+    await callback.message.edit_text(
+        "💸 <b>Подтверждение выплаты</b>\n\n"
+        f"Клиент: {username}\n"
+        f"Сумма: <b>{req.amount} €</b>\n\n"
+        "Подтвердите, что деньги действительно отправлены клиенту.",
+        reply_markup=payout_confirmation_menu(req.id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("payout_done:"))
+async def payout_done_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":", 1)[1])
+    req = await mark_payout_done(request_id, callback.from_user.id)
+    if req is None:
+        await callback.answer("Заявка уже обработана или недоступна", show_alert=True)
+        return
+    try:
+        await callback.bot.send_message(
+            req.user_id,
+            f"✅ <b>Выплата по заявке #{req.id} выполнена</b>\n\nСумма: <b>{req.amount} €</b>",
+            reply_markup=back_home(),
+        )
+    except Exception:
+        pass
+    await callback.message.edit_text(
+        f"✅ Выплата по заявке #{req.id} отмечена.\n\n"
+        "Заявка удалена из списка «Нужно выплатить» и сохранена в архиве.",
+        reply_markup=payments_menu(await get_payment_counts()),
+    )
+    await callback.answer("Выплата подтверждена")
+
+
+@router.callback_query(F.data.startswith("payment_recheck:"))
+async def payment_recheck_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    request_id = int(callback.data.split(":", 1)[1])
+    req = await return_to_payment_check(request_id, callback.from_user.id)
+    if req is None:
+        await callback.answer("Нельзя вернуть эту заявку", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"🟠 Заявка #{req.id} возвращена в список проверки оплаты.",
+        reply_markup=payments_menu(await get_payment_counts()),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("admin_issue:"))
 async def admin_issue(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
@@ -845,39 +1028,57 @@ async def user_paid(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("admin_confirm:"))
 async def admin_confirm(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
         return
     request_id = int(callback.data.split(":")[1])
-    req = await set_request_status(request_id, "paid", callback.from_user.id)
+    req = await confirm_payment(request_id, callback.from_user.id)
     if req is None:
-        await callback.answer("Заявка не найдена", show_alert=True)
+        await callback.answer("Заявка уже обработана или не найдена", show_alert=True)
         return
-    await callback.bot.send_photo(
-        req.user_id,
-        photo=FSInputFile(BANNERS["issued"]),
-        caption=f"✅ <b>Оплата подтверждена</b>\n\nЗаявка #{req.id} успешно оплачена.",
-        reply_markup=back_home(),
+    try:
+        await callback.bot.send_photo(
+            req.user_id,
+            photo=FSInputFile(BANNERS["issued"]),
+            caption=(
+                f"✅ <b>Оплата по заявке #{req.id} подтверждена</b>\n\n"
+                "Заявка передана на выплату. Ожидайте уведомления."
+            ),
+            reply_markup=back_home(),
+        )
+    except Exception:
+        pass
+    await callback.message.edit_text(
+        f"✅ Оплата по заявке #{req.id} подтверждена.\n\n"
+        "Заявка перемещена в раздел «🟢 Нужно выплатить».",
+        reply_markup=payments_menu(await get_payment_counts()),
     )
-    await callback.message.edit_text(callback.message.html_text + "\n\n✅ Подтверждено")
-    await callback.answer()
+    await callback.answer("Оплата подтверждена")
 
 
 @router.callback_query(F.data.startswith("admin_not_found:"))
 async def admin_not_found(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
         return
     request_id = int(callback.data.split(":")[1])
-    req = await set_request_status(request_id, "not_found", callback.from_user.id)
+    req = await mark_payment_not_found(request_id, callback.from_user.id)
     if req is None:
-        await callback.answer("Заявка не найдена", show_alert=True)
+        await callback.answer("Заявка уже обработана или не найдена", show_alert=True)
         return
-    await callback.bot.send_photo(
-        req.user_id,
-        photo=FSInputFile(BANNERS["requests"]),
-        caption=f"⚠️ Оплата по заявке #{req.id} пока не найдена. Свяжитесь с поддержкой.",
-        reply_markup=back_home(),
+    try:
+        await callback.bot.send_photo(
+            req.user_id,
+            photo=FSInputFile(BANNERS["requests"]),
+            caption=f"⚠️ Оплата по заявке #{req.id} не найдена. Проверьте перевод и свяжитесь с поддержкой.",
+            reply_markup=back_home(),
+        )
+    except Exception:
+        pass
+    await callback.message.edit_text(
+        f"🔴 По заявке #{req.id} оплата не найдена.",
+        reply_markup=payments_menu(await get_payment_counts()),
     )
-    await callback.message.edit_text(callback.message.html_text + "\n\n⚠️ Оплата не найдена")
-    await callback.answer()
+    await callback.answer("Отмечено: оплата не найдена")
 
 
 @router.callback_query(F.data.startswith("admin_reject:"))

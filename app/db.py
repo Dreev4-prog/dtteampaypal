@@ -47,6 +47,11 @@ class Request(Base):
     screenshot_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     processed_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    paid_clicked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    payment_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    payment_confirmed_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    payout_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    payout_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -77,6 +82,16 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS screenshot_file_id VARCHAR(512)"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS processed_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS processed_by BIGINT"))
+
+        # v1.5: постоянная CRM оплат и контроль выплат клиентам.
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paid_clicked_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payment_confirmed_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payment_confirmed_by BIGINT"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_by BIGINT"))
+        # Старые подтверждённые оплаты становятся ожидающими выплаты.
+        await conn.execute(text("UPDATE requests SET status = 'payout_pending' WHERE status = 'paid'"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_requests_status ON requests (status)"))
 
 
 async def get_or_create_user(user_id: int, username: str | None, full_name: str | None = None) -> User:
@@ -143,7 +158,7 @@ async def add_paypal_tags(tags: list[str]) -> tuple[int, int]:
 
 
 async def count_active_requests(user_id: int) -> int:
-    active_statuses = {"waiting_issue", "paypal_issued", "waiting_check"}
+    active_statuses = {"waiting_issue", "paypal_issued", "waiting_check", "payout_pending", "not_found"}
     async with SessionLocal() as session:
         return int(await session.scalar(
             select(func.count()).select_from(Request).where(
@@ -203,6 +218,7 @@ async def mark_paid_by_user(request_id: int, user_id: int) -> bool:
         if req is None or req.user_id != user_id or req.status != "paypal_issued":
             return False
         req.status = "waiting_check"
+        req.paid_clicked_at = datetime.utcnow()
         req.updated_at = datetime.utcnow()
         await session.commit()
         return True
@@ -305,3 +321,107 @@ async def list_waiting_requests(offset: int = 0, limit: int = 10) -> tuple[list[
             .limit(limit + 1)
         ))
         return rows[:limit], len(rows) > limit
+
+
+async def get_paypal_tag(tag_id: int | None) -> PaypalTag | None:
+    if tag_id is None:
+        return None
+    async with SessionLocal() as session:
+        return await session.get(PaypalTag, tag_id)
+
+
+PAYMENT_FILTERS = {
+    "check": ("waiting_check",),
+    "payout": ("payout_pending",),
+    "paidout": ("paid_out",),
+    "notfound": ("not_found",),
+    "waiting": ("paypal_issued",),
+    "all": ("paypal_issued", "waiting_check", "payout_pending", "paid_out", "not_found"),
+}
+
+
+async def get_payment_counts() -> dict[str, int]:
+    counts = {"check": 0, "payout": 0, "paidout": 0, "notfound": 0, "waiting": 0, "all": 0}
+    async with SessionLocal() as session:
+        rows = await session.execute(
+            select(Request.status, func.count(Request.id))
+            .where(Request.status.in_(PAYMENT_FILTERS["all"]))
+            .group_by(Request.status)
+        )
+        raw = {status: int(count) for status, count in rows.all()}
+    counts["check"] = raw.get("waiting_check", 0)
+    counts["payout"] = raw.get("payout_pending", 0)
+    counts["paidout"] = raw.get("paid_out", 0)
+    counts["notfound"] = raw.get("not_found", 0)
+    counts["waiting"] = raw.get("paypal_issued", 0)
+    counts["all"] = sum(raw.values())
+    return counts
+
+
+async def list_payment_requests(filter_name: str, offset: int = 0, limit: int = 10) -> tuple[list[Request], bool]:
+    statuses = PAYMENT_FILTERS.get(filter_name, PAYMENT_FILTERS["all"])
+    async with SessionLocal() as session:
+        rows = list(await session.scalars(
+            select(Request)
+            .where(Request.status.in_(statuses))
+            .order_by(Request.updated_at.desc(), Request.id.desc())
+            .offset(offset)
+            .limit(limit + 1)
+        ))
+        return rows[:limit], len(rows) > limit
+
+
+async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if req is None or req.status != "waiting_check":
+            return None
+        req.status = "payout_pending"
+        req.payment_confirmed_at = datetime.utcnow()
+        req.payment_confirmed_by = admin_id
+        req.updated_at = datetime.utcnow()
+        await session.commit()
+        await session.refresh(req)
+        return req
+
+
+async def mark_payment_not_found(request_id: int, admin_id: int) -> Request | None:
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if req is None or req.status != "waiting_check":
+            return None
+        req.status = "not_found"
+        req.processed_at = datetime.utcnow()
+        req.processed_by = admin_id
+        req.updated_at = datetime.utcnow()
+        await session.commit()
+        await session.refresh(req)
+        return req
+
+
+async def return_to_payment_check(request_id: int, admin_id: int) -> Request | None:
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if req is None or req.status != "not_found":
+            return None
+        req.status = "waiting_check"
+        req.processed_at = datetime.utcnow()
+        req.processed_by = admin_id
+        req.updated_at = datetime.utcnow()
+        await session.commit()
+        await session.refresh(req)
+        return req
+
+
+async def mark_payout_done(request_id: int, admin_id: int) -> Request | None:
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if req is None or req.status != "payout_pending":
+            return None
+        req.status = "paid_out"
+        req.payout_at = datetime.utcnow()
+        req.payout_by = admin_id
+        req.updated_at = datetime.utcnow()
+        await session.commit()
+        await session.refresh(req)
+        return req
