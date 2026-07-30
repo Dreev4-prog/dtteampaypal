@@ -84,7 +84,7 @@ from app.keyboards import (
     return_card_menu, return_checked_menu, paypal_database_menu, paypal_list_menu,
     paypal_card_admin_menu, paypal_delete_confirm_menu, working_dates_menu, working_day_menu, collection_choice_menu,
     working_card_menu, working_recall_confirm_menu, working_delete_day_confirm_menu, working_search_results_menu,
-    working_search_cancel_menu, work_control_menu, work_edit_cancel_menu,
+    working_search_cancel_menu, work_control_menu, work_edit_cancel_menu, work_image_edit_menu,
 )
 
 router = Router()
@@ -121,6 +121,7 @@ class WorkingSearch(StatesGroup):
 
 class WorkMessageForm(StatesGroup):
     text = State()
+    image = State()
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
@@ -711,22 +712,29 @@ async def work_control_handler(callback: CallbackQuery, state: FSMContext) -> No
     enabled = await is_work_enabled()
     start_text = await get_app_setting("start_work_message")
     stop_text = await get_app_setting("stop_work_message")
+    start_image = await get_app_setting("start_work_image")
+    stop_image = await get_app_setting("stop_work_image")
     text = (
         "⚙️ <b>Управление работой</b>\n\n"
         f"Текущий режим: <b>{'🟢 START WORK' if enabled else '🔴 STOP WORK'}</b>\n\n"
+        f"<b>Картинка Start Work:</b> {'✅ установлена' if start_image else '❌ нет'}\n"
         "<b>Сообщение Start Work:</b>\n" + start_text +
-        "\n\n<b>Сообщение Stop Work:</b>\n" + stop_text
+        f"\n\n<b>Картинка Stop Work:</b> {'✅ установлена' if stop_image else '❌ нет'}\n"
+        "<b>Сообщение Stop Work:</b>\n" + stop_text
     )
     await callback.message.edit_text(text, reply_markup=work_control_menu(enabled))
     await callback.answer()
 
 
-async def _broadcast_work_message(callback: CallbackQuery, text: str) -> tuple[int, int]:
+async def _broadcast_work_message(callback: CallbackQuery, text: str, image_file_id: str = "") -> tuple[int, int]:
     sent = 0
     failed = 0
     for user_id in await list_approved_user_ids():
         try:
-            await callback.bot.send_message(user_id, text, reply_markup=main_menu())
+            if image_file_id:
+                await callback.bot.send_photo(user_id, image_file_id, caption=text, reply_markup=main_menu())
+            else:
+                await callback.bot.send_message(user_id, text, reply_markup=main_menu())
             sent += 1
         except Exception:
             failed += 1
@@ -740,7 +748,8 @@ async def work_start_handler(callback: CallbackQuery) -> None:
         return
     await set_work_enabled(True)
     text = await get_app_setting("start_work_message")
-    sent, failed = await _broadcast_work_message(callback, text)
+    image_file_id = await get_app_setting("start_work_image")
+    sent, failed = await _broadcast_work_message(callback, text, image_file_id)
     await callback.message.edit_text(
         f"🚀 <b>START WORK включён</b>\n\nУведомлено: <b>{sent}</b>\nНе доставлено: <b>{failed}</b>",
         reply_markup=work_control_menu(True),
@@ -755,7 +764,8 @@ async def work_stop_handler(callback: CallbackQuery) -> None:
         return
     await set_work_enabled(False)
     text = await get_app_setting("stop_work_message")
-    sent, failed = await _broadcast_work_message(callback, text)
+    image_file_id = await get_app_setting("stop_work_image")
+    sent, failed = await _broadcast_work_message(callback, text, image_file_id)
     await callback.message.edit_text(
         f"🛑 <b>STOP WORK включён</b>\n\nНовые заявки отключены. Уже выданные PayPal и текущие оплаты продолжают работать.\n\nУведомлено: <b>{sent}</b>\nНе доставлено: <b>{failed}</b>",
         reply_markup=work_control_menu(False),
@@ -792,11 +802,16 @@ async def work_edit_save(message: Message, state: FSMContext) -> None:
     if not text:
         await message.answer("Текст не может быть пустым.", reply_markup=work_edit_cancel_menu())
         return
-    if len(text) > 4000:
-        await message.answer("Текст слишком длинный. Максимум 4000 символов.", reply_markup=work_edit_cancel_menu())
-        return
     data = await state.get_data()
     kind = data.get("work_message_kind")
+    image_file_id = await get_app_setting(f"{kind}_work_image") if kind in {"start", "stop"} else ""
+    max_length = 1024 if image_file_id else 4000
+    if len(text) > max_length:
+        await message.answer(
+            f"Текст слишком длинный. Максимум {max_length} символов" + (" при установленной картинке." if image_file_id else "."),
+            reply_markup=work_edit_cancel_menu(),
+        )
+        return
     if kind not in {"start", "stop"}:
         await state.clear()
         return
@@ -806,6 +821,77 @@ async def work_edit_save(message: Message, state: FSMContext) -> None:
         f"✅ Текст {'Start Work' if kind == 'start' else 'Stop Work'} сохранён.",
         reply_markup=work_control_menu(await is_work_enabled()),
     )
+
+
+@router.callback_query(F.data.startswith("work_image:"))
+async def work_image_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    kind = callback.data.split(":", 1)[1]
+    if kind not in {"start", "stop"}:
+        await callback.answer("Неизвестный шаблон", show_alert=True)
+        return
+    current_image = await get_app_setting(f"{kind}_work_image")
+    await state.set_state(WorkMessageForm.image)
+    await state.update_data(work_message_kind=kind)
+    await callback.message.edit_text(
+        f"🖼 <b>Картинка {'Start Work' if kind == 'start' else 'Stop Work'}</b>\n\n"
+        f"Сейчас: {'✅ установлена' if current_image else '❌ не установлена'}\n\n"
+        "Отправьте новую картинку одним сообщением как фотографию.",
+        reply_markup=work_image_edit_menu(kind, bool(current_image)),
+    )
+    await callback.answer()
+
+
+@router.message(WorkMessageForm.image, F.photo)
+async def work_image_save(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    data = await state.get_data()
+    kind = data.get("work_message_kind")
+    if kind not in {"start", "stop"}:
+        await state.clear()
+        return
+    current_text = await get_app_setting(f"{kind}_work_message")
+    if len(current_text) > 1024:
+        await message.answer(
+            "Сначала сократите текст шаблона до 1024 символов — это лимит подписи к фотографии.",
+            reply_markup=work_image_edit_menu(kind, bool(await get_app_setting(f"{kind}_work_image"))),
+        )
+        return
+    file_id = message.photo[-1].file_id
+    await set_app_setting(f"{kind}_work_image", file_id)
+    await state.clear()
+    await message.answer_photo(
+        file_id,
+        caption=f"✅ Картинка {'Start Work' if kind == 'start' else 'Stop Work'} сохранена.\n\n{current_text}",
+        reply_markup=work_control_menu(await is_work_enabled()),
+    )
+
+
+@router.message(WorkMessageForm.image)
+async def work_image_wrong_type(message: Message) -> None:
+    await message.answer("Отправьте изображение именно как фотографию.")
+
+
+@router.callback_query(F.data.startswith("work_image_delete:"))
+async def work_image_delete(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    kind = callback.data.split(":", 1)[1]
+    if kind not in {"start", "stop"}:
+        await callback.answer("Неизвестный шаблон", show_alert=True)
+        return
+    await set_app_setting(f"{kind}_work_image", "")
+    await state.clear()
+    await callback.message.edit_text(
+        f"✅ Картинка {'Start Work' if kind == 'start' else 'Stop Work'} удалена.",
+        reply_markup=work_control_menu(await is_work_enabled()),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("paypal_queue:"))

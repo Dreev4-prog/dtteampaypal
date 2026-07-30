@@ -446,7 +446,9 @@ def work_control_menu(enabled: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=status, callback_data="work_control")],
         [action],
         [InlineKeyboardButton(text="✏️ Текст Start Work", callback_data="work_edit:start")],
+        [InlineKeyboardButton(text="🖼 Картинка Start Work", callback_data="work_image:start")],
         [InlineKeyboardButton(text="✏️ Текст Stop Work", callback_data="work_edit:stop")],
+        [InlineKeyboardButton(text="🖼 Картинка Stop Work", callback_data="work_image:stop")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
     ])
 
@@ -455,3 +457,11 @@ def work_edit_cancel_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="work_control")]
     ])
+
+
+def work_image_edit_menu(kind: str, has_image: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if has_image:
+        rows.append([InlineKeyboardButton(text="🗑 Удалить картинку", callback_data=f"work_image_delete:{kind}")])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="work_control")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

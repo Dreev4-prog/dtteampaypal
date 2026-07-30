@@ -141,7 +141,9 @@ async def init_db() -> None:
             INSERT INTO app_settings (key, value, updated_at) VALUES
             ('work_enabled', '0', CURRENT_TIMESTAMP),
             ('start_work_message', '🚀 <b>START WORK</b>\n\nПриём заявок на PayPal открыт. Можно создавать новые заявки.', CURRENT_TIMESTAMP),
-            ('stop_work_message', '🛑 <b>STOP WORK</b>\n\nПриём новых заявок на PayPal остановлен. Продолжайте работу только с уже выданными PayPal.', CURRENT_TIMESTAMP)
+            ('stop_work_message', '🛑 <b>STOP WORK</b>\n\nПриём новых заявок на PayPal остановлен. Продолжайте работу только с уже выданными PayPal.', CURRENT_TIMESTAMP),
+            ('start_work_image', '', CURRENT_TIMESTAMP),
+            ('stop_work_image', '', CURRENT_TIMESTAMP)
             ON CONFLICT (key) DO NOTHING
         """))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_paypal_returns_status ON paypal_returns (status)"))
