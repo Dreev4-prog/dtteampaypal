@@ -799,3 +799,83 @@ async def list_unconfirmed_collection(day: str) -> list[Request]:
             )
         )
         return list(rows)
+
+async def admin_recall_working_request(request_id: int, action: str, admin_id: int) -> tuple[Request | None, PaypalTag | None]:
+    """Take an issued PayPal away from a user and either free, gestop or delete it."""
+    if action not in {"available", "gestoppt", "deleted"}:
+        raise ValueError("Unsupported recall action")
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if req is None or req.status != "paypal_issued" or req.paypal_tag_id is None:
+            return None, None
+        tag = await session.get(PaypalTag, req.paypal_tag_id, with_for_update=True)
+        if tag is None or tag.status != "issued":
+            return None, None
+        now = datetime.utcnow()
+        tag.status = action
+        tag.issued_to_user_id = None
+        if action in {"available", "deleted"}:
+            tag.issued_at = None
+        req.status = {
+            "available": "admin_recalled",
+            "gestoppt": "admin_recalled_gestoppt",
+            "deleted": "admin_recalled_deleted",
+        }[action]
+        req.processed_at = now
+        req.processed_by = admin_id
+        req.updated_at = now
+        await session.commit()
+        await session.refresh(req)
+        await session.refresh(tag)
+        return req, tag
+
+
+async def bulk_delete_working_day(day: str, admin_id: int) -> list[tuple[int, str]]:
+    """Soft-delete every still-issued PayPal for a selected issue date.
+
+    Returns (user_id, paypal_tag) for notifications.
+    """
+    async with SessionLocal() as session:
+        rows = (await session.execute(
+            select(Request, PaypalTag).join(PaypalTag, PaypalTag.id == Request.paypal_tag_id).where(
+                PaypalTag.status == "issued",
+                func.to_char(PaypalTag.issued_at, "YYYY-MM-DD") == day,
+                Request.status == "paypal_issued",
+            ).with_for_update()
+        )).all()
+        now = datetime.utcnow()
+        result: list[tuple[int, str]] = []
+        for req, tag in rows:
+            result.append((req.user_id, tag.tag))
+            tag.status = "deleted"
+            tag.issued_to_user_id = None
+            tag.issued_at = None
+            req.status = "admin_recalled_deleted"
+            req.processed_at = now
+            req.processed_by = admin_id
+            req.updated_at = now
+        await session.commit()
+        return result
+
+
+async def search_working_requests(query: str, limit: int = 50) -> list[Request]:
+    value = query.strip()
+    if not value:
+        return []
+    pattern = f"%{value.lstrip('@')}%"
+    async with SessionLocal() as session:
+        stmt = (
+            select(Request)
+            .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
+            .join(User, User.id == Request.user_id)
+            .where(PaypalTag.status == "issued", Request.status == "paypal_issued")
+            .where(
+                PaypalTag.tag.ilike(pattern)
+                | User.username.ilike(pattern)
+                | User.full_name.ilike(pattern)
+                | func.cast(Request.user_id, String).ilike(pattern)
+            )
+            .order_by(PaypalTag.issued_at.desc())
+            .limit(limit)
+        )
+        return list(await session.scalars(stmt))

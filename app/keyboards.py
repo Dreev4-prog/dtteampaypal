@@ -373,17 +373,51 @@ def paypal_delete_confirm_menu(tag_id: int, filter_name: str) -> InlineKeyboardM
 
 def working_dates_menu(rows: list[tuple[str, int]]) -> InlineKeyboardMarkup:
     buttons = [[InlineKeyboardButton(text=f"📅 {date_label} — {count}", callback_data=f"working_day:{date_label}")] for date_label, count in rows]
+    buttons.append([InlineKeyboardButton(text="🔍 Поиск PayPal / пользователя", callback_data="working_search")])
     buttons.append([InlineKeyboardButton(text="⬅️ База PayPal", callback_data="paypal_database")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def working_day_menu(date_label: str, requests: list) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=f"#{req.id} · {req.amount} € · ID {req.user_id}", callback_data=f"payment_card:{req.id}:waiting:0")] for req in requests[:20]]
+    rows = [[InlineKeyboardButton(text=f"#{req.id} · {req.amount} € · ID {req.user_id}", callback_data=f"working_card:{req.id}:{date_label}")] for req in requests[:50]]
     rows += [
         [InlineKeyboardButton(text="🔔 Уведомить: сбор через 30 минут", callback_data=f"collect_notify:{date_label}")],
         [InlineKeyboardButton(text="📥 Забрать неподтверждённые", callback_data=f"collect_take:{date_label}")],
+        [InlineKeyboardButton(text="🗑 Удалить все PayPal за день", callback_data=f"working_delete_day_ask:{date_label}")],
+        [InlineKeyboardButton(text="📄 Экспорт Excel", callback_data=f"working_export:{date_label}")],
         [InlineKeyboardButton(text="⬅️ К датам", callback_data="working_dates")],
     ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def working_card_menu(request_id: int, day: str, user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Вернуть PayPal в работу", callback_data=f"working_recall_ask:{request_id}:available:{day}")],
+        [InlineKeyboardButton(text="🚫 Gestop", callback_data=f"working_recall_ask:{request_id}:gestoppt:{day}")],
+        [InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"working_recall_ask:{request_id}:deleted:{day}")],
+        [InlineKeyboardButton(text="👤 Открыть пользователя", url=f"tg://user?id={user_id}")],
+        [InlineKeyboardButton(text="⬅️ К списку за день", callback_data=f"working_day:{day}")],
+    ])
+
+
+def working_recall_confirm_menu(request_id: int, action: str, day: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"working_recall_confirm:{request_id}:{action}:{day}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"working_card:{request_id}:{day}")],
+    ])
+
+
+def working_delete_day_confirm_menu(day: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить все", callback_data=f"working_delete_day_confirm:{day}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"working_day:{day}")],
+    ])
+
+
+def working_search_results_menu(requests: list) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=f"#{req.id} · {req.amount} € · ID {req.user_id}", callback_data=f"working_card:{req.id}:search")] for req in requests]
+    rows.append([InlineKeyboardButton(text="🔍 Новый поиск", callback_data="working_search")])
+    rows.append([InlineKeyboardButton(text="⬅️ К датам", callback_data="working_dates")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -391,4 +425,10 @@ def collection_choice_menu(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Ещё нужен", callback_data=f"collect_keep:{request_id}")],
         [InlineKeyboardButton(text="↩️ Вернуть", callback_data=f"return_start:{request_id}")],
+    ])
+
+
+def working_search_cancel_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="working_dates")]
     ])

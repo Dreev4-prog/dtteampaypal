@@ -1,11 +1,14 @@
 from pathlib import Path
+from io import BytesIO
+
+from openpyxl import Workbook
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, FSInputFile, InputMediaPhoto, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
 from app.config import settings
 from app.db import (
@@ -47,6 +50,7 @@ from app.db import (
     get_paypal_database_counts, list_paypal_tags, set_paypal_tag_status, delete_free_paypal_tag,
     get_working_dates, get_working_requests_by_date, mark_collection_notified,
     confirm_paypal_keep, list_unconfirmed_collection,
+    admin_recall_working_request, bulk_delete_working_day, search_working_requests,
 )
 from app.keyboards import (
     admin_check_menu,
@@ -78,6 +82,8 @@ from app.keyboards import (
     paid_or_return_menu, return_reasons_menu, return_confirm_menu, returns_menu,
     return_card_menu, return_checked_menu, paypal_database_menu, paypal_list_menu,
     paypal_card_admin_menu, paypal_delete_confirm_menu, working_dates_menu, working_day_menu, collection_choice_menu,
+    working_card_menu, working_recall_confirm_menu, working_delete_day_confirm_menu, working_search_results_menu,
+    working_search_cancel_menu,
 )
 
 router = Router()
@@ -106,6 +112,10 @@ class RateForm(StatesGroup):
 class ReturnForm(StatesGroup):
     custom_reason = State()
     reject_reason = State()
+
+
+class WorkingSearch(StatesGroup):
+    query = State()
 BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
@@ -1771,3 +1781,202 @@ async def collect_take_handler(callback: CallbackQuery) -> None:
     items = await list_paypal_returns()
     await render_screen(callback, "paypal", f"<b>↩️ Возвраты PayPal</b>\n\nОжидают проверки: <b>{len(items)}</b>", returns_menu(items))
     await callback.answer(f"Передано в возвраты: {created}", show_alert=True)
+
+@router.callback_query(F.data.startswith("working_card:"))
+async def working_card_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, request_id_raw, day = callback.data.split(":", 2)
+    req = await get_request(int(request_id_raw))
+    if req is None or req.status != "paypal_issued" or req.paypal_tag_id is None:
+        await callback.answer("Заявка уже не находится в работе", show_alert=True)
+        return
+    tag = await get_paypal_tag(req.paypal_tag_id)
+    user = await get_user(req.user_id)
+    username = f"@{user.username}" if user and user.username else "—"
+    text = (
+        f"<b>💳 PayPal в работе · заявка #{req.id}</b>\n\n"
+        f"👤 Пользователь: <b>{username}</b>\n"
+        f"🆔 Telegram ID: <code>{req.user_id}</code>\n"
+        f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+        f"💶 Сумма: <b>{req.amount} €</b>\n"
+        f"🕒 Выдан: <b>{format_dt(tag.issued_at if tag else None)}</b>\n"
+        f"📌 Статус: <b>выдан</b>"
+    )
+    await callback.message.edit_caption(
+        caption=text,
+        reply_markup=working_card_menu(req.id, day, req.user_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("working_recall_ask:"))
+async def working_recall_ask_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, request_id_raw, action, day = callback.data.split(":", 3)
+    labels = {
+        "available": "вернуть PayPal в свободную базу",
+        "gestoppt": "пометить PayPal как Gestop",
+        "deleted": "удалить PayPal из активной базы",
+    }
+    await callback.message.edit_caption(
+        caption=(
+            f"<b>⚠️ Подтверждение</b>\n\n"
+            f"Вы действительно хотите {labels[action]}?\n\n"
+            "PayPal будет сразу отозван у пользователя."
+        ),
+        reply_markup=working_recall_confirm_menu(int(request_id_raw), action, day),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("working_recall_confirm:"))
+async def working_recall_confirm_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, request_id_raw, action, day = callback.data.split(":", 3)
+    req, tag = await admin_recall_working_request(int(request_id_raw), action, callback.from_user.id)
+    if req is None:
+        await callback.answer("PayPal уже обработан или изменил статус", show_alert=True)
+        return
+    user_messages = {
+        "available": "ℹ️ Администратор забрал выданный вам PayPal и вернул его в свободную базу.",
+        "gestoppt": "ℹ️ Администратор забрал выданный вам PayPal и пометил его как Gestop.",
+        "deleted": "ℹ️ Администратор забрал выданный вам PayPal и удалил его из активной базы.",
+    }
+    try:
+        await callback.bot.send_message(
+            req.user_id,
+            f"{user_messages[action]}\n\n💳 <code>{tag.tag if tag else '—'}</code>",
+            reply_markup=back_home(),
+        )
+    except Exception:
+        pass
+    reqs = await get_working_requests_by_date(day) if day != "search" else []
+    if day == "search":
+        await callback.message.edit_caption(
+            caption="✅ PayPal обработан. Выполните новый поиск или вернитесь к датам.",
+            reply_markup=working_search_results_menu([]),
+        )
+    else:
+        total = sum(r.amount for r in reqs)
+        await callback.message.edit_caption(
+            caption=f"<b>📅 PayPal в работе за {day}</b>\n\nКоличество: <b>{len(reqs)}</b>\nОбщая сумма: <b>{total} €</b>",
+            reply_markup=working_day_menu(day, reqs),
+        )
+    await callback.answer("Готово")
+
+
+@router.callback_query(F.data.startswith("working_delete_day_ask:"))
+async def working_delete_day_ask_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    day = callback.data.split(":", 1)[1]
+    reqs = await get_working_requests_by_date(day)
+    await callback.message.edit_caption(
+        caption=(
+            f"<b>⚠️ Удалить все PayPal за {day}?</b>\n\n"
+            f"Будет удалено: <b>{len(reqs)}</b>\n\n"
+            "Удаляются только PayPal, которые всё ещё имеют статус «выдан». "
+            "Заявки на проверке оплаты, выплате и завершённые операции не затрагиваются."
+        ),
+        reply_markup=working_delete_day_confirm_menu(day),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("working_delete_day_confirm:"))
+async def working_delete_day_confirm_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    day = callback.data.split(":", 1)[1]
+    affected = await bulk_delete_working_day(day, callback.from_user.id)
+    for user_id, paypal_tag in affected:
+        try:
+            await callback.bot.send_message(
+                user_id,
+                "ℹ️ Администратор отозвал и удалил выданный вам PayPal.\n\n"
+                f"💳 <code>{paypal_tag}</code>\n\n"
+                "Если вам нужен новый PayPal, создайте новую заявку.",
+                reply_markup=back_home(),
+            )
+        except Exception:
+            pass
+    await callback.message.edit_caption(
+        caption=f"✅ <b>Очистка за {day} завершена</b>\n\nУдалено PayPal: <b>{len(affected)}</b>",
+        reply_markup=working_dates_menu(await get_working_dates()),
+    )
+    await callback.answer(f"Удалено: {len(affected)}", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("working_export:"))
+async def working_export_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    day = callback.data.split(":", 1)[1]
+    reqs = await get_working_requests_by_date(day)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "PayPal в работе"
+    ws.append(["Заявка", "PayPal", "Username", "Telegram ID", "Сумма EUR", "Дата выдачи", "Статус"])
+    for req in reqs:
+        tag = await get_paypal_tag(req.paypal_tag_id) if req.paypal_tag_id else None
+        user = await get_user(req.user_id)
+        ws.append([
+            req.id,
+            tag.tag if tag else "",
+            f"@{user.username}" if user and user.username else "",
+            req.user_id,
+            req.amount,
+            tag.issued_at.strftime("%d.%m.%Y %H:%M") if tag and tag.issued_at else "",
+            "Выдан",
+        ])
+    for column in ws.columns:
+        width = min(max(len(str(cell.value or "")) for cell in column) + 2, 35)
+        ws.column_dimensions[column[0].column_letter].width = width
+    buffer = BytesIO()
+    wb.save(buffer)
+    await callback.bot.send_document(
+        callback.message.chat.id,
+        document=BufferedInputFile(buffer.getvalue(), filename=f"paypal_working_{day}.xlsx"),
+        caption=f"📄 PayPal в работе за {day}: {len(reqs)}",
+    )
+    await callback.answer("Экспорт готов")
+
+
+@router.callback_query(F.data == "working_search")
+async def working_search_start_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(WorkingSearch.query)
+    await callback.message.edit_caption(
+        caption=(
+            "<b>🔍 Поиск PayPal в работе</b>\n\n"
+            "Введите PayPal, username, имя пользователя или Telegram ID."
+        ),
+        reply_markup=working_search_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(WorkingSearch.query)
+async def working_search_query_handler(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    query = (message.text or "").strip()
+    rows = await search_working_requests(query)
+    await state.clear()
+    await message.answer_photo(
+        photo=FSInputFile(BANNERS["paypal"]),
+        caption=f"<b>🔍 Результаты поиска</b>\n\nЗапрос: <code>{query}</code>\nНайдено: <b>{len(rows)}</b>",
+        reply_markup=working_search_results_menu(rows),
+    )
