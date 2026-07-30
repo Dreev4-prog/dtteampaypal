@@ -36,6 +36,7 @@ def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeybo
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🟢 Start Work / 🔴 Stop Work", callback_data="work_control")],
         [InlineKeyboardButton(text="💰 Платежи", callback_data="payments_menu")],
+        [InlineKeyboardButton(text="📣 Рассылка", callback_data="broadcast_start")],
         [InlineKeyboardButton(text="💳 База PayPal", callback_data="paypal_database"), InlineKeyboardButton(text="↩️ Возвраты", callback_data="returns_menu")],
         [InlineKeyboardButton(text="📊 Финансы", callback_data="finance_menu"), InlineKeyboardButton(text="⚙️ Проценты", callback_data="rates_menu")],
         [InlineKeyboardButton(text=queue_label, callback_data="paypal_queue:0")],
@@ -156,8 +157,9 @@ def admin_check_menu(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin_confirm:{request_id}"),
-            InlineKeyboardButton(text="❌ Не найдено", callback_data=f"admin_not_found:{request_id}"),
-        ]
+            InlineKeyboardButton(text="❌ Денег нет", callback_data=f"admin_not_found:{request_id}"),
+        ],
+        [InlineKeyboardButton(text="🚫 GS (Goods & Services)", callback_data=f"admin_gs:{request_id}") ]
     ])
 
 
@@ -335,6 +337,35 @@ def return_checked_menu(return_id: int) -> InlineKeyboardMarkup:
 
 
 
+def gender_choice_menu(prefix: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👨 Мужской", callback_data=f"{prefix}:male"),
+         InlineKeyboardButton(text="👩 Женский", callback_data=f"{prefix}:female")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="request_cancel" if prefix == "request_gender" else "paypal_add_cancel")],
+    ])
+
+
+def broadcast_photo_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭ Без картинки", callback_data="broadcast_no_photo")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")],
+    ])
+
+
+def broadcast_confirm_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📤 Отправить всем", callback_data="broadcast_send")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")],
+    ])
+
+
+def gs_photo_menu(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏭ Без скриншота", callback_data=f"admin_gs_skip:{request_id}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"payment_card:{request_id}:check:0")],
+    ])
+
+
 def paypal_add_photo_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⏭ Пропустить", callback_data="paypal_add_skip_photo")],
@@ -362,6 +393,7 @@ def paypal_database_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"👤 В работе ({counts.get('issued', 0)})", callback_data="working_dates")],
         [InlineKeyboardButton(text=f"↩️ Возвраты ({counts.get('return_pending', 0)})", callback_data="returns_menu")],
         [InlineKeyboardButton(text=f"🚫 Gestop ({counts.get('gestoppt', 0)})", callback_data="paypal_db_list:gestoppt:0")],
+        [InlineKeyboardButton(text=f"🚫 GS ({counts.get('gs', 0)})", callback_data="paypal_db_list:gs:0")],
         [InlineKeyboardButton(text=f"📋 Все ({counts.get('all', 0)})", callback_data="paypal_db_list:all:0")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
     ])

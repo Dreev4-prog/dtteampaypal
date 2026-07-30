@@ -52,7 +52,7 @@ from app.db import (
     get_working_dates, get_working_requests_by_date, mark_collection_notified,
     confirm_paypal_keep, list_unconfirmed_collection,
     admin_recall_working_request, bulk_delete_working_day, search_working_requests,
-    get_app_setting, set_app_setting, is_work_enabled, set_work_enabled, list_approved_user_ids,
+    get_app_setting, set_app_setting, is_work_enabled, set_work_enabled, list_approved_user_ids, mark_payment_gs,
 )
 from app.keyboards import (
     admin_check_menu,
@@ -86,7 +86,8 @@ from app.keyboards import (
     paypal_card_admin_menu, paypal_delete_confirm_menu, working_dates_menu, working_day_menu, collection_choice_menu,
     working_card_menu, working_recall_confirm_menu, working_delete_day_confirm_menu, working_search_results_menu,
     working_search_cancel_menu, work_control_menu, work_edit_cancel_menu, work_image_edit_menu,
-    paypal_add_photo_menu, paypal_add_confirm_menu, paypal_add_cancel_menu,
+    paypal_add_photo_menu, paypal_add_confirm_menu, paypal_add_cancel_menu, gender_choice_menu,
+    broadcast_photo_menu, broadcast_confirm_menu, gs_photo_menu,
 )
 
 router = Router()
@@ -98,6 +99,7 @@ class MemberSearch(StatesGroup):
 
 class PaypalRequestForm(StatesGroup):
     amount = State()
+    gender = State()
     screenshot = State()
 
 
@@ -126,7 +128,17 @@ class WorkMessageForm(StatesGroup):
     image = State()
 
 
+class BroadcastForm(StatesGroup):
+    text = State()
+    photo = State()
+
+
+class GSForm(StatesGroup):
+    screenshot = State()
+
+
 class PaypalAddForm(StatesGroup):
+    gender = State()
     tag = State()
     photo = State()
     bulk = State()
@@ -465,14 +477,23 @@ async def paypal_amount_input(message: Message, state: FSMContext) -> None:
         await message.answer("❌ У вас уже есть 2 активные заявки. Дождитесь обработки одной из них.", reply_markup=back_home())
         return
     await state.update_data(amount=amount)
+    await state.set_state(PaypalRequestForm.gender)
+    await message.answer("🚻 <b>Какой PayPal вам нужен?</b>", reply_markup=gender_choice_menu("request_gender"))
+
+
+@router.callback_query(PaypalRequestForm.gender, F.data.startswith("request_gender:"))
+async def paypal_gender_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    gender = callback.data.split(":", 1)[1]
+    await state.update_data(paypal_gender=gender)
     await state.set_state(PaypalRequestForm.screenshot)
-    await message.answer(
+    await callback.message.answer(
         "📷 <b>Подтверждение</b>\n\n"
         "Пришлите скриншот, подтверждающий, что вы готовы оплатить через "
         "PayPal Friends & Family.\n\n"
         "Нужно отправить именно фотографию или изображение.",
         reply_markup=request_cancel_menu(),
     )
+    await callback.answer()
 
 
 @router.message(PaypalRequestForm.screenshot, F.photo)
@@ -493,12 +514,14 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     amount = int(data["amount"])
     screenshot_file_id = message.photo[-1].file_id
-    req = await create_request(message.from_user.id, amount, screenshot_file_id)
+    gender = data.get("paypal_gender", "male")
+    req = await create_request(message.from_user.id, amount, screenshot_file_id, gender)
     await state.clear()
 
     await message.answer(
         f"✅ <b>Заявка #{req.id} принята</b>\n\n"
         f"Сумма: <b>{amount} €</b>\n"
+        f"Тип: {'👨 Мужской' if gender == 'male' else '👩 Женский'}\n"
         "Скриншот получен. Ожидайте выдачи PayPal.",
         reply_markup=back_home(),
     )
@@ -510,6 +533,7 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
         f"Username: {username}\n"
         f"🆔 <code>{message.from_user.id}</code>\n"
         f"💶 Сумма: <b>{amount} €</b>\n"
+        f"🚻 Тип: {'👨 Мужской' if gender == 'male' else '👩 Женский'}\n"
         "📷 Подтверждение Friends & Family приложено."
     )
     for admin_id in settings.admin_ids:
@@ -1218,6 +1242,7 @@ async def show_paypal_add_preview(message: Message, state: FSMContext) -> None:
     caption = (
         "<b>Проверьте данные</b>\n\n"
         f"💳 <code>{tag}</code>\n"
+        f"🚻 Тип: <b>{'Мужской' if data.get('paypal_add_gender') == 'male' else 'Женский'}</b>\n"
         f"🖼 Фото: <b>{'Есть' if photo_file_id else 'Нет'}</b>"
     )
     if photo_file_id:
@@ -1232,6 +1257,14 @@ async def paypal_add_single_start(callback: CallbackQuery, state: FSMContext) ->
         await callback.answer("Нет доступа", show_alert=True)
         return
     await state.clear()
+    await state.set_state(PaypalAddForm.gender)
+    await callback.message.answer("🚻 <b>Выберите тип добавляемого PayPal</b>", reply_markup=gender_choice_menu("paypal_add_gender"))
+    await callback.answer()
+
+
+@router.callback_query(PaypalAddForm.gender, F.data.startswith("paypal_add_gender:"))
+async def paypal_add_gender_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(paypal_add_gender=callback.data.split(":", 1)[1])
     await state.set_state(PaypalAddForm.tag)
     await callback.message.answer(
         "➕ <b>Добавить PayPal</b>\n\nВведите один PayPal-тег.\nНапример: <code>@MaxMuller123</code>",
@@ -1295,7 +1328,7 @@ async def paypal_add_save(callback: CallbackQuery, state: FSMContext) -> None:
     if not tag:
         await callback.answer("Данные устарели. Начните заново.", show_alert=True)
         return
-    item, duplicate = await add_paypal_tag(tag, data.get("paypal_add_photo"))
+    item, duplicate = await add_paypal_tag(tag, data.get("paypal_add_photo"), data.get("paypal_add_gender", "male"))
     await state.clear()
     if duplicate:
         await callback.message.answer(f"⚠️ PayPal <code>{tag}</code> уже есть в базе.", reply_markup=paypal_database_menu(await get_paypal_database_counts()))
@@ -1332,6 +1365,15 @@ async def paypal_add_bulk_start(callback: CallbackQuery, state: FSMContext) -> N
         await callback.answer("Нет доступа", show_alert=True)
         return
     await state.clear()
+    await state.set_state(PaypalAddForm.gender)
+    await state.update_data(paypal_add_bulk_mode=True)
+    await callback.message.answer("🚻 <b>Выберите тип для всего списка</b>", reply_markup=gender_choice_menu("paypal_bulk_gender"))
+    await callback.answer()
+
+
+@router.callback_query(PaypalAddForm.gender, F.data.startswith("paypal_bulk_gender:"))
+async def paypal_bulk_gender_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(paypal_add_gender=callback.data.split(":", 1)[1])
     await state.set_state(PaypalAddForm.bulk)
     await callback.message.answer(
         "📥 <b>Массовое добавление</b>\n\nОтправьте PayPal-теги списком — каждый с новой строки или через пробел.\nФотографии при массовом добавлении не прикрепляются.",
@@ -1361,7 +1403,8 @@ async def paypal_add_bulk_input(message: Message, state: FSMContext) -> None:
     if not tags:
         await message.answer("Не найдено ни одного корректного PayPal-тега.", reply_markup=paypal_add_cancel_menu())
         return
-    added, duplicates = await add_paypal_tags(tags)
+    data = await state.get_data()
+    added, duplicates = await add_paypal_tags(tags, data.get("paypal_add_gender", "male"))
     await state.clear()
     await message.answer(
         "✅ <b>Массовое добавление завершено</b>\n\n"
@@ -1671,14 +1714,21 @@ async def finish_user_paid(callback_or_message, request_id: int, user_id: int) -
     if not ok:
         return False
     req = await get_request(request_id)
+    user = await get_user(user_id)
+    tag = await get_paypal_tag(req.paypal_tag_id) if req and req.paypal_tag_id else None
+    username = f"@{user.username}" if user and user.username else "без username"
+    profile = f'<a href="tg://user?id={user_id}">Открыть профиль</a>'
     bot = callback_or_message.bot
     for admin_id in settings.admin_ids:
         await bot.send_message(
             admin_id,
             "💰 <b>Пользователь сообщил об оплате</b>\n\n"
-            f"Заявка: #{request_id}\n"
-            f"Пользователь ID: <code>{user_id}</code>\n"
-            f"Сумма: <b>{req.amount} €</b>",
+            f"👤 Пользователь: {username}\n"
+            f"🔗 {profile}\n"
+            f"🆔 ID: <code>{user_id}</code>\n\n"
+            f"💳 PayPal: <code>{tag.tag if tag else 'не найден'}</code>\n"
+            f"🚻 Тип: {'👨 Мужской' if getattr(req, 'paypal_gender', 'male') == 'male' else '👩 Женский'}\n"
+            f"💶 Сумма: <b>{req.amount} €</b>",
             reply_markup=admin_check_menu(request_id),
         )
     return True
@@ -2468,3 +2518,86 @@ async def working_search_query_handler(message: Message, state: FSMContext) -> N
         caption=f"<b>🔍 Результаты поиска</b>\n\nЗапрос: <code>{query}</code>\nНайдено: <b>{len(rows)}</b>",
         reply_markup=working_search_results_menu(rows),
     )
+
+
+@router.callback_query(F.data == "broadcast_start")
+async def broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    await state.clear(); await state.set_state(BroadcastForm.text)
+    await callback.message.answer("📣 <b>Рассылка</b>\n\nОтправьте текст сообщения.")
+    await callback.answer()
+
+
+@router.message(BroadcastForm.text)
+async def broadcast_text(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id): await state.clear(); return
+    text_value=(message.html_text or message.text or '').strip()
+    if not text_value: await message.answer("Введите текст сообщения."); return
+    await state.update_data(broadcast_text=text_value); await state.set_state(BroadcastForm.photo)
+    await message.answer("🖼 Прикрепите картинку или нажмите «Без картинки».", reply_markup=broadcast_photo_menu())
+
+
+async def _broadcast_preview(message: Message, state: FSMContext):
+    data=await state.get_data(); text_value=data.get('broadcast_text',''); photo=data.get('broadcast_photo')
+    if photo: await message.answer_photo(photo, caption=text_value, reply_markup=broadcast_confirm_menu())
+    else: await message.answer(text_value, reply_markup=broadcast_confirm_menu())
+
+
+@router.message(BroadcastForm.photo, F.photo)
+async def broadcast_photo(message: Message, state: FSMContext) -> None:
+    await state.update_data(broadcast_photo=message.photo[-1].file_id); await _broadcast_preview(message,state)
+
+
+@router.callback_query(F.data == "broadcast_no_photo")
+async def broadcast_no_photo(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(broadcast_photo=None); await _broadcast_preview(callback.message,state); await callback.answer()
+
+
+@router.callback_query(F.data == "broadcast_send")
+async def broadcast_send(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id): await callback.answer("Нет доступа", show_alert=True); return
+    data=await state.get_data(); ids=await list_approved_user_ids(); sent=failed=0
+    for uid in ids:
+        try:
+            if data.get('broadcast_photo'): await callback.bot.send_photo(uid, data['broadcast_photo'], caption=data.get('broadcast_text',''))
+            else: await callback.bot.send_message(uid, data.get('broadcast_text',''))
+            sent+=1
+        except Exception: failed+=1
+    await state.clear(); await callback.message.answer(f"✅ Доставлено: <b>{sent}</b>\n❌ Не доставлено: <b>{failed}</b>", reply_markup=admin_main_menu())
+    await callback.answer("Рассылка завершена")
+
+
+@router.callback_query(F.data == "broadcast_cancel")
+async def broadcast_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear(); await show_admin_home(callback); await callback.answer("Отменено")
+
+
+@router.callback_query(F.data.startswith("admin_gs:"))
+async def admin_gs_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id): await callback.answer("Нет доступа", show_alert=True); return
+    request_id=int(callback.data.split(':')[1]); req=await get_request(request_id)
+    if req is None or req.status != 'waiting_check': await callback.answer("Заявка недоступна", show_alert=True); return
+    await state.set_state(GSForm.screenshot); await state.update_data(gs_request_id=request_id)
+    await callback.message.answer("🚫 <b>GS (Goods & Services)</b>\n\nПрикрепите скриншот блокировки PayPal или пропустите.", reply_markup=gs_photo_menu(request_id)); await callback.answer()
+
+
+async def _finish_gs(message_or_callback, state: FSMContext, screenshot: str | None):
+    data=await state.get_data(); request_id=int(data['gs_request_id']); admin_id=message_or_callback.from_user.id
+    req=await mark_payment_gs(request_id, admin_id, screenshot); await state.clear()
+    if req is None: return None
+    try: await message_or_callback.bot.send_message(req.user_id, "🚫 <b>Платёж отправлен через Goods & Services.</b>\n\nPayPal заблокирован из-за GS. Обратитесь в поддержку: @workzin")
+    except Exception: pass
+    return req
+
+
+@router.message(GSForm.screenshot, F.photo)
+async def admin_gs_photo(message: Message, state: FSMContext) -> None:
+    req=await _finish_gs(message,state,message.photo[-1].file_id)
+    await message.answer("🚫 PayPal перемещён в раздел GS." if req else "Заявка уже обработана.", reply_markup=payments_menu(await get_payment_counts()))
+
+
+@router.callback_query(F.data.startswith("admin_gs_skip:"))
+async def admin_gs_skip(callback: CallbackQuery, state: FSMContext) -> None:
+    req=await _finish_gs(callback,state,None)
+    await callback.message.answer("🚫 PayPal перемещён в раздел GS." if req else "Заявка уже обработана.", reply_markup=payments_menu(await get_payment_counts())); await callback.answer()

@@ -35,6 +35,8 @@ class PaypalTag(Base):
     issued_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    gender: Mapped[str] = mapped_column(String(12), default="male", index=True)
+    gs_screenshot_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
 
 class Request(Base):
@@ -46,6 +48,7 @@ class Request(Base):
     status: Mapped[str] = mapped_column(String(32), default="waiting_issue", index=True)
     paypal_tag_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("paypal_tags.id"), nullable=True)
     screenshot_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    paypal_gender: Mapped[str] = mapped_column(String(12), default="male", index=True)
     processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     processed_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     paid_clicked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -136,6 +139,12 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_amount NUMERIC(12,2)"))
         # v1.6.8: изображение, прикреплённое к отдельному PayPal.
         await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS photo_file_id VARCHAR(512)"))
+        # v1.6.9: пол PayPal и GS-архив.
+        await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS gender VARCHAR(12) DEFAULT 'male'"))
+        await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS gs_screenshot_file_id VARCHAR(512)"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paypal_gender VARCHAR(12) DEFAULT 'male'"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_paypal_tags_gender ON paypal_tags (gender)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_requests_paypal_gender ON requests (paypal_gender)"))
 
         # v1.6.4: возвраты и массовый сбор PayPal.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS collection_notified_at TIMESTAMP"))
@@ -225,20 +234,20 @@ async def set_user_access_status(user_id: int, status: str, admin_id: int) -> Us
         return user
 
 
-async def add_paypal_tag(tag: str, photo_file_id: str | None = None) -> tuple[PaypalTag | None, bool]:
+async def add_paypal_tag(tag: str, photo_file_id: str | None = None, gender: str = "male") -> tuple[PaypalTag | None, bool]:
     """Добавляет один PayPal. Возвращает (объект, был_дубликат)."""
     async with SessionLocal() as session:
         exists = await session.scalar(select(PaypalTag).where(PaypalTag.tag == tag))
         if exists:
             return exists, True
-        item = PaypalTag(tag=tag, photo_file_id=photo_file_id)
+        item = PaypalTag(tag=tag, photo_file_id=photo_file_id, gender=gender)
         session.add(item)
         await session.commit()
         await session.refresh(item)
         return item, False
 
 
-async def add_paypal_tags(tags: list[str]) -> tuple[int, int]:
+async def add_paypal_tags(tags: list[str], gender: str = "male") -> tuple[int, int]:
     added = 0
     duplicates = 0
     async with SessionLocal() as session:
@@ -247,7 +256,7 @@ async def add_paypal_tags(tags: list[str]) -> tuple[int, int]:
             if exists:
                 duplicates += 1
                 continue
-            session.add(PaypalTag(tag=tag))
+            session.add(PaypalTag(tag=tag, gender=gender))
             added += 1
         await session.commit()
     return added, duplicates
@@ -263,9 +272,9 @@ async def count_active_requests(user_id: int) -> int:
         ) or 0)
 
 
-async def create_request(user_id: int, amount: int, screenshot_file_id: str | None = None) -> Request:
+async def create_request(user_id: int, amount: int, screenshot_file_id: str | None = None, paypal_gender: str = "male") -> Request:
     async with SessionLocal() as session:
-        req = Request(user_id=user_id, amount=amount, screenshot_file_id=screenshot_file_id)
+        req = Request(user_id=user_id, amount=amount, screenshot_file_id=screenshot_file_id, paypal_gender=paypal_gender)
         session.add(req)
         await session.commit()
         await session.refresh(req)
@@ -286,7 +295,7 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
 
             tag = await session.scalar(
                 select(PaypalTag)
-                .where(PaypalTag.status == "available")
+                .where(PaypalTag.status == "available", PaypalTag.gender == req.paypal_gender)
                 .order_by(PaypalTag.id)
                 .with_for_update(skip_locked=True)
                 .limit(1)
@@ -490,8 +499,9 @@ PAYMENT_FILTERS = {
     "payout": ("payout_pending",),
     "paidout": ("paid_out",),
     "notfound": ("not_found",),
+    "gs": ("gs",),
     "waiting": ("paypal_issued",),
-    "all": ("paypal_issued", "waiting_check", "payout_pending", "paid_out", "not_found"),
+    "all": ("paypal_issued", "waiting_check", "payout_pending", "paid_out", "not_found", "gs"),
 }
 
 
@@ -741,7 +751,7 @@ async def resolve_paypal_return(return_id: int, action: str, admin_id: int, admi
 async def get_paypal_database_counts() -> dict[str, int]:
     async with SessionLocal() as session:
         result = {key: int(await session.scalar(select(func.count()).select_from(PaypalTag).where(PaypalTag.status == key)) or 0)
-                  for key in ("available", "issued", "return_pending", "gestoppt")}
+                  for key in ("available", "issued", "return_pending", "gestoppt", "gs")}
         result["all"] = int(await session.scalar(
             select(func.count()).select_from(PaypalTag).where(PaypalTag.status != "deleted")
         ) or 0)
@@ -965,3 +975,20 @@ async def set_work_enabled(enabled: bool) -> None:
 async def list_approved_user_ids() -> list[int]:
     async with SessionLocal() as session:
         return list(await session.scalars(select(User.id).where(User.status == "approved")))
+
+
+async def mark_payment_gs(request_id: int, admin_id: int, screenshot_file_id: str | None = None) -> Request | None:
+    async with SessionLocal() as session:
+        async with session.begin():
+            req = await session.get(Request, request_id, with_for_update=True)
+            if req is None or req.status != "waiting_check":
+                return None
+            req.status = "gs"
+            req.processed_at = datetime.utcnow()
+            req.processed_by = admin_id
+            if req.paypal_tag_id:
+                tag = await session.get(PaypalTag, req.paypal_tag_id, with_for_update=True)
+                if tag:
+                    tag.status = "gs"
+                    tag.gs_screenshot_file_id = screenshot_file_id
+            return req
