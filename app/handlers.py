@@ -1,4 +1,6 @@
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from io import BytesIO
 
 from openpyxl import Workbook
@@ -764,6 +766,7 @@ async def show_admin_home(target: Message | CallbackQuery) -> None:
         f"✅ Выплачено сегодня: <b>{data['paid_today']}</b>\n"
         f"🔴 GS: <b>{data['gs']}</b>\n"
         f"👥 Активных пользователей: <b>{data['users']}</b>\n\n"
+        f"🔄 Обновлено: <b>{datetime.now(ZoneInfo('Europe/Moscow')).strftime('%H:%M:%S')}</b>\n\n"
         "Выберите нужный раздел:"
     )
     markup = admin_main_menu(0, data["queue"])
@@ -798,7 +801,7 @@ async def admin_home(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.clear()
     await show_admin_home(callback)
-    await callback.answer()
+    await callback.answer("✅ Данные обновлены")
 
 
 @router.callback_query(F.data == "work_control")
