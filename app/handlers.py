@@ -736,6 +736,22 @@ async def support(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+async def replace_photo_with_text(callback: CallbackQuery, text: str, reply_markup=None) -> None:
+    """Show a text admin screen even when the current screen is a photo message."""
+    if callback.message.photo:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
+        await callback.bot.send_message(
+            callback.message.chat.id,
+            text,
+            reply_markup=reply_markup,
+        )
+    else:
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+
+
 async def show_admin_home(target: Message | CallbackQuery) -> None:
     data = await get_dashboard_summary()
     work_enabled = await is_work_enabled()
@@ -780,7 +796,7 @@ async def work_control_handler(callback: CallbackQuery, state: FSMContext) -> No
         f"\n\n<b>Картинка Stop Work:</b> {'✅ установлена' if stop_image else '❌ нет'}\n"
         "<b>Сообщение Stop Work:</b>\n" + stop_text
     )
-    await callback.message.edit_text(text, reply_markup=work_control_menu(enabled))
+    await replace_photo_with_text(callback, text, work_control_menu(enabled))
     await callback.answer()
 
 
@@ -1045,10 +1061,11 @@ async def members_panel(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.clear()
     counts = await get_user_counts()
-    await callback.message.edit_text(
+    await replace_photo_with_text(
+        callback,
         "👥 <b>Участники</b>\n\n"
         "Выберите список или найдите пользователя по ID, username либо имени.",
-        reply_markup=members_menu(counts),
+        members_menu(counts),
     )
     await callback.answer()
 
@@ -1914,7 +1931,7 @@ async def rates_panel(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     rules = await list_rate_rules()
     text = "⚙️ <b>Проценты выплат</b>\n\nБот выбирает самый высокий порог, который не превышает сумму.\nНапример: от 50 € — 60%, от 100 € — 70%."
-    await callback.message.edit_text(text, reply_markup=rates_menu(rules))
+    await replace_photo_with_text(callback, text, rates_menu(rules))
     await callback.answer()
 
 
@@ -2688,9 +2705,10 @@ async def global_search_start_handler(callback: CallbackQuery, state: FSMContext
         await callback.answer("Нет доступа", show_alert=True); return
     await state.clear()
     await state.set_state(GlobalSearchForm.query)
-    await callback.message.edit_text(
+    await replace_photo_with_text(
+        callback,
         "🔍 <b>Глобальный поиск</b>\n\nВведите PayPal-тег, @username, имя, Telegram ID, номер заявки или сумму:",
-        reply_markup=global_search_cancel_menu(),
+        global_search_cancel_menu(),
     )
     await callback.answer()
 
@@ -2757,7 +2775,11 @@ async def crm_user_paypals_handler(callback: CallbackQuery) -> None:
 async def statistics_menu_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True); return
-    await callback.message.edit_text("📈 <b>Расширенная статистика</b>\n\nВыберите период:", reply_markup=statistics_period_menu())
+    await replace_photo_with_text(
+        callback,
+        "📈 <b>Расширенная статистика</b>\n\nВыберите период:",
+        statistics_period_menu(),
+    )
     await callback.answer()
 
 
