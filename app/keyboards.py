@@ -4,14 +4,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 ПОЛУЧИТЬ PAYPAL", callback_data="paypal_request")],
-        [
-            InlineKeyboardButton(text="📂 МОИ PAYPAL", callback_data="my_paypals"),
-            InlineKeyboardButton(text="💰 МОИ ВЫПЛАТЫ", callback_data="my_profits"),
-        ],
-        [
-            InlineKeyboardButton(text="💼 МОЙ БАЛАНС", callback_data="my_balance"),
-            InlineKeyboardButton(text="💸 СПОСОБ ВЫПЛАТЫ", callback_data="payout_method"),
-        ],
+        [InlineKeyboardButton(text="📂 МОИ PAYPAL", callback_data="my_paypals")],
+        [InlineKeyboardButton(text="💰 КОШЕЛЁК", callback_data="wallet")],
         [InlineKeyboardButton(text="👤 ЛИЧНЫЙ КАБИНЕТ", callback_data="profile")],
         [InlineKeyboardButton(text="🛟 ПОДДЕРЖКА", callback_data="support")],
     ])
@@ -633,6 +627,51 @@ def payout_method_menu(current: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="home")],
     ])
 
+
+
+def wallet_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💸 ИЗМЕНИТЬ СПОСОБ ВЫПЛАТЫ", callback_data="payout_method")],
+        [InlineKeyboardButton(text="📜 ИСТОРИЯ ВЫПЛАТ", callback_data="payout_history:0")],
+        [InlineKeyboardButton(text="⬅️ ГЛАВНОЕ МЕНЮ", callback_data="home")],
+    ])
+
+
+def payout_method_wallet_menu(current: str) -> InlineKeyboardMarkup:
+    crypto = "✅ CryptoBot" if current == "cryptobot" else "🤖 CryptoBot"
+    rocket = "✅ xRocket" if current == "xrocket" else "🚀 xRocket"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=crypto, callback_data="set_payout_method:cryptobot")],
+        [InlineKeyboardButton(text=rocket, callback_data="set_payout_method:xrocket")],
+        [InlineKeyboardButton(text="⬅️ В КОШЕЛЁК", callback_data="wallet")],
+    ])
+
+
+def payout_history_menu(rows, offset: int, has_next: bool, page_size: int = 10) -> InlineKeyboardMarkup:
+    buttons = []
+    for payout in rows:
+        provider = "🤖" if payout.provider == "cryptobot" else "🚀"
+        date = payout.created_at.strftime("%d.%m.%Y") if payout.created_at else "—"
+        buttons.append([InlineKeyboardButton(
+            text=f"✅ {date} · {float(payout.total_amount):.2f} USDT · {provider}",
+            callback_data=f"payout_history_card:{payout.id}",
+        )])
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"payout_history:{max(0, offset-page_size)}"))
+    if has_next:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"payout_history:{offset+page_size}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="⬅️ В КОШЕЛЁК", callback_data="wallet")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def payout_history_card_menu(payout_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎫 ПОЛУЧИТЬ ЧЕК ЕЩЁ РАЗ", callback_data=f"payout_receipt:{payout_id}")],
+        [InlineKeyboardButton(text="⬅️ К ИСТОРИИ", callback_data="payout_history:0")],
+    ])
 
 def payouts_users_menu(rows, offset: int, has_next: bool, page_size: int = 10) -> InlineKeyboardMarkup:
     buttons = []

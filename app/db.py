@@ -1276,11 +1276,20 @@ async def complete_manual_payout(user_id: int, admin_id: int, source_message_id:
         return payout
 
 
-async def list_manual_payouts(user_id: int, limit: int = 10) -> list[ManualPayout]:
+async def list_manual_payouts(user_id: int, limit: int = 10, offset: int = 0) -> list[ManualPayout]:
     async with SessionLocal() as session:
         return list(await session.scalars(
-            select(ManualPayout).where(ManualPayout.user_id == user_id).order_by(ManualPayout.id.desc()).limit(limit)
+            select(ManualPayout)
+            .where(ManualPayout.user_id == user_id)
+            .order_by(ManualPayout.id.desc())
+            .offset(offset)
+            .limit(limit)
         ))
+
+
+async def get_manual_payout(payout_id: int) -> ManualPayout | None:
+    async with SessionLocal() as session:
+        return await session.get(ManualPayout, payout_id)
 
 
 async def get_payout_dashboard_counts() -> dict:

@@ -59,7 +59,7 @@ from app.db import (
     get_dashboard_summary, get_user_crm_stats, global_admin_search, get_period_statistics,
     get_user_payout_method, set_user_payout_method, get_user_balance,
     list_users_with_available_balance, get_payout_user_details, complete_manual_payout,
-    list_manual_payouts, get_payout_dashboard_counts,
+    list_manual_payouts, get_manual_payout, get_payout_dashboard_counts,
 )
 from app.keyboards import (
     admin_check_menu,
@@ -97,7 +97,7 @@ from app.keyboards import (
     broadcast_photo_menu, broadcast_confirm_menu, gs_photo_menu,
     global_search_cancel_menu, global_search_results_menu, crm_user_menu, statistics_period_menu, quick_notify_menu,
     content_menu, content_cancel_menu, content_image_menu,
-    payout_method_menu, payouts_users_menu, payout_user_menu, manual_payout_cancel_menu,
+    payout_method_menu, wallet_menu, payout_method_wallet_menu, payout_history_menu, payout_history_card_menu, payouts_users_menu, payout_user_menu, manual_payout_cancel_menu,
 )
 
 router = Router()
@@ -3105,8 +3105,8 @@ async def quick_notify_custom_send(message: Message, state: FSMContext) -> None:
 
 # ==================== v2.2: БАЛАНС И РУЧНЫЕ ВЫПЛАТЫ ====================
 
-@router.callback_query(F.data == "my_balance")
-async def my_balance_handler(callback: CallbackQuery) -> None:
+@router.callback_query(F.data.in_({"wallet", "my_balance"}))
+async def wallet_handler(callback: CallbackQuery) -> None:
     if not await has_access(callback):
         return
     data = await get_user_balance(callback.from_user.id)
@@ -3115,15 +3115,14 @@ async def my_balance_handler(callback: CallbackQuery) -> None:
     if data["last"] is not None:
         last_text = f"{float(data['last'].total_amount):.2f} USDT · {format_dt(data['last'].created_at)}"
     text = (
-        "💼 <b>МОЙ БАЛАНС</b>\n\n"
-        f"💰 Доступно к выплате: <b>{data['available']:.2f} USDT</b>\n"
-        f"🧾 Начислений в балансе: <b>{data['count_available']}</b>\n"
+        "💰 <b>КОШЕЛЁК</b>\n\n"
+        f"💵 Доступно к выплате: <b>{data['available']:.2f} USDT</b>\n"
+        f"💸 Способ получения: <b>{provider}</b>\n"
         f"✅ Выплачено всего: <b>{data['paid']:.2f} USDT</b>\n"
-        f"📦 Выплат: <b>{data['count_paid']}</b>\n"
-        f"📅 Последняя выплата: <b>{last_text}</b>\n\n"
-        f"💸 Текущий способ: <b>{provider}</b>"
+        f"📦 Количество выплат: <b>{data['count_paid']}</b>\n"
+        f"📅 Последняя выплата: <b>{last_text}</b>"
     )
-    await render_screen(callback, "profile", text, payout_method_menu(data["method"]))
+    await render_screen(callback, "profile", text, wallet_menu())
     await callback.answer()
 
 
@@ -3138,7 +3137,7 @@ async def payout_method_handler(callback: CallbackQuery) -> None:
         "💸 <b>СПОСОБ ПОЛУЧЕНИЯ ВЫПЛАТ</b>\n\n"
         f"Текущий способ: <b>{provider}</b>\n\n"
         "Вы можете изменить его в любой момент. Новый выбор применяется ко всем будущим выплатам.",
-        payout_method_menu(current),
+        payout_method_wallet_menu(current),
     )
     await callback.answer()
 
@@ -3156,9 +3155,65 @@ async def set_payout_method_handler(callback: CallbackQuery) -> None:
         callback, "profile",
         "✅ <b>Способ выплаты изменён</b>\n\n"
         f"Все последующие выплаты будут отправляться через: <b>{provider}</b>",
-        payout_method_menu(method),
+        payout_method_wallet_menu(method),
     )
     await callback.answer("Сохранено")
+
+
+@router.callback_query(F.data.startswith("payout_history:"))
+async def payout_history_handler(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+    offset = int(callback.data.split(":", 1)[1])
+    page_size = 10
+    rows = await list_manual_payouts(callback.from_user.id, limit=page_size + 1, offset=offset)
+    has_next = len(rows) > page_size
+    rows = rows[:page_size]
+    text = "💸 <b>ИСТОРИЯ ВЫПЛАТ</b>\n\n"
+    text += "Все отправленные вам выплаты и чеки сохраняются здесь." if rows else "У вас пока нет выплат."
+    await render_screen(callback, "profile", text, payout_history_menu(rows, offset, has_next, page_size))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("payout_history_card:"))
+async def payout_history_card_handler(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+    payout_id = int(callback.data.split(":", 1)[1])
+    payout = await get_manual_payout(payout_id)
+    if payout is None or payout.user_id != callback.from_user.id:
+        await callback.answer("Выплата не найдена", show_alert=True)
+        return
+    provider = "🤖 CryptoBot" if payout.provider == "cryptobot" else "🚀 xRocket"
+    text = (
+        f"💸 <b>ВЫПЛАТА #{payout.id}</b>\n\n"
+        f"💰 Сумма: <b>{float(payout.total_amount):.2f} USDT</b>\n"
+        f"💳 Способ: <b>{provider}</b>\n"
+        f"📅 Дата: <b>{format_dt(payout.created_at)}</b>\n"
+        f"✅ Статус: <b>Выплачено</b>"
+    )
+    await render_screen(callback, "profile", text, payout_history_card_menu(payout.id))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("payout_receipt:"))
+async def payout_receipt_handler(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+    payout_id = int(callback.data.split(":", 1)[1])
+    payout = await get_manual_payout(payout_id)
+    if payout is None or payout.user_id != callback.from_user.id or not payout.source_message_id:
+        await callback.answer("Чек недоступен", show_alert=True)
+        return
+    try:
+        await callback.bot.copy_message(
+            chat_id=callback.from_user.id,
+            from_chat_id=payout.admin_id,
+            message_id=payout.source_message_id,
+        )
+        await callback.answer("Чек отправлен повторно", show_alert=True)
+    except Exception:
+        await callback.answer("Не удалось открыть чек. Обратитесь в поддержку.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("payouts_v22"))
