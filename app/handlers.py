@@ -1579,11 +1579,20 @@ async def paypal_add_save(callback: CallbackQuery, state: FSMContext) -> None:
         return
     item, duplicate = await add_paypal_tag(tag, data.get("paypal_add_photo"), data.get("paypal_add_gender", "male"))
     await state.clear()
+    payment_counts = await get_payment_counts()
+    database_counts = await get_paypal_database_counts()
+    hub_keyboard = paypal_payments_hub_menu(payment_counts, database_counts)
     if duplicate:
-        await callback.message.answer(f"⚠️ PayPal <code>{tag}</code> уже есть в базе.", reply_markup=paypal_database_menu(await get_paypal_database_counts()))
+        await callback.message.answer(
+            f"⚠️ PayPal <code>{tag}</code> уже есть в базе.",
+            reply_markup=hub_keyboard,
+        )
         await callback.answer("Дубликат", show_alert=True)
         return
-    await callback.message.answer(f"✅ PayPal <code>{tag}</code> сохранён и добавлен в свободную базу.", reply_markup=paypal_database_menu(await get_paypal_database_counts()))
+    await callback.message.answer(
+        f"✅ PayPal <code>{tag}</code> сохранён и добавлен в свободную базу.",
+        reply_markup=hub_keyboard,
+    )
     await callback.answer("Сохранено")
 
 
@@ -1604,7 +1613,12 @@ async def paypal_add_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    await callback.message.answer("Добавление отменено.", reply_markup=paypal_database_menu(await get_paypal_database_counts()))
+    payment_counts = await get_payment_counts()
+    database_counts = await get_paypal_database_counts()
+    await callback.message.answer(
+        "Добавление отменено.",
+        reply_markup=paypal_payments_hub_menu(payment_counts, database_counts),
+    )
     await callback.answer()
 
 
@@ -1660,7 +1674,10 @@ async def paypal_add_bulk_input(message: Message, state: FSMContext) -> None:
         f"Добавлено: <b>{added}</b>\n"
         f"Уже были в базе: <b>{duplicates}</b>\n"
         f"Некорректных: <b>{invalid}</b>",
-        reply_markup=paypal_database_menu(await get_paypal_database_counts()),
+        reply_markup=paypal_payments_hub_menu(
+            await get_payment_counts(),
+            await get_paypal_database_counts(),
+        ),
     )
 
 
