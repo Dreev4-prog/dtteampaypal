@@ -57,6 +57,9 @@ from app.db import (
     admin_recall_working_request, bulk_delete_working_day, search_working_requests,
     get_app_setting, set_app_setting, is_work_enabled, set_work_enabled, list_approved_user_ids, mark_payment_gs,
     get_dashboard_summary, get_user_crm_stats, global_admin_search, get_period_statistics,
+    get_user_payout_method, set_user_payout_method, get_user_balance,
+    list_users_with_available_balance, get_payout_user_details, complete_manual_payout,
+    list_manual_payouts, get_payout_dashboard_counts,
 )
 from app.keyboards import (
     admin_check_menu,
@@ -94,6 +97,7 @@ from app.keyboards import (
     broadcast_photo_menu, broadcast_confirm_menu, gs_photo_menu,
     global_search_cancel_menu, global_search_results_menu, crm_user_menu, statistics_period_menu, quick_notify_menu,
     content_menu, content_cancel_menu, content_image_menu,
+    payout_method_menu, payouts_users_menu, payout_user_menu, manual_payout_cancel_menu,
 )
 
 router = Router()
@@ -113,6 +117,10 @@ class PaymentAmountForm(StatesGroup):
     user_amount = State()
     admin_amount = State()
     admin_edit_amount = State()
+
+
+class ManualPayoutForm(StatesGroup):
+    check = State()
 
 
 class RateForm(StatesGroup):
@@ -3093,3 +3101,172 @@ async def quick_notify_custom_send(message: Message, state: FSMContext) -> None:
     except Exception:
         await message.answer("❌ Не удалось отправить сообщение.")
     await state.clear()
+
+
+# ==================== v2.2: БАЛАНС И РУЧНЫЕ ВЫПЛАТЫ ====================
+
+@router.callback_query(F.data == "my_balance")
+async def my_balance_handler(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+    data = await get_user_balance(callback.from_user.id)
+    provider = "🤖 CryptoBot" if data["method"] == "cryptobot" else "🚀 xRocket"
+    last_text = "пока не было"
+    if data["last"] is not None:
+        last_text = f"{float(data['last'].total_amount):.2f} USDT · {format_dt(data['last'].created_at)}"
+    text = (
+        "💼 <b>МОЙ БАЛАНС</b>\n\n"
+        f"💰 Доступно к выплате: <b>{data['available']:.2f} USDT</b>\n"
+        f"🧾 Начислений в балансе: <b>{data['count_available']}</b>\n"
+        f"✅ Выплачено всего: <b>{data['paid']:.2f} USDT</b>\n"
+        f"📦 Выплат: <b>{data['count_paid']}</b>\n"
+        f"📅 Последняя выплата: <b>{last_text}</b>\n\n"
+        f"💸 Текущий способ: <b>{provider}</b>"
+    )
+    await render_screen(callback, "profile", text, payout_method_menu(data["method"]))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "payout_method")
+async def payout_method_handler(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+    current = await get_user_payout_method(callback.from_user.id)
+    provider = "🤖 CryptoBot" if current == "cryptobot" else "🚀 xRocket"
+    await render_screen(
+        callback, "profile",
+        "💸 <b>СПОСОБ ПОЛУЧЕНИЯ ВЫПЛАТ</b>\n\n"
+        f"Текущий способ: <b>{provider}</b>\n\n"
+        "Вы можете изменить его в любой момент. Новый выбор применяется ко всем будущим выплатам.",
+        payout_method_menu(current),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_payout_method:"))
+async def set_payout_method_handler(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+    method = callback.data.split(":", 1)[1]
+    if not await set_user_payout_method(callback.from_user.id, method):
+        await callback.answer("Не удалось изменить способ", show_alert=True)
+        return
+    provider = "🤖 CryptoBot" if method == "cryptobot" else "🚀 xRocket"
+    await render_screen(
+        callback, "profile",
+        "✅ <b>Способ выплаты изменён</b>\n\n"
+        f"Все последующие выплаты будут отправляться через: <b>{provider}</b>",
+        payout_method_menu(method),
+    )
+    await callback.answer("Сохранено")
+
+
+@router.callback_query(F.data.startswith("payouts_v22"))
+async def payouts_v22_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    parts = callback.data.split(":")
+    offset = int(parts[1]) if len(parts) > 1 else 0
+    rows, has_next = await list_users_with_available_balance(offset=offset, limit=10)
+    totals = await get_payout_dashboard_counts()
+    text = (
+        "💼 <b>ЦЕНТР ВЫПЛАТ</b>\n\n"
+        f"👥 Нужно выплатить: <b>{totals['users']}</b> пользователям\n"
+        f"💰 Общий баланс: <b>{totals['total']:.2f} USDT</b>\n"
+        f"✅ Выплат создано: <b>{totals['paid_count']}</b>\n"
+        f"💵 Выплачено всего: <b>{totals['paid_total']:.2f} USDT</b>\n\n"
+        "Выберите пользователя. Все его доступные начисления будут объединены в один чек."
+    )
+    await replace_photo_with_text(callback, text, payouts_users_menu(rows, offset, has_next))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("payout_user:"))
+async def payout_user_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    await state.clear()
+    user_id = int(callback.data.split(":")[1])
+    data = await get_payout_user_details(user_id)
+    if data is None:
+        await callback.answer("Пользователь не найден", show_alert=True); return
+    user = data["user"]
+    name = f"@{user.username}" if user.username else (user.full_name or str(user.id))
+    provider = "🤖 CryptoBot" if data["method"] == "cryptobot" else "🚀 xRocket"
+    lines = [
+        "👤 <b>ВЫПЛАТА ПОЛЬЗОВАТЕЛЮ</b>", "",
+        f"Пользователь: <b>{name}</b>", f"ID: <code>{user.id}</code>",
+        f"Способ: <b>{provider}</b>", "",
+        f"💰 Общий баланс: <b>{data['total']:.2f} USDT</b>",
+        f"🧾 Включено начислений: <b>{len(data['entries'])}</b>",
+    ]
+    if data["entries"]:
+        lines.extend(["", "<b>Начисления:</b>"])
+        for e in data["entries"][:15]:
+            lines.append(f"• Заявка #{e.request_id} · {float(e.amount):.2f} USDT")
+    await replace_photo_with_text(callback, "\n".join(lines), payout_user_menu(user_id, data["total"] > 0))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("manual_payout_start:"))
+async def manual_payout_start_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    user_id = int(callback.data.split(":")[1])
+    data = await get_payout_user_details(user_id)
+    if data is None or data["total"] <= 0:
+        await callback.answer("У пользователя нет доступного баланса", show_alert=True); return
+    provider = "CryptoBot" if data["method"] == "cryptobot" else "xRocket"
+    await state.set_state(ManualPayoutForm.check)
+    await state.update_data(payout_user_id=user_id)
+    await replace_photo_with_text(
+        callback,
+        "💸 <b>РУЧНАЯ ВЫПЛАТА</b>\n\n"
+        f"Сумма: <b>{data['total']:.2f} USDT</b>\n"
+        f"Способ: <b>{provider}</b>\n\n"
+        f"Создайте общий чек на всю сумму в {provider} и пришлите его следующим сообщением. "
+        "Можно отправить ссылку, текст, пересланное сообщение или изображение.\n\n"
+        "После успешной отправки чека баланс станет нулевым, а все начисления перейдут в «Выплачено».",
+        manual_payout_cancel_menu(user_id),
+    )
+    await callback.answer()
+
+
+@router.message(ManualPayoutForm.check)
+async def manual_payout_check_handler(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    state_data = await state.get_data()
+    user_id = int(state_data.get("payout_user_id", 0))
+    details = await get_payout_user_details(user_id)
+    if details is None or details["total"] <= 0:
+        await state.clear(); await message.answer("❌ Баланс уже выплачен или пользователь не найден."); return
+    try:
+        await message.send_copy(chat_id=user_id)
+    except Exception as exc:
+        await message.answer(f"❌ Не удалось отправить чек пользователю: {exc}\nБаланс не списан.")
+        return
+    payout = await complete_manual_payout(user_id, message.from_user.id, message.message_id)
+    if payout is None:
+        await message.answer("❌ Не удалось завершить выплату. Баланс не списан.")
+        return
+    provider = "CryptoBot" if payout.provider == "cryptobot" else "xRocket"
+    try:
+        await message.bot.send_message(
+            user_id,
+            "✅ <b>ВЫПЛАТА ВЫПОЛНЕНА</b>\n\n"
+            f"Сумма: <b>{float(payout.total_amount):.2f} USDT</b>\n"
+            f"Способ: <b>{provider}</b>\n\n"
+            "Чек отправлен сообщением выше. Все начисления включены в эту общую выплату.",
+            reply_markup=back_home(),
+        )
+    except Exception:
+        pass
+    await state.clear()
+    await message.answer(
+        "✅ <b>Выплата завершена</b>\n\n"
+        f"Пользователь ID: <code>{user_id}</code>\n"
+        f"Сумма: <b>{float(payout.total_amount):.2f} USDT</b>\n"
+        f"Способ: <b>{provider}</b>\n\n"
+        "Баланс обнулён. Все связанные заявки перенесены в категорию «Выплачено»."
+    )

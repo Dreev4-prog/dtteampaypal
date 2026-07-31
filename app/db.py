@@ -23,6 +23,7 @@ class User(Base):
     applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     decided_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    payout_method: Mapped[str] = mapped_column(String(20), default="cryptobot", index=True)
 
 
 class PaypalTag(Base):
@@ -80,6 +81,31 @@ class PaypalReturn(Base):
     resolved_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
 
+class BalanceEntry(Base):
+    __tablename__ = "balance_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
+    request_id: Mapped[int] = mapped_column(Integer, ForeignKey("requests.id"), unique=True, index=True)
+    amount: Mapped[float] = mapped_column(Numeric(12, 2))
+    status: Mapped[str] = mapped_column(String(20), default="available", index=True)
+    payout_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class ManualPayout(Base):
+    __tablename__ = "manual_payouts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
+    total_amount: Mapped[float] = mapped_column(Numeric(12, 2))
+    provider: Mapped[str] = mapped_column(String(20), index=True)
+    admin_id: Mapped[int] = mapped_column(BigInteger)
+    source_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+
+
 class RateRule(Base):
     __tablename__ = "rate_rules"
 
@@ -112,6 +138,10 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS applied_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS decided_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS decided_by BIGINT"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS payout_method VARCHAR(20)"))
+        await conn.execute(text("UPDATE users SET payout_method = 'cryptobot' WHERE payout_method IS NULL"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN payout_method SET DEFAULT 'cryptobot'"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_payout_method ON users (payout_method)"))
 
         # Все пользователи, которые были в базе до v1.3, сохраняют доступ.
         await conn.execute(text("UPDATE users SET status = 'approved' WHERE status IS NULL"))
@@ -187,6 +217,20 @@ async def init_db() -> None:
                 payout_amount = ROUND((req.amount * matched_rates.percent / 100.0)::numeric, 2)
             FROM matched_rates
             WHERE req.id = matched_rates.request_id
+        """))
+
+
+        # v2.2: переносим существующие начисления в журнал баланса.
+        await conn.execute(text("""
+            INSERT INTO balance_entries (user_id, request_id, amount, status, created_at, paid_at)
+            SELECT r.user_id, r.id, r.payout_amount,
+                   CASE WHEN r.status = 'paid_out' THEN 'paid' ELSE 'available' END,
+                   COALESCE(r.payment_confirmed_at, r.updated_at, CURRENT_TIMESTAMP),
+                   CASE WHEN r.status = 'paid_out' THEN COALESCE(r.payout_at, r.updated_at, CURRENT_TIMESTAMP) ELSE NULL END
+            FROM requests r
+            WHERE r.status IN ('payout_pending', 'paid_out')
+              AND r.payout_amount IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM balance_entries b WHERE b.request_id = r.id)
         """))
 
 
@@ -575,6 +619,14 @@ async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
         req.payment_confirmed_at = datetime.utcnow()
         req.payment_confirmed_by = admin_id
         req.updated_at = datetime.utcnow()
+        existing_entry = await session.scalar(select(BalanceEntry).where(BalanceEntry.request_id == req.id))
+        if existing_entry is None:
+            session.add(BalanceEntry(
+                user_id=req.user_id,
+                request_id=req.id,
+                amount=req.payout_amount,
+                status="available",
+            ))
         await session.commit()
         await session.refresh(req)
         return req
@@ -1103,3 +1155,142 @@ async def get_period_statistics(period: str) -> dict:
             "payout": sum(float(r.payout_amount or 0) for r in requests if r.status in {"payout_pending", "paid_out"}),
             "active_users": len({r.user_id for r in requests}),
         }
+
+
+# ==================== v2.2: БАЛАНС И РУЧНЫЕ ВЫПЛАТЫ ====================
+
+async def get_user_payout_method(user_id: int) -> str:
+    async with SessionLocal() as session:
+        value = await session.scalar(select(User.payout_method).where(User.id == user_id))
+        return value or "cryptobot"
+
+
+async def set_user_payout_method(user_id: int, method: str) -> bool:
+    if method not in {"cryptobot", "xrocket"}:
+        return False
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            return False
+        user.payout_method = method
+        await session.commit()
+        return True
+
+
+async def get_user_balance(user_id: int) -> dict:
+    async with SessionLocal() as session:
+        available = float(await session.scalar(
+            select(func.coalesce(func.sum(BalanceEntry.amount), 0)).where(
+                BalanceEntry.user_id == user_id, BalanceEntry.status == "available"
+            )
+        ) or 0)
+        paid = float(await session.scalar(
+            select(func.coalesce(func.sum(BalanceEntry.amount), 0)).where(
+                BalanceEntry.user_id == user_id, BalanceEntry.status == "paid"
+            )
+        ) or 0)
+        count_available = int(await session.scalar(
+            select(func.count(BalanceEntry.id)).where(
+                BalanceEntry.user_id == user_id, BalanceEntry.status == "available"
+            )
+        ) or 0)
+        count_paid = int(await session.scalar(
+            select(func.count(ManualPayout.id)).where(ManualPayout.user_id == user_id)
+        ) or 0)
+        last = await session.scalar(
+            select(ManualPayout).where(ManualPayout.user_id == user_id).order_by(ManualPayout.id.desc()).limit(1)
+        )
+        method = await session.scalar(select(User.payout_method).where(User.id == user_id)) or "cryptobot"
+        return {
+            "available": available, "paid": paid, "count_available": count_available,
+            "count_paid": count_paid, "last": last, "method": method,
+        }
+
+
+async def list_users_with_available_balance(offset: int = 0, limit: int = 10):
+    async with SessionLocal() as session:
+        query = (
+            select(User, func.sum(BalanceEntry.amount).label("balance"), func.count(BalanceEntry.id).label("entries"))
+            .join(BalanceEntry, BalanceEntry.user_id == User.id)
+            .where(BalanceEntry.status == "available")
+            .group_by(User.id)
+            .order_by(func.sum(BalanceEntry.amount).desc(), User.id)
+            .offset(offset).limit(limit + 1)
+        )
+        rows = list((await session.execute(query)).all())
+        return rows[:limit], len(rows) > limit
+
+
+async def get_payout_user_details(user_id: int) -> dict | None:
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            return None
+        entries = list(await session.scalars(
+            select(BalanceEntry).where(
+                BalanceEntry.user_id == user_id, BalanceEntry.status == "available"
+            ).order_by(BalanceEntry.id)
+        ))
+        return {
+            "user": user,
+            "entries": entries,
+            "total": round(sum(float(e.amount) for e in entries), 2),
+            "method": user.payout_method or "cryptobot",
+        }
+
+
+async def complete_manual_payout(user_id: int, admin_id: int, source_message_id: int | None = None) -> ManualPayout | None:
+    async with SessionLocal() as session:
+        async with session.begin():
+            user = await session.get(User, user_id, with_for_update=True)
+            if user is None:
+                return None
+            entries = list(await session.scalars(
+                select(BalanceEntry).where(
+                    BalanceEntry.user_id == user_id, BalanceEntry.status == "available"
+                ).order_by(BalanceEntry.id).with_for_update()
+            ))
+            if not entries:
+                return None
+            total = round(sum(float(e.amount) for e in entries), 2)
+            payout = ManualPayout(
+                user_id=user_id, total_amount=total, provider=user.payout_method or "cryptobot",
+                admin_id=admin_id, source_message_id=source_message_id,
+            )
+            session.add(payout)
+            await session.flush()
+            now = datetime.utcnow()
+            request_ids = []
+            for entry in entries:
+                entry.status = "paid"
+                entry.payout_id = payout.id
+                entry.paid_at = now
+                request_ids.append(entry.request_id)
+            requests = list(await session.scalars(select(Request).where(Request.id.in_(request_ids)).with_for_update()))
+            for req in requests:
+                req.status = "paid_out"
+                req.payout_at = now
+                req.payout_by = admin_id
+                req.updated_at = now
+        await session.refresh(payout)
+        return payout
+
+
+async def list_manual_payouts(user_id: int, limit: int = 10) -> list[ManualPayout]:
+    async with SessionLocal() as session:
+        return list(await session.scalars(
+            select(ManualPayout).where(ManualPayout.user_id == user_id).order_by(ManualPayout.id.desc()).limit(limit)
+        ))
+
+
+async def get_payout_dashboard_counts() -> dict:
+    async with SessionLocal() as session:
+        users_count = int(await session.scalar(
+            select(func.count(func.distinct(BalanceEntry.user_id))).where(BalanceEntry.status == "available")
+        ) or 0)
+        total = float(await session.scalar(
+            select(func.coalesce(func.sum(BalanceEntry.amount), 0)).where(BalanceEntry.status == "available")
+        ) or 0)
+        paid_total = float(await session.scalar(select(func.coalesce(func.sum(ManualPayout.total_amount), 0))) or 0)
+        paid_count = int(await session.scalar(select(func.count(ManualPayout.id))) or 0)
+        return {"users": users_count, "total": total, "paid_total": paid_total, "paid_count": paid_count}

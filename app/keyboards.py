@@ -8,6 +8,10 @@ def main_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📂 МОИ PAYPAL", callback_data="my_paypals"),
             InlineKeyboardButton(text="💰 МОИ ВЫПЛАТЫ", callback_data="my_profits"),
         ],
+        [
+            InlineKeyboardButton(text="💼 МОЙ БАЛАНС", callback_data="my_balance"),
+            InlineKeyboardButton(text="💸 СПОСОБ ВЫПЛАТЫ", callback_data="payout_method"),
+        ],
         [InlineKeyboardButton(text="👤 ЛИЧНЫЙ КАБИНЕТ", callback_data="profile")],
         [InlineKeyboardButton(text="🛟 ПОДДЕРЖКА", callback_data="support")],
     ])
@@ -35,7 +39,7 @@ def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeybo
     queue_label = f"📥 Очередь PayPal ({queue_count})"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ START / ⏹ STOP", callback_data="work_control")],
-        [InlineKeyboardButton(text="💰 ПЛАТЕЖИ", callback_data="payments_menu")],
+        [InlineKeyboardButton(text="💰 ПЛАТЕЖИ", callback_data="payments_menu"), InlineKeyboardButton(text="💼 ВЫПЛАТЫ", callback_data="payouts_v22")],
         [InlineKeyboardButton(text="📣 РАССЫЛКА", callback_data="broadcast_start"), InlineKeyboardButton(text="📝 КОНТЕНТ", callback_data="content_menu")],
         [InlineKeyboardButton(text="💳 БАЗА PAYPAL", callback_data="paypal_database"), InlineKeyboardButton(text="↩️ ВОЗВРАТЫ", callback_data="returns_menu")],
         [InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="statistics_menu"), InlineKeyboardButton(text="⚙️ ПРОЦЕНТЫ", callback_data="rates_menu")],
@@ -616,3 +620,49 @@ def content_image_menu(has_image: bool) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="🗑 Удалить пользовательскую картинку", callback_data="content_home_image_delete")])
     rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="content_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ==================== v2.2: БАЛАНС И РУЧНЫЕ ВЫПЛАТЫ ====================
+
+def payout_method_menu(current: str) -> InlineKeyboardMarkup:
+    crypto = "✅ CryptoBot" if current == "cryptobot" else "🤖 CryptoBot"
+    rocket = "✅ xRocket" if current == "xrocket" else "🚀 xRocket"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=crypto, callback_data="set_payout_method:cryptobot")],
+        [InlineKeyboardButton(text=rocket, callback_data="set_payout_method:xrocket")],
+        [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="home")],
+    ])
+
+
+def payouts_users_menu(rows, offset: int, has_next: bool, page_size: int = 10) -> InlineKeyboardMarkup:
+    buttons = []
+    for user, balance, entries in rows:
+        name = f"@{user.username}" if user.username else str(user.id)
+        buttons.append([InlineKeyboardButton(
+            text=f"{name} · {float(balance):.2f} USDT · {entries} начисл.",
+            callback_data=f"payout_user:{user.id}",
+        )])
+    nav=[]
+    if offset > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"payouts_v22:{max(0, offset-page_size)}"))
+    if has_next:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"payouts_v22:{offset+page_size}"))
+    if nav: buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"payouts_v22:{offset}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Админ-панель", callback_data="admin_home")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def payout_user_menu(user_id: int, has_balance: bool) -> InlineKeyboardMarkup:
+    rows=[]
+    if has_balance:
+        rows.append([InlineKeyboardButton(text="💸 ВЫПЛАТИТЬ ОБЩИЙ БАЛАНС", callback_data=f"manual_payout_start:{user_id}")])
+    rows.append([InlineKeyboardButton(text="👤 Открыть пользователя", callback_data=f"member_card:{user_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К выплатам", callback_data="payouts_v22:0")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def manual_payout_cancel_menu(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"payout_user:{user_id}")]
+    ])
