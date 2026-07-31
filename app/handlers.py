@@ -821,7 +821,7 @@ async def content_menu_handler(callback: CallbackQuery, state: FSMContext) -> No
         "Подсказка: в приветствии можно использовать <code>{status}</code> — "
         "бот автоматически подставит статус работы."
     )
-    await show_admin_text_screen(callback, text, content_menu(bool(home_image)))
+    await replace_photo_with_text(callback, text, content_menu(bool(home_image)))
     await callback.answer()
 
 
@@ -857,7 +857,7 @@ async def content_edit_start(callback: CallbackQuery, state: FSMContext) -> None
         "Пришлите новый текст одним сообщением. HTML-разметка Telegram поддерживается.\n\n"
         f"<b>Сейчас:</b>\n{current}"
     )
-    await show_admin_text_screen(callback, text, content_cancel_menu())
+    await replace_photo_with_text(callback, text, content_cancel_menu())
     await callback.answer()
 
 
@@ -893,7 +893,7 @@ async def content_home_image_start(callback: CallbackQuery, state: FSMContext) -
         "🖼 <b>Картинка главного экрана</b>\n\n"
         "Отправьте новую фотографию. Она сохранится через Telegram file_id и применится сразу."
     )
-    await show_admin_text_screen(callback, text, content_image_menu(bool(current)))
+    await replace_photo_with_text(callback, text, content_image_menu(bool(current)))
     await callback.answer()
 
 
@@ -926,7 +926,7 @@ async def content_home_image_delete(callback: CallbackQuery, state: FSMContext) 
         return
     await set_app_setting("content_home_image", "")
     await state.clear()
-    await show_admin_text_screen(
+    await replace_photo_with_text(
         callback,
         "✅ Пользовательская картинка удалена. Используется стандартный баннер.",
         content_menu(False),
@@ -956,7 +956,7 @@ async def content_reset_handler(callback: CallbackQuery, state: FSMContext) -> N
     await set_app_setting(keys[kind], defaults[kind])
     await state.clear()
     has_image = bool(await get_app_setting("content_home_image", ""))
-    await show_admin_text_screen(
+    await replace_photo_with_text(
         callback,
         "✅ Текст восстановлен по умолчанию.",
         content_menu(has_image),
