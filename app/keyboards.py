@@ -36,16 +36,17 @@ def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeybo
         [InlineKeyboardButton(text="💰 ПЛАТЕЖИ", callback_data="payments_menu"), InlineKeyboardButton(text="💼 ВЫПЛАТЫ", callback_data="payouts_v22")],
         [InlineKeyboardButton(text="📣 РАССЫЛКА", callback_data="broadcast_start"), InlineKeyboardButton(text="📝 КОНТЕНТ", callback_data="content_menu")],
         [InlineKeyboardButton(text="💳 БАЗА PAYPAL", callback_data="paypal_database"), InlineKeyboardButton(text="↩️ ВОЗВРАТЫ", callback_data="returns_menu")],
-        [InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="statistics_menu"), InlineKeyboardButton(text="⚙️ ПРОЦЕНТЫ", callback_data="rates_menu")],
+        [InlineKeyboardButton(text="👥 ПОЛЬЗОВАТЕЛИ И СТАТИСТИКА", callback_data="members_menu")],
+        [InlineKeyboardButton(text="⚙️ ПРОЦЕНТЫ", callback_data="rates_menu")],
         [InlineKeyboardButton(text="🔍 ПОИСК", callback_data="global_search")],
         [InlineKeyboardButton(text=queue_label, callback_data="paypal_queue:0")],
-        [InlineKeyboardButton(text=pending_label, callback_data="members_menu")],
         [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="admin_home")],
     ])
 
 
 def members_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Подробная статистика", callback_data="statistics_menu")],
         [InlineKeyboardButton(text=f"📋 Все ({counts.get('all', 0)})", callback_data="members_list:all:0")],
         [
             InlineKeyboardButton(text=f"🟢 Активные ({counts.get('approved', 0)})", callback_data="members_list:approved:0"),
@@ -313,7 +314,10 @@ def return_confirm_menu(request_id: int) -> InlineKeyboardMarkup:
 
 
 def returns_menu(items: list) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=f"↩️ #{item.id} · заявка #{item.request_id}", callback_data=f"return_card:{item.id}")] for item in items]
+    rows = [[InlineKeyboardButton(
+        text=f"↩️ {getattr(item, '_display_username', item.user_id)} · {getattr(item, '_display_tag', '—')} · {getattr(item, '_display_amount', 0)} €",
+        callback_data=f"return_card:{item.id}",
+    )] for item in items]
     rows += [[InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="returns_menu")], [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")]]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -328,7 +332,7 @@ def return_card_menu(return_id: int, user_id: int) -> InlineKeyboardMarkup:
 
 def return_checked_menu(return_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Вернуть в базу", callback_data=f"return_release:{return_id}")],
+        [InlineKeyboardButton(text="↩️ Вернуть в работу", callback_data=f"return_release:{return_id}")],
         [InlineKeyboardButton(text="🚫 Gestop", callback_data=f"return_gestoppt:{return_id}")],
         [InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"return_delete:{return_id}")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data=f"return_card:{return_id}")],
@@ -430,7 +434,10 @@ def working_dates_menu(rows: list[tuple[str, int]]) -> InlineKeyboardMarkup:
 
 
 def working_day_menu(date_label: str, requests: list) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=f"#{req.id} · {req.amount} € · ID {req.user_id}", callback_data=f"working_card:{req.id}:{date_label}")] for req in requests[:50]]
+    rows = [[InlineKeyboardButton(
+        text=f"👤 {getattr(req, '_display_username', req.user_id)} · 💳 {getattr(req, '_display_tag', '—')} · 💶 {req.amount} €",
+        callback_data=f"working_card:{req.id}:{date_label}",
+    )] for req in requests[:50]]
     rows += [
         [InlineKeyboardButton(text="🔔 Уведомить: сбор через 30 минут", callback_data=f"collect_notify:{date_label}")],
         [InlineKeyboardButton(text="📥 Забрать PayPal в ожидании оплаты", callback_data=f"collect_take_ask:{date_label}")],
@@ -450,8 +457,9 @@ def collect_take_confirm_menu(date_label: str) -> InlineKeyboardMarkup:
 
 def working_card_menu(request_id: int, day: str, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Деньги поступили", callback_data=f"working_money_received:{request_id}:{day}")],
         [InlineKeyboardButton(text="📣 Уведомить пользователя", callback_data=f"quick_notify_menu:{request_id}:{day}")],
-        [InlineKeyboardButton(text="↩️ Вернуть PayPal в работу", callback_data=f"working_recall_ask:{request_id}:available:{day}")],
+        [InlineKeyboardButton(text="📥 Забрать в возвраты", callback_data=f"working_recall_ask:{request_id}:available:{day}")],
         [InlineKeyboardButton(text="🚫 Gestop", callback_data=f"working_recall_ask:{request_id}:gestoppt:{day}")],
         [InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"working_recall_ask:{request_id}:deleted:{day}")],
         [InlineKeyboardButton(text="👤 Открыть пользователя", url=f"tg://user?id={user_id}")],
@@ -488,7 +496,10 @@ def working_delete_day_confirm_menu(day: str) -> InlineKeyboardMarkup:
 
 
 def working_search_results_menu(requests: list) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=f"#{req.id} · {req.amount} € · ID {req.user_id}", callback_data=f"working_card:{req.id}:search")] for req in requests]
+    rows = [[InlineKeyboardButton(
+        text=f"👤 {getattr(req, '_display_username', req.user_id)} · 💳 {getattr(req, '_display_tag', '—')} · 💶 {req.amount} €",
+        callback_data=f"working_card:{req.id}:search",
+    )] for req in requests]
     rows.append([InlineKeyboardButton(text="🔍 Новый поиск", callback_data="working_search")])
     rows.append([InlineKeyboardButton(text="⬅️ К датам", callback_data="working_dates")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

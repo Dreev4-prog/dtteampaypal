@@ -41,6 +41,7 @@ from app.db import (
     get_payment_counts,
     list_payment_requests,
     confirm_payment,
+    confirm_working_payment,
     mark_payment_not_found,
     return_to_payment_check,
     mark_payout_done,
@@ -1256,10 +1257,20 @@ async def members_panel(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.clear()
     counts = await get_user_counts()
+    stats = await get_period_statistics("all")
     await replace_photo_with_text(
         callback,
-        "👥 <b>Участники</b>\n\n"
-        "Выберите список или найдите пользователя по ID, username либо имени.",
+        "👥 <b>ПОЛЬЗОВАТЕЛИ И СТАТИСТИКА</b>\n\n"
+        f"👥 Всего: <b>{counts.get('all', 0)}</b>\n"
+        f"🟢 Одобрено: <b>{counts.get('approved', 0)}</b>\n"
+        f"🟡 Ожидают: <b>{counts.get('pending', 0)}</b>\n"
+        f"🚫 Заблокировано: <b>{counts.get('blocked', 0)}</b>\n\n"
+        f"💳 Выдано PayPal: <b>{stats['issued']}</b>\n"
+        f"✅ Успешных оплат: <b>{stats['successful']}</b>\n"
+        f"↩️ Возвратов: <b>{stats['returns']}</b>\n"
+        f"🚫 GS: <b>{stats['gs']}</b>\n"
+        f"💸 Выплачено: <b>{stats['payout']:.2f}</b>\n\n"
+        "Выберите список или найдите пользователя.",
         members_menu(counts),
     )
     await callback.answer()
@@ -2318,8 +2329,9 @@ async def return_card_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id): await callback.answer("Нет доступа", show_alert=True); return
     item = await get_paypal_return(int(callback.data.split(":")[1]))
     if item is None: await callback.answer("Возврат не найден", show_alert=True); return
-    req = await get_request(item.request_id); tag = await get_paypal_tag(item.paypal_tag_id)
-    text = (f"<b>↩️ Возврат #{item.id}</b>\n\n👤 ID: <code>{item.user_id}</code>\n"
+    req = await get_request(item.request_id); tag = await get_paypal_tag(item.paypal_tag_id); user = await get_user(item.user_id)
+    username = f"@{user.username}" if user and user.username else (user.full_name if user and user.full_name else str(item.user_id))
+    text = (f"<b>↩️ Возврат #{item.id}</b>\n\n👤 Пользователь: <b>{username}</b>\n🆔 ID: <code>{item.user_id}</code>\n"
             f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n💶 Сумма: <b>{req.amount if req else 0} €</b>\n"
             f"🕒 Выдан: {format_dt(tag.issued_at if tag else None)}\n📝 Причина: {item.reason_text}\n"
             f"📌 Статус: {item.status}")
@@ -2336,7 +2348,7 @@ async def return_checked_handler(callback: CallbackQuery) -> None:
 async def _finish_return(callback: CallbackQuery, action: str, reason: str) -> None:
     rid = int(callback.data.split(":")[1]); item = await resolve_paypal_return(rid, action, callback.from_user.id, reason)
     if item is None: await callback.answer("Возврат уже обработан", show_alert=True); return
-    messages = {"returned": "✅ PayPal проверен и возвращён в свободную базу.", "gestoppt": "🚫 PayPal отмечен как Gestop и исключён из выдачи.", "deleted": "🗑 PayPal удалён из активной базы."}
+    messages = {"returned": "✅ PayPal проверен и возвращён в работу.", "gestoppt": "🚫 PayPal отмечен как Gestop и исключён из выдачи.", "deleted": "🗑 PayPal удалён из активной базы."}
     try: await callback.bot.send_message(item.user_id, messages[action], reply_markup=back_home())
     except Exception: pass
     await callback.message.edit_text(messages[action], reply_markup=returns_menu(await list_paypal_returns())); await callback.answer("Готово")
@@ -2345,7 +2357,7 @@ async def _finish_return(callback: CallbackQuery, action: str, reason: str) -> N
 @router.callback_query(F.data.startswith("return_release:"))
 async def return_release_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id): return
-    await _finish_return(callback, "returned", "PayPal пустой. Возвращён в базу.")
+    await _finish_return(callback, "returned", "PayPal пустой. Возвращён в работу.")
 
 
 @router.callback_query(F.data.startswith("return_gestoppt:"))
@@ -2496,22 +2508,25 @@ async def collect_take_confirm_handler(callback: CallbackQuery) -> None:
     reqs = await get_working_requests_by_date(day)
     recalled = 0
     for req in reqs:
-        recalled_req, tag = await admin_recall_working_request(req.id, "available", callback.from_user.id)
-        if recalled_req is None:
+        item = await create_paypal_return(
+            req.id, req.user_id, "admin_recall", "Забрал администратор для проверки",
+        )
+        if item is None:
             continue
         recalled += 1
+        tag = await get_paypal_tag(req.paypal_tag_id)
         try:
             await callback.bot.send_message(
                 req.user_id,
-                f"ℹ️ Администратор забрал PayPal <code>{tag.tag if tag else '—'}</code>, "
-                "который ожидал оплаты. После следующего Start Work вы сможете создать новую заявку."
+                f"ℹ️ Администратор забрал PayPal <code>{tag.tag if tag else '—'}</code> на проверку. "
+                "До решения администратора он находится в разделе возвратов."
             )
         except Exception:
             pass
     remaining = await get_working_requests_by_date(day)
     await callback.message.edit_caption(
         caption=(
-            f"<b>✅ PayPal в ожидании оплаты забраны</b>\n\n"
+            f"<b>✅ PayPal переданы в возвраты для проверки</b>\n\n"
             f"Дата: <b>{day}</b>\n"
             f"Забрано: <b>{recalled}</b>\n"
             f"Осталось в ожидании оплаты: <b>{len(remaining)}</b>"
@@ -2547,6 +2562,53 @@ async def working_card_handler(callback: CallbackQuery) -> None:
         reply_markup=working_card_menu(req.id, day, req.user_id),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("working_money_received:"))
+async def working_money_received_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, request_id_raw, day = callback.data.split(":", 2)
+    req = await confirm_working_payment(int(request_id_raw), callback.from_user.id)
+    if req is None:
+        await callback.answer(
+            "Не удалось подтвердить. Проверьте статус заявки и настройки процентов.",
+            show_alert=True,
+        )
+        return
+    tag = await get_paypal_tag(req.paypal_tag_id)
+    user = await get_user(req.user_id)
+    username = f"@{user.username}" if user and user.username else (user.full_name if user and user.full_name else str(req.user_id))
+    balance = await get_user_balance(req.user_id)
+    try:
+        await callback.bot.send_message(
+            req.user_id,
+            "✅ <b>Платёж подтверждён</b>\n\n"
+            f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+            f"💶 Сумма: <b>{req.amount} €</b>\n"
+            f"📊 Процент: <b>{req.payout_percent}%</b>\n"
+            f"💰 Начислено в кошелёк: <b>{float(req.payout_amount or 0):.2f} USDT</b>\n"
+            f"💼 Текущий баланс: <b>{balance['available']:.2f} USDT</b>",
+            reply_markup=back_home(),
+        )
+    except Exception:
+        pass
+    remaining = await get_working_requests_by_date(day) if day != "search" else []
+    text = (
+        "✅ <b>Деньги подтверждены и начислены</b>\n\n"
+        f"👤 Пользователь: <b>{username}</b>\n"
+        f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+        f"💶 Получено: <b>{req.amount} €</b>\n"
+        f"📊 Процент: <b>{req.payout_percent}%</b>\n"
+        f"💰 Начислено: <b>{float(req.payout_amount or 0):.2f} USDT</b>\n"
+        f"💼 Баланс пользователя: <b>{balance['available']:.2f} USDT</b>"
+    )
+    if day == "search":
+        await callback.message.edit_caption(caption=text, reply_markup=working_search_results_menu([]))
+    else:
+        await callback.message.edit_caption(caption=text, reply_markup=working_day_menu(day, remaining))
+    await callback.answer("Начислено в кошелёк")
 
 
 @router.callback_query(F.data.startswith("working_notify_ask:"))
@@ -2664,7 +2726,7 @@ async def working_recall_ask_handler(callback: CallbackQuery) -> None:
         return
     _, request_id_raw, action, day = callback.data.split(":", 3)
     labels = {
-        "available": "вернуть PayPal в свободную базу",
+        "available": "забрать PayPal и передать его в возвраты для проверки",
         "gestoppt": "пометить PayPal как Gestop",
         "deleted": "удалить PayPal из активной базы",
     }
@@ -2685,12 +2747,27 @@ async def working_recall_confirm_handler(callback: CallbackQuery) -> None:
         await callback.answer("Нет доступа", show_alert=True)
         return
     _, request_id_raw, action, day = callback.data.split(":", 3)
-    req, tag = await admin_recall_working_request(int(request_id_raw), action, callback.from_user.id)
-    if req is None:
-        await callback.answer("PayPal уже обработан или изменил статус", show_alert=True)
-        return
+    request_id = int(request_id_raw)
+    if action == "available":
+        source_req = await get_request(request_id)
+        if source_req is None or source_req.status != "paypal_issued":
+            await callback.answer("PayPal уже обработан или изменил статус", show_alert=True)
+            return
+        item = await create_paypal_return(
+            request_id, source_req.user_id, "admin_recall", "Забрал администратор для проверки",
+        )
+        if item is None:
+            await callback.answer("Не удалось передать PayPal в возвраты", show_alert=True)
+            return
+        req = source_req
+        tag = await get_paypal_tag(source_req.paypal_tag_id)
+    else:
+        req, tag = await admin_recall_working_request(request_id, action, callback.from_user.id)
+        if req is None:
+            await callback.answer("PayPal уже обработан или изменил статус", show_alert=True)
+            return
     user_messages = {
-        "available": "ℹ️ Администратор забрал выданный вам PayPal и вернул его в свободную базу.",
+        "available": "ℹ️ Администратор забрал выданный вам PayPal на проверку. Он помещён в раздел возвратов.",
         "gestoppt": "ℹ️ Администратор забрал выданный вам PayPal и пометил его как Gestop.",
         "deleted": "ℹ️ Администратор забрал выданный вам PayPal и удалил его из активной базы.",
     }

@@ -632,6 +632,45 @@ async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
         return req
 
 
+async def confirm_working_payment(request_id: int, admin_id: int) -> Request | None:
+    """Confirm money directly from the admin card of an issued PayPal.
+
+    The configured rate is applied automatically and one balance entry is
+    created for the request. Repeated callback presses cannot duplicate it.
+    """
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if req is None or req.status != "paypal_issued":
+            return None
+        percent = await _get_rate_percent(session, req.amount)
+        if percent is None:
+            return None
+        now = datetime.utcnow()
+        req.status = "payout_pending"
+        req.payout_percent = percent
+        req.payout_amount = round(req.amount * percent / 100, 2)
+        req.payment_confirmed_at = now
+        req.payment_confirmed_by = admin_id
+        req.updated_at = now
+        existing_entry = await session.scalar(
+            select(BalanceEntry).where(BalanceEntry.request_id == req.id)
+        )
+        if existing_entry is None:
+            session.add(BalanceEntry(
+                user_id=req.user_id,
+                request_id=req.id,
+                amount=req.payout_amount,
+                status="available",
+            ))
+        if req.paypal_tag_id is not None:
+            tag = await session.get(PaypalTag, req.paypal_tag_id, with_for_update=True)
+            if tag is not None and tag.status == "issued":
+                tag.status = "used"
+        await session.commit()
+        await session.refresh(req)
+        return req
+
+
 async def mark_payment_not_found(request_id: int, admin_id: int) -> Request | None:
     """Return a request to the user without removing the issued PayPal.
 
@@ -767,8 +806,22 @@ async def create_paypal_return(request_id: int, user_id: int, reason_code: str, 
 
 async def list_paypal_returns(status: str = "pending", limit: int = 50) -> list[PaypalReturn]:
     async with SessionLocal() as session:
-        rows = await session.scalars(select(PaypalReturn).where(PaypalReturn.status == status).order_by(PaypalReturn.created_at.asc()).limit(limit))
-        return list(rows)
+        rows = (await session.execute(
+            select(PaypalReturn, Request.amount, User.username, User.full_name, PaypalTag.tag)
+            .join(Request, Request.id == PaypalReturn.request_id)
+            .join(User, User.id == PaypalReturn.user_id)
+            .join(PaypalTag, PaypalTag.id == PaypalReturn.paypal_tag_id)
+            .where(PaypalReturn.status == status)
+            .order_by(PaypalReturn.created_at.asc())
+            .limit(limit)
+        )).all()
+        result: list[PaypalReturn] = []
+        for item, amount, username, full_name, paypal_tag in rows:
+            item._display_amount = amount
+            item._display_username = f"@{username}" if username else (full_name or str(item.user_id))
+            item._display_tag = paypal_tag
+            result.append(item)
+        return result
 
 
 async def get_paypal_return(return_id: int) -> PaypalReturn | None:
@@ -889,13 +942,23 @@ async def get_working_dates() -> list[tuple[str, int]]:
 
 async def get_working_requests_by_date(day: str) -> list[Request]:
     async with SessionLocal() as session:
-        rows = await session.scalars(
-            select(Request).join(PaypalTag, PaypalTag.id == Request.paypal_tag_id).where(
-                PaypalTag.status == "issued", func.to_char(PaypalTag.issued_at, 'YYYY-MM-DD') == day,
-                Request.status == "paypal_issued"
-            ).order_by(PaypalTag.issued_at.asc())
-        )
-        return list(rows)
+        rows = (await session.execute(
+            select(Request, User.username, User.full_name, PaypalTag.tag)
+            .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
+            .join(User, User.id == Request.user_id)
+            .where(
+                PaypalTag.status == "issued",
+                func.to_char(PaypalTag.issued_at, 'YYYY-MM-DD') == day,
+                Request.status == "paypal_issued",
+            )
+            .order_by(PaypalTag.issued_at.asc())
+        )).all()
+        result: list[Request] = []
+        for req, username, full_name, paypal_tag in rows:
+            req._display_username = f"@{username}" if username else (full_name or str(req.user_id))
+            req._display_tag = paypal_tag
+            result.append(req)
+        return result
 
 
 async def mark_collection_notified(request_id: int) -> Request | None:
@@ -1016,7 +1079,7 @@ async def search_working_requests(query: str, limit: int = 50) -> list[Request]:
     pattern = f"%{value.lstrip('@')}%"
     async with SessionLocal() as session:
         stmt = (
-            select(Request)
+            select(Request, User.username, User.full_name, PaypalTag.tag)
             .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
             .join(User, User.id == Request.user_id)
             .where(PaypalTag.status == "issued", Request.status == "paypal_issued")
@@ -1029,7 +1092,13 @@ async def search_working_requests(query: str, limit: int = 50) -> list[Request]:
             .order_by(PaypalTag.issued_at.desc())
             .limit(limit)
         )
-        return list(await session.scalars(stmt))
+        rows = (await session.execute(stmt)).all()
+        result: list[Request] = []
+        for req, username, full_name, paypal_tag in rows:
+            req._display_username = f"@{username}" if username else (full_name or str(req.user_id))
+            req._display_tag = paypal_tag
+            result.append(req)
+        return result
 
 
 async def get_app_setting(key: str, default: str = "") -> str:
