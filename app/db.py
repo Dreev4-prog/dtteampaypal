@@ -156,7 +156,11 @@ async def init_db() -> None:
             ('start_work_message', '🚀 <b>START WORK</b>\n\nПриём заявок на PayPal открыт. Можно создавать новые заявки.', CURRENT_TIMESTAMP),
             ('stop_work_message', '🛑 <b>STOP WORK</b>\n\nПриём новых заявок на PayPal остановлен. Продолжайте работу только с уже выданными PayPal.', CURRENT_TIMESTAMP),
             ('start_work_image', '', CURRENT_TIMESTAMP),
-            ('stop_work_image', '', CURRENT_TIMESTAMP)
+            ('stop_work_image', '', CURRENT_TIMESTAMP),
+            ('content_home_text', '━━━━━━━━━━━━━━━━━━\n<b>DT TEAM · PAYPAL SERVICE</b>\n━━━━━━━━━━━━━━━━━━\n\n👋 Добро пожаловать в закрытый сервис DT Team.\n\nПолучайте PayPal, отслеживайте заявки и выплаты в одном месте.\n\n{status}\n\n━━━━━━━━━━━━━━━━━━', CURRENT_TIMESTAMP),
+            ('content_home_image', '', CURRENT_TIMESTAMP),
+            ('content_paypal_text', '━━━━━━━━━━━━━━━━━━\n<b>💳 НОВАЯ ЗАЯВКА</b>\n━━━━━━━━━━━━━━━━━━\n\nВведите необходимую сумму в евро одним числом.\n\nПример: <code>150</code>\n\nСледующий шаг — выбор типа PayPal\n\n━━━━━━━━━━━━━━━━━━', CURRENT_TIMESTAMP),
+            ('content_support_text', '🆘 <b>ПОДДЕРЖКА</b>\n\nЕсли у вас возникли вопросы,\nобратитесь в службу поддержки.\n\n💬 <b>Чат поддержки:</b>\n@workzin\n@profitgeld', CURRENT_TIMESTAMP)
             ON CONFLICT (key) DO NOTHING
         """))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_paypal_returns_status ON paypal_returns (status)"))

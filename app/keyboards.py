@@ -36,7 +36,7 @@ def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeybo
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ START / ⏹ STOP", callback_data="work_control")],
         [InlineKeyboardButton(text="💰 ПЛАТЕЖИ", callback_data="payments_menu")],
-        [InlineKeyboardButton(text="📣 РАССЫЛКА", callback_data="broadcast_start")],
+        [InlineKeyboardButton(text="📣 РАССЫЛКА", callback_data="broadcast_start"), InlineKeyboardButton(text="📝 КОНТЕНТ", callback_data="content_menu")],
         [InlineKeyboardButton(text="💳 БАЗА PAYPAL", callback_data="paypal_database"), InlineKeyboardButton(text="↩️ ВОЗВРАТЫ", callback_data="returns_menu")],
         [InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="statistics_menu"), InlineKeyboardButton(text="⚙️ ПРОЦЕНТЫ", callback_data="rates_menu")],
         [InlineKeyboardButton(text="🔍 ПОИСК", callback_data="global_search")],
@@ -590,3 +590,29 @@ def quick_notify_menu(request_id: int, day: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✍️ Своё сообщение", callback_data=f"quick_notify_custom:{request_id}:{day}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"working_card:{request_id}:{day}")],
     ])
+
+
+def content_menu(has_home_image: bool = False) -> InlineKeyboardMarkup:
+    image_label = "🖼 Картинка приветствия ✅" if has_home_image else "🖼 Картинка приветствия"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 Текст приветствия", callback_data="content_edit:home")],
+        [InlineKeyboardButton(text=image_label, callback_data="content_home_image")],
+        [InlineKeyboardButton(text="💳 Текст Получить PayPal", callback_data="content_edit:paypal")],
+        [InlineKeyboardButton(text="🆘 Текст поддержки", callback_data="content_edit:support")],
+        [InlineKeyboardButton(text="♻️ Сбросить приветствие", callback_data="content_reset:home")],
+        [InlineKeyboardButton(text="♻️ Сбросить Получить PayPal", callback_data="content_reset:paypal")],
+        [InlineKeyboardButton(text="♻️ Сбросить поддержку", callback_data="content_reset:support")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
+    ])
+
+
+def content_cancel_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="content_menu")]])
+
+
+def content_image_menu(has_image: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if has_image:
+        rows.append([InlineKeyboardButton(text="🗑 Удалить пользовательскую картинку", callback_data="content_home_image_delete")])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="content_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

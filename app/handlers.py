@@ -93,6 +93,7 @@ from app.keyboards import (
     paypal_add_photo_menu, paypal_add_confirm_menu, paypal_add_cancel_menu, gender_choice_menu,
     broadcast_photo_menu, broadcast_confirm_menu, gs_photo_menu,
     global_search_cancel_menu, global_search_results_menu, crm_user_menu, statistics_period_menu, quick_notify_menu,
+    content_menu, content_cancel_menu, content_image_menu,
 )
 
 router = Router()
@@ -148,6 +149,11 @@ class GlobalSearchForm(StatesGroup):
 
 class QuickNotifyForm(StatesGroup):
     text = State()
+
+
+class ContentForm(StatesGroup):
+    text = State()
+    image = State()
 
 
 class PaypalAddForm(StatesGroup):
@@ -210,6 +216,30 @@ async def render_screen(
     )
 
 
+async def render_custom_photo_screen(
+    target: Message | CallbackQuery,
+    default_banner: str,
+    photo_file_id: str,
+    caption: str,
+    reply_markup=None,
+) -> Message:
+    """Render local banner or Telegram file_id stored in settings."""
+    photo = photo_file_id or FSInputFile(BANNERS[default_banner])
+    if isinstance(target, Message):
+        return await target.answer_photo(photo=photo, caption=caption, reply_markup=reply_markup)
+    message = target.message
+    if message.photo:
+        try:
+            return await message.edit_media(InputMediaPhoto(media=photo, caption=caption), reply_markup=reply_markup)
+        except TelegramBadRequest:
+            pass
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        pass
+    return await target.bot.send_photo(chat_id=message.chat.id, photo=photo, caption=caption, reply_markup=reply_markup)
+
+
 async def show_home(target: Message | CallbackQuery) -> None:
     user_id = target.from_user.id
     user = await get_user(user_id)
@@ -253,12 +283,14 @@ async def show_home(target: Message | CallbackQuery) -> None:
         await render_screen(target, "home", caption, markup)
         return
 
-    await render_screen(
-        target,
-        "home",
-        user_home_caption(await is_work_enabled()),
-        main_menu(),
-    )
+    work_enabled = await is_work_enabled()
+    default_home = user_home_caption(work_enabled)
+    home_text = await get_app_setting("content_home_text", default_home)
+    status = "🟢 Сервис работает" if work_enabled else "🔴 Новые заявки временно закрыты"
+    if "{status}" in home_text:
+        home_text = home_text.replace("{status}", status)
+    home_image = await get_app_setting("content_home_image", "")
+    await render_custom_photo_screen(target, "home", home_image, home_text, main_menu())
 
 
 async def has_access(callback: CallbackQuery) -> bool:
@@ -313,7 +345,7 @@ async def paypal_command(message: Message, state: FSMContext) -> None:
     await state.set_state(PaypalRequestForm.amount)
     await message.answer_photo(
         photo=FSInputFile(BANNERS["paypal"]),
-        caption=request_amount_caption(),
+        caption=await get_app_setting("content_paypal_text", request_amount_caption()),
         reply_markup=request_cancel_menu(),
     )
 
@@ -328,7 +360,7 @@ async def support_command(message: Message, state: FSMContext) -> None:
         return
     await message.answer_photo(
         photo=FSInputFile(BANNERS["support"]),
-        caption=support_caption(),
+        caption=await get_app_setting("content_support_text", support_caption()),
         reply_markup=back_home(),
     )
 
@@ -446,12 +478,11 @@ async def paypal_request(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.clear()
     await state.set_state(PaypalRequestForm.amount)
+    paypal_text = await get_app_setting("content_paypal_text", request_amount_caption())
     await render_screen(
         callback,
         "paypal",
-        "<b>Новая заявка PayPal</b>\n\n"
-        "Введите необходимую сумму в евро одним числом.\n"
-        "Например: <code>75</code>",
+        paypal_text,
         request_cancel_menu(),
     )
     await callback.answer()
@@ -730,7 +761,7 @@ async def support(callback: CallbackQuery) -> None:
     await render_screen(
         callback,
         "support",
-        support_caption(),
+        await get_app_setting("content_support_text", support_caption()),
         back_home(),
     )
     await callback.answer()
@@ -775,6 +806,162 @@ async def admin_home(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await show_admin_home(callback)
     await callback.answer("✅ Данные обновлены")
+
+
+@router.callback_query(F.data == "content_menu")
+async def content_menu_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    home_image = await get_app_setting("content_home_image", "")
+    text = (
+        "📝 <b>КОНТЕНТ</b>\n\n"
+        "Здесь можно менять основные тексты и картинку главного экрана без обновления кода.\n\n"
+        "Подсказка: в приветствии можно использовать <code>{status}</code> — "
+        "бот автоматически подставит статус работы."
+    )
+    await show_admin_text_screen(callback, text, content_menu(bool(home_image)))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("content_edit:"))
+async def content_edit_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    kind = callback.data.split(":", 1)[1]
+    labels = {
+        "home": "приветствия",
+        "paypal": "экрана Получить PayPal",
+        "support": "поддержки",
+    }
+    keys = {
+        "home": "content_home_text",
+        "paypal": "content_paypal_text",
+        "support": "content_support_text",
+    }
+    defaults = {
+        "home": user_home_caption(await is_work_enabled()),
+        "paypal": request_amount_caption(),
+        "support": support_caption(),
+    }
+    if kind not in keys:
+        await callback.answer("Неизвестный раздел", show_alert=True)
+        return
+    await state.set_state(ContentForm.text)
+    await state.update_data(content_key=keys[kind])
+    current = await get_app_setting(keys[kind], defaults[kind])
+    text = (
+        f"✏️ <b>Изменение {labels[kind]}</b>\n\n"
+        "Пришлите новый текст одним сообщением. HTML-разметка Telegram поддерживается.\n\n"
+        f"<b>Сейчас:</b>\n{current}"
+    )
+    await show_admin_text_screen(callback, text, content_cancel_menu())
+    await callback.answer()
+
+
+@router.message(ContentForm.text)
+async def content_text_save(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    if not message.text or len(message.text) > 4000:
+        await message.answer(
+            "Текст должен быть обычным сообщением длиной до 4000 символов.",
+            reply_markup=content_cancel_menu(),
+        )
+        return
+    data = await state.get_data()
+    await set_app_setting(data["content_key"], message.html_text)
+    await state.clear()
+    has_image = bool(await get_app_setting("content_home_image", ""))
+    await message.answer(
+        "✅ Контент сохранён и уже применяется.",
+        reply_markup=content_menu(has_image),
+    )
+
+
+@router.callback_query(F.data == "content_home_image")
+async def content_home_image_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(ContentForm.image)
+    current = await get_app_setting("content_home_image", "")
+    text = (
+        "🖼 <b>Картинка главного экрана</b>\n\n"
+        "Отправьте новую фотографию. Она сохранится через Telegram file_id и применится сразу."
+    )
+    await show_admin_text_screen(callback, text, content_image_menu(bool(current)))
+    await callback.answer()
+
+
+@router.message(ContentForm.image, F.photo)
+async def content_home_image_save(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    await set_app_setting("content_home_image", message.photo[-1].file_id)
+    await state.clear()
+    await message.answer(
+        "✅ Новая картинка главного экрана сохранена.",
+        reply_markup=content_menu(True),
+    )
+
+
+@router.message(ContentForm.image)
+async def content_home_image_invalid(message: Message) -> None:
+    current = bool(await get_app_setting("content_home_image", ""))
+    await message.answer(
+        "Пришлите изображение как фотографию.",
+        reply_markup=content_image_menu(current),
+    )
+
+
+@router.callback_query(F.data == "content_home_image_delete")
+async def content_home_image_delete(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await set_app_setting("content_home_image", "")
+    await state.clear()
+    await show_admin_text_screen(
+        callback,
+        "✅ Пользовательская картинка удалена. Используется стандартный баннер.",
+        content_menu(False),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("content_reset:"))
+async def content_reset_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    kind = callback.data.split(":", 1)[1]
+    defaults = {
+        "home": user_home_caption(await is_work_enabled()),
+        "paypal": request_amount_caption(),
+        "support": support_caption(),
+    }
+    keys = {
+        "home": "content_home_text",
+        "paypal": "content_paypal_text",
+        "support": "content_support_text",
+    }
+    if kind not in keys:
+        await callback.answer("Неизвестный раздел", show_alert=True)
+        return
+    await set_app_setting(keys[kind], defaults[kind])
+    await state.clear()
+    has_image = bool(await get_app_setting("content_home_image", ""))
+    await show_admin_text_screen(
+        callback,
+        "✅ Текст восстановлен по умолчанию.",
+        content_menu(has_image),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "work_control")
@@ -2696,11 +2883,37 @@ async def admin_gs_start(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 async def _finish_gs(message_or_callback, state: FSMContext, screenshot: str | None):
-    data=await state.get_data(); request_id=int(data['gs_request_id']); admin_id=message_or_callback.from_user.id
-    req=await mark_payment_gs(request_id, admin_id, screenshot); await state.clear()
-    if req is None: return None
-    try: await message_or_callback.bot.send_message(req.user_id, "❌ <b>Платёж отправлен через Goods & Services.</b>\n\nЭтот PayPal заблокирован и больше не используется. Не переводите на него деньги.")
-    except Exception: pass
+    data = await state.get_data()
+    request_id = int(data["gs_request_id"])
+    admin_id = message_or_callback.from_user.id
+    req = await mark_payment_gs(request_id, admin_id, screenshot)
+    await state.clear()
+    if req is None:
+        return None
+
+    notification = (
+        "❌ <b>Платёж отправлен через Goods & Services.</b>\n\n"
+        "Этот PayPal заблокирован и больше не используется. "
+        "Не переводите на него деньги."
+    )
+
+    try:
+        if screenshot:
+            await message_or_callback.bot.send_photo(
+                chat_id=req.user_id,
+                photo=screenshot,
+                caption=notification,
+            )
+        else:
+            await message_or_callback.bot.send_message(
+                chat_id=req.user_id,
+                text=notification,
+            )
+    except Exception as exc:
+        # Не прерываем обработку GS, если пользователь заблокировал бота
+        # или Telegram временно не доставил сообщение.
+        print(f"Failed to deliver GS notification to user {req.user_id}: {exc}")
+
     return req
 
 
