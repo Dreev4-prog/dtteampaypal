@@ -159,17 +159,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
 BANNERS = {
-    "home": ASSETS_DIR / "home_v21_alf.jpg",
-    "paypal": ASSETS_DIR / "paypal_v21_alf.jpg",
-    "requests": ASSETS_DIR / "requests_v21_alf.jpg",
-    "profile": ASSETS_DIR / "profile_v21_alf.jpg",
-    "links": ASSETS_DIR / "links_v21_alf.jpg",
-    "support": ASSETS_DIR / "support_v21_alf.jpg",
-    "issued": ASSETS_DIR / "issued_v21_alf.jpg",
-    "admin": ASSETS_DIR / "admin_v21_alf.jpg",
-    "payments": ASSETS_DIR / "payments_v21_alf.jpg",
-    "database": ASSETS_DIR / "database_v21_alf.jpg",
-    "broadcast": ASSETS_DIR / "broadcast_v21_alf.jpg",
+    "home": ASSETS_DIR / "home_v2.jpg",
+    "paypal": ASSETS_DIR / "request_v2.jpg",
+    "requests": ASSETS_DIR / "requests.jpg",
+    "profile": ASSETS_DIR / "profile_v2.jpg",
+    "links": ASSETS_DIR / "links.jpg",
+    "support": ASSETS_DIR / "support_v2.jpg",
+    "issued": ASSETS_DIR / "issued_v2.jpg",
+    "admin": ASSETS_DIR / "admin_v2.jpg",
+    "payments": ASSETS_DIR / "payments_v2.jpg",
+    "database": ASSETS_DIR / "database_v2.jpg",
+    "broadcast": ASSETS_DIR / "broadcast_v2.jpg",
 }
 
 

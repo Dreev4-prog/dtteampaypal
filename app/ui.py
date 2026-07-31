@@ -47,11 +47,9 @@ def request_amount_caption() -> str:
 
 
 def support_caption() -> str:
-    return (
-        "🆘 <b>ПОДДЕРЖКА</b>\n\n"
-        "Если у вас возникли вопросы,\n"
-        "обратитесь в службу поддержки.\n\n"
-        "💬 Чат поддержки:\n"
-        "@workzin\n"
-        "@profitgeld"
+    return card(
+        "🛟 DT TEAM · SUPPORT",
+        "💬 Чат поддержки: <b>@workzin</b>\n\n"
+        "📢 Новости сервиса: <b>@profitgeld</b>",
+        "Опишите вопрос одним сообщением — так мы ответим быстрее.",
     )
