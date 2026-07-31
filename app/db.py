@@ -1015,3 +1015,81 @@ async def mark_payment_gs(request_id: int, admin_id: int, screenshot_file_id: st
                     tag.status = "gs"
                     tag.gs_screenshot_file_id = screenshot_file_id
             return req
+
+# v1.7.0 CRM helpers
+async def get_dashboard_summary() -> dict:
+    async with SessionLocal() as session:
+        async def scalar(stmt):
+            return (await session.scalar(stmt)) or 0
+        today = datetime.utcnow().date()
+        return {
+            "available": await scalar(select(func.count(PaypalTag.id)).where(PaypalTag.status == "available")),
+            "working": await scalar(select(func.count(Request.id)).where(Request.status == "paypal_issued")),
+            "waiting_check": await scalar(select(func.count(Request.id)).where(Request.status == "waiting_check")),
+            "payout_pending": await scalar(select(func.count(Request.id)).where(Request.status == "payout_pending")),
+            "paid_today": await scalar(select(func.count(Request.id)).where(Request.status == "paid_out", func.date(Request.payout_at) == today)),
+            "gs": await scalar(select(func.count(PaypalTag.id)).where(PaypalTag.status == "gs")),
+            "users": await scalar(select(func.count(User.id)).where(User.status == "approved")),
+            "queue": await scalar(select(func.count(Request.id)).where(Request.status == "waiting_issue")),
+        }
+
+async def get_user_crm_stats(user_id: int) -> dict:
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(Request.status, func.count(Request.id), func.coalesce(func.sum(Request.amount), 0)).where(Request.user_id == user_id).group_by(Request.status))).all()
+        counts = {status: int(count) for status, count, _ in rows}
+        total_amount = sum(float(amount or 0) for _, _, amount in rows)
+        successful = counts.get("paid_out", 0) + counts.get("payout_pending", 0)
+        returned = sum(counts.get(s, 0) for s in ("returned", "admin_recalled", "user_returned", "return_pending"))
+        active = sum(counts.get(s, 0) for s in ("waiting_issue", "paypal_issued", "waiting_check", "payout_pending"))
+        return {
+            "received": sum(counts.get(s, 0) for s in ("paypal_issued", "waiting_check", "payout_pending", "paid_out", "gs", "not_found")),
+            "successful": successful,
+            "returned": returned,
+            "gs": counts.get("gs", 0),
+            "active": active,
+            "total_amount": total_amount,
+        }
+
+async def global_admin_search(query: str, limit: int = 30) -> dict:
+    value = query.strip().lstrip("@")
+    if not value:
+        return {"users": [], "requests": [], "tags": []}
+    pattern = f"%{value}%"
+    async with SessionLocal() as session:
+        users = list(await session.scalars(select(User).where(
+            User.username.ilike(pattern) | User.full_name.ilike(pattern) | func.cast(User.id, String).ilike(pattern)
+        ).limit(limit)))
+        requests = list(await session.scalars(select(Request).join(User, User.id == Request.user_id, isouter=True).where(
+            func.cast(Request.id, String).ilike(pattern) |
+            func.cast(Request.user_id, String).ilike(pattern) |
+            func.cast(Request.amount, String).ilike(pattern) |
+            User.username.ilike(pattern)
+        ).order_by(Request.id.desc()).limit(limit)))
+        tags = list(await session.scalars(select(PaypalTag).where(PaypalTag.tag.ilike(pattern)).order_by(PaypalTag.id.desc()).limit(limit)))
+        return {"users": users, "requests": requests, "tags": tags}
+
+async def get_period_statistics(period: str) -> dict:
+    now = datetime.utcnow()
+    start = None
+    if period == "today": start = datetime.combine(now.date(), datetime.min.time())
+    elif period == "yesterday":
+        start = datetime.combine(now.date() - timedelta(days=1), datetime.min.time())
+        end = datetime.combine(now.date(), datetime.min.time())
+    elif period == "7d": start = now - timedelta(days=7)
+    elif period == "30d": start = now - timedelta(days=30)
+    async with SessionLocal() as session:
+        conditions = []
+        if start: conditions.append(Request.created_at >= start)
+        if period == "yesterday": conditions.append(Request.created_at < end)
+        stmt = select(Request).where(*conditions)
+        requests = list(await session.scalars(stmt))
+        return {
+            "requests": len(requests),
+            "issued": sum(r.paypal_tag_id is not None for r in requests),
+            "successful": sum(r.status in {"payout_pending", "paid_out"} for r in requests),
+            "returns": sum(r.status in {"returned", "admin_recalled", "user_returned", "return_pending"} for r in requests),
+            "gs": sum(r.status == "gs" for r in requests),
+            "turnover": sum(float(r.amount or 0) for r in requests if r.status in {"payout_pending", "paid_out"}),
+            "payout": sum(float(r.payout_amount or 0) for r in requests if r.status in {"payout_pending", "paid_out"}),
+            "active_users": len({r.user_id for r in requests}),
+        }

@@ -53,6 +53,7 @@ from app.db import (
     confirm_paypal_keep, user_return_paypal_after_warning, list_unconfirmed_collection,
     admin_recall_working_request, bulk_delete_working_day, search_working_requests,
     get_app_setting, set_app_setting, is_work_enabled, set_work_enabled, list_approved_user_ids, mark_payment_gs,
+    get_dashboard_summary, get_user_crm_stats, global_admin_search, get_period_statistics,
 )
 from app.keyboards import (
     admin_check_menu,
@@ -88,6 +89,7 @@ from app.keyboards import (
     working_search_cancel_menu, work_control_menu, work_edit_cancel_menu, work_image_edit_menu,
     paypal_add_photo_menu, paypal_add_confirm_menu, paypal_add_cancel_menu, gender_choice_menu,
     broadcast_photo_menu, broadcast_confirm_menu, gs_photo_menu,
+    global_search_cancel_menu, global_search_results_menu, crm_user_menu, statistics_period_menu, quick_notify_menu,
 )
 
 router = Router()
@@ -135,6 +137,14 @@ class BroadcastForm(StatesGroup):
 
 class GSForm(StatesGroup):
     screenshot = State()
+
+
+class GlobalSearchForm(StatesGroup):
+    query = State()
+
+
+class QuickNotifyForm(StatesGroup):
+    text = State()
 
 
 class PaypalAddForm(StatesGroup):
@@ -738,36 +748,31 @@ async def support(callback: CallbackQuery) -> None:
 
 
 async def show_admin_home(target: Message | CallbackQuery) -> None:
-    available = await count_available_tags()
-    counts = await get_user_counts()
-    queue_count = await count_waiting_requests()
-    payment_counts = await get_payment_counts()
-    finance = await get_finance_summary()
+    data = await get_dashboard_summary()
     work_enabled = await is_work_enabled()
     work_status = "🟢 START WORK" if work_enabled else "🔴 STOP WORK"
     text = (
-        "👨‍💼 <b>Админ-панель</b>\n\n"
-        f"Режим работы: <b>{work_status}</b>\n"
-        f"👥 Всего пользователей: <b>{counts['all']}</b>\n"
-        f"🟡 Ожидают решения: <b>{counts['pending']}</b>\n"
-        f"💳 Свободных PayPal: <b>{available}</b>\n"
-        f"📥 В очереди PayPal: <b>{queue_count}</b>\n"
-        f"🟠 Оплат на проверке: <b>{payment_counts['check']}</b>\n"
-        f"🟢 Нужно выплатить: <b>{payment_counts['payout']}</b>\n"
-        f"💸 Сумма к выплате: <b>{finance['pending']:.2f} €</b>\n"
-        f"📈 Общая прибыль: <b>{finance['profit']:.2f} €</b>\n\n"
-        "Добавление тегов пока доступно командой:\n"
-        "<code>/addtags @tag1 @tag2 @tag3</code>"
+        "━━━━━━━━━━━━━━\n"
+        "📊 <b>DT TEAM · DASHBOARD</b>\n"
+        "━━━━━━━━━━━━━━\n\n"
+        f"Режим: <b>{work_status}</b>\n\n"
+        f"🟢 Свободных PayPal: <b>{data['available']}</b>\n"
+        f"🔵 В работе: <b>{data['working']}</b>\n"
+        f"📥 Новых заявок: <b>{data['queue']}</b>\n"
+        f"🟠 На проверке: <b>{data['waiting_check']}</b>\n"
+        f"🟣 Нужно выплатить: <b>{data['payout_pending']}</b>\n"
+        f"✅ Выплачено сегодня: <b>{data['paid_today']}</b>\n"
+        f"🔴 GS: <b>{data['gs']}</b>\n"
+        f"👥 Активных пользователей: <b>{data['users']}</b>\n\n"
+        "Выберите нужный раздел:"
     )
-    markup = admin_main_menu(counts["pending"], queue_count)
+    markup = admin_main_menu(0, data["queue"])
     if isinstance(target, Message):
         await target.answer(text, reply_markup=markup)
     else:
         if target.message.photo:
-            try:
-                await target.message.delete()
-            except TelegramBadRequest:
-                pass
+            try: await target.message.delete()
+            except TelegramBadRequest: pass
             await target.bot.send_message(target.message.chat.id, text, reply_markup=markup)
         else:
             await target.message.edit_text(text, reply_markup=markup)
@@ -2709,3 +2714,164 @@ async def admin_gs_photo(message: Message, state: FSMContext) -> None:
 async def admin_gs_skip(callback: CallbackQuery, state: FSMContext) -> None:
     req=await _finish_gs(callback,state,None)
     await callback.message.answer("🚫 PayPal перемещён в раздел GS." if req else "Заявка уже обработана.", reply_markup=payments_menu(await get_payment_counts())); await callback.answer()
+
+# ==================== v1.7.0 CRM ====================
+@router.callback_query(F.data == "global_search")
+async def global_search_start_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    await state.clear()
+    await state.set_state(GlobalSearchForm.query)
+    await callback.message.edit_text(
+        "🔍 <b>Глобальный поиск</b>\n\nВведите PayPal-тег, @username, имя, Telegram ID, номер заявки или сумму:",
+        reply_markup=global_search_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(GlobalSearchForm.query)
+async def global_search_query_handler(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id): return
+    query = (message.text or "").strip()
+    results = await global_admin_search(query)
+    await state.clear()
+    total = sum(len(v) for v in results.values())
+    text = f"🔍 <b>Результаты поиска</b>\n\nЗапрос: <code>{query}</code>\nНайдено: <b>{total}</b>"
+    if not total:
+        text += "\n\nСовпадений нет."
+    await message.answer(text, reply_markup=global_search_results_menu(results))
+
+
+@router.callback_query(F.data.startswith("crm_user:"))
+async def crm_user_card_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    user_id = int(callback.data.split(":")[1])
+    user = await get_user(user_id)
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True); return
+    stats = await get_user_crm_stats(user_id)
+    username = f"@{user.username}" if user.username else "—"
+    text = (
+        "━━━━━━━━━━━━━━\n"
+        "👤 <b>Карточка пользователя</b>\n\n"
+        f"Username: <b>{username}</b>\n"
+        f"Имя: <b>{user.full_name or '—'}</b>\n"
+        f"Telegram ID: <code>{user.id}</code>\n"
+        f"Статус: <b>{user.status}</b>\n\n"
+        "📊 <b>Статистика</b>\n"
+        f"Получено PayPal: <b>{stats['received']}</b>\n"
+        f"Успешных оплат: <b>{stats['successful']}</b>\n"
+        f"Возвратов: <b>{stats['returned']}</b>\n"
+        f"GS: <b>{stats['gs']}</b>\n"
+        f"Активных заявок: <b>{stats['active']}</b>\n"
+        f"Общая сумма: <b>{stats['total_amount']:.2f} €</b>\n"
+        "━━━━━━━━━━━━━━"
+    )
+    await callback.message.edit_text(text, reply_markup=crm_user_menu(user.id, user.status))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("crm_user_paypals:"))
+async def crm_user_paypals_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    user_id = int(callback.data.split(":")[1])
+    reqs = await get_user_requests(user_id)
+    lines = ["💳 <b>PayPal пользователя</b>", ""]
+    for req in reqs[:25]:
+        tag = await get_paypal_tag(req.paypal_tag_id) if req.paypal_tag_id else None
+        lines.append(f"#{req.id} · {req.amount} € · {tag.tag if tag else 'без PayPal'} · {req.status}")
+    if len(lines) == 2: lines.append("Записей нет.")
+    await callback.message.edit_text("\n".join(lines), reply_markup=crm_user_menu(user_id, (await get_user(user_id)).status))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "statistics_menu")
+async def statistics_menu_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    await callback.message.edit_text("📈 <b>Расширенная статистика</b>\n\nВыберите период:", reply_markup=statistics_period_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("stats_period:"))
+async def statistics_period_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    period = callback.data.split(":")[1]
+    data = await get_period_statistics(period)
+    labels = {"today":"Сегодня", "yesterday":"Вчера", "7d":"7 дней", "30d":"30 дней", "all":"Всё время"}
+    text = (
+        f"📈 <b>Статистика · {labels.get(period, period)}</b>\n\n"
+        f"📥 Заявок: <b>{data['requests']}</b>\n"
+        f"💳 Выдано PayPal: <b>{data['issued']}</b>\n"
+        f"✅ Успешных оплат: <b>{data['successful']}</b>\n"
+        f"↩️ Возвратов: <b>{data['returns']}</b>\n"
+        f"🚫 GS: <b>{data['gs']}</b>\n"
+        f"💶 Оборот: <b>{data['turnover']:.2f} €</b>\n"
+        f"💸 Выплаты: <b>{data['payout']:.2f} €</b>\n"
+        f"👥 Активных пользователей: <b>{data['active_users']}</b>"
+    )
+    await callback.message.edit_text(text, reply_markup=statistics_period_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("quick_notify_menu:"))
+async def quick_notify_menu_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    _, request_id, day = callback.data.split(":", 2)
+    await callback.message.edit_caption(
+        caption="📣 <b>Индивидуальное уведомление</b>\n\nВыберите готовое сообщение или напишите своё.",
+        reply_markup=quick_notify_menu(int(request_id), day),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("quick_notify:"))
+async def quick_notify_send_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    _, request_id_raw, kind, day = callback.data.split(":", 3)
+    req = await get_request(int(request_id_raw))
+    if not req or req.status != "paypal_issued":
+        await callback.answer("PayPal уже не в работе", show_alert=True); return
+    tag = await get_paypal_tag(req.paypal_tag_id) if req.paypal_tag_id else None
+    tag_text = tag.tag if tag else "этот PayPal"
+    messages = {
+        "friends": f"⚠️ Оплачивайте на <code>{tag_text}</code> только через <b>Friends & Family</b>.",
+        "checking": f"🔍 Платёж на <code>{tag_text}</code> находится на проверке. Пожалуйста, ожидайте.",
+        "received": f"✅ Деньги на <code>{tag_text}</code> поступили. Спасибо!",
+    }
+    try:
+        await callback.bot.send_message(req.user_id, messages[kind])
+    except Exception:
+        await callback.answer("Не удалось отправить", show_alert=True); return
+    await callback.answer("Уведомление отправлено", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("quick_notify_custom:"))
+async def quick_notify_custom_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True); return
+    _, request_id, day = callback.data.split(":", 2)
+    await state.set_state(QuickNotifyForm.text)
+    await state.update_data(request_id=int(request_id), day=day)
+    await callback.message.answer("✍️ Введите сообщение для этого пользователя:")
+    await callback.answer()
+
+
+@router.message(QuickNotifyForm.text)
+async def quick_notify_custom_send(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id): return
+    data = await state.get_data()
+    req = await get_request(data["request_id"])
+    if not req or req.status != "paypal_issued":
+        await state.clear(); await message.answer("PayPal уже не находится в работе."); return
+    try:
+        await message.bot.send_message(req.user_id, message.text or "")
+        await message.answer("✅ Индивидуальное сообщение отправлено.")
+    except Exception:
+        await message.answer("❌ Не удалось отправить сообщение.")
+    await state.clear()

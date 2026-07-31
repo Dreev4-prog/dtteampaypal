@@ -38,7 +38,8 @@ def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeybo
         [InlineKeyboardButton(text="💰 Платежи", callback_data="payments_menu")],
         [InlineKeyboardButton(text="📣 Рассылка", callback_data="broadcast_start")],
         [InlineKeyboardButton(text="💳 База PayPal", callback_data="paypal_database"), InlineKeyboardButton(text="↩️ Возвраты", callback_data="returns_menu")],
-        [InlineKeyboardButton(text="📊 Финансы", callback_data="finance_menu"), InlineKeyboardButton(text="⚙️ Проценты", callback_data="rates_menu")],
+        [InlineKeyboardButton(text="📈 Статистика", callback_data="statistics_menu"), InlineKeyboardButton(text="⚙️ Проценты", callback_data="rates_menu")],
+        [InlineKeyboardButton(text="🔍 Глобальный поиск", callback_data="global_search")],
         [InlineKeyboardButton(text=queue_label, callback_data="paypal_queue:0")],
         [InlineKeyboardButton(text=pending_label, callback_data="members_menu")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_home")],
@@ -451,7 +452,7 @@ def collect_take_confirm_menu(date_label: str) -> InlineKeyboardMarkup:
 
 def working_card_menu(request_id: int, day: str, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⏳ Заберу через 30 минут", callback_data=f"working_notify_ask:{request_id}:{day}")],
+        [InlineKeyboardButton(text="📣 Уведомить пользователя", callback_data=f"quick_notify_menu:{request_id}:{day}")],
         [InlineKeyboardButton(text="↩️ Вернуть PayPal в работу", callback_data=f"working_recall_ask:{request_id}:available:{day}")],
         [InlineKeyboardButton(text="🚫 Gestop", callback_data=f"working_recall_ask:{request_id}:gestoppt:{day}")],
         [InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"working_recall_ask:{request_id}:deleted:{day}")],
@@ -538,3 +539,54 @@ def work_image_edit_menu(kind: str, has_image: bool) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="🗑 Удалить картинку", callback_data=f"work_image_delete:{kind}")])
     rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="work_control")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+# v1.7.0 CRM keyboards
+def global_search_cancel_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_home")]])
+
+
+def global_search_results_menu(results: dict) -> InlineKeyboardMarkup:
+    rows = []
+    for user in results.get("users", [])[:10]:
+        label = f"👤 @{user.username}" if user.username else f"👤 ID {user.id}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"crm_user:{user.id}")])
+    for req in results.get("requests", [])[:10]:
+        rows.append([InlineKeyboardButton(text=f"📄 Заявка #{req.id} · {req.amount} €", callback_data=f"payment_card:{req.id}:all:0")])
+    for tag in results.get("tags", [])[:10]:
+        rows.append([InlineKeyboardButton(text=f"💳 {tag.tag} · {tag.status}", callback_data=f"paypal_card:{tag.id}:all")])
+    rows.append([InlineKeyboardButton(text="🔍 Новый поиск", callback_data="global_search")])
+    rows.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def crm_user_menu(user_id: int, status: str) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="💬 Написать", url=f"tg://user?id={user_id}")],
+        [InlineKeyboardButton(text="💳 PayPal пользователя", callback_data=f"crm_user_paypals:{user_id}")],
+    ]
+    if status == "blocked":
+        rows.append([InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"member_set:approved:{user_id}")])
+    else:
+        rows.append([InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"member_set:blocked:{user_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def statistics_period_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Сегодня", callback_data="stats_period:today"), InlineKeyboardButton(text="Вчера", callback_data="stats_period:yesterday")],
+        [InlineKeyboardButton(text="7 дней", callback_data="stats_period:7d"), InlineKeyboardButton(text="30 дней", callback_data="stats_period:30d")],
+        [InlineKeyboardButton(text="Всё время", callback_data="stats_period:all")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
+    ])
+
+
+def quick_notify_menu(request_id: int, day: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏳ Заберу через 30 минут", callback_data=f"working_notify_ask:{request_id}:{day}")],
+        [InlineKeyboardButton(text="⚠️ Только Friends & Family", callback_data=f"quick_notify:{request_id}:friends:{day}")],
+        [InlineKeyboardButton(text="🔍 Платёж проверяется", callback_data=f"quick_notify:{request_id}:checking:{day}")],
+        [InlineKeyboardButton(text="✅ Деньги поступили", callback_data=f"quick_notify:{request_id}:received:{day}")],
+        [InlineKeyboardButton(text="✍️ Своё сообщение", callback_data=f"quick_notify_custom:{request_id}:{day}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"working_card:{request_id}:{day}")],
+    ])
