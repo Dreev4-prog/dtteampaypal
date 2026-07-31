@@ -13,6 +13,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, InputMediaPhoto, Message
 
 from app.config import settings
+from app.ui import admin_dashboard_caption, request_amount_caption, support_caption, user_home_caption
 from app.db import (
     add_paypal_tag,
     add_paypal_tags,
@@ -158,13 +159,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
 BANNERS = {
-    "home": ASSETS_DIR / "main_menu.jpg",
-    "paypal": ASSETS_DIR / "paypal.jpg",
+    "home": ASSETS_DIR / "home_v2.jpg",
+    "paypal": ASSETS_DIR / "request_v2.jpg",
     "requests": ASSETS_DIR / "requests.jpg",
-    "profile": ASSETS_DIR / "profile.jpg",
+    "profile": ASSETS_DIR / "profile_v2.jpg",
     "links": ASSETS_DIR / "links.jpg",
-    "support": ASSETS_DIR / "support.jpg",
-    "issued": ASSETS_DIR / "paypal_issued.jpg",
+    "support": ASSETS_DIR / "support_v2.jpg",
+    "issued": ASSETS_DIR / "issued_v2.jpg",
+    "admin": ASSETS_DIR / "admin_v2.jpg",
+    "payments": ASSETS_DIR / "payments_v2.jpg",
+    "database": ASSETS_DIR / "database_v2.jpg",
+    "broadcast": ASSETS_DIR / "broadcast_v2.jpg",
 }
 
 
@@ -251,9 +256,7 @@ async def show_home(target: Message | CallbackQuery) -> None:
     await render_screen(
         target,
         "home",
-        "<b>DT TEAM</b>\n\n"
-        "👋 Добро пожаловать!\n"
-        "Выберите нужный раздел:",
+        user_home_caption(await is_work_enabled()),
         main_menu(),
     )
 
@@ -310,11 +313,7 @@ async def paypal_command(message: Message, state: FSMContext) -> None:
     await state.set_state(PaypalRequestForm.amount)
     await message.answer_photo(
         photo=FSInputFile(BANNERS["paypal"]),
-        caption=(
-            "<b>Новая заявка PayPal</b>\n\n"
-            "Введите необходимую сумму в евро одним числом.\n"
-            "Например: <code>75</code>"
-        ),
+        caption=request_amount_caption(),
         reply_markup=request_cancel_menu(),
     )
 
@@ -329,14 +328,7 @@ async def support_command(message: Message, state: FSMContext) -> None:
         return
     await message.answer_photo(
         photo=FSInputFile(BANNERS["support"]),
-        caption=(
-            "<b>🛟 Поддержка</b>\n\n"
-            "Если у вас возникли вопросы или проблемы, свяжитесь с нами.\n\n"
-            "💬 <b>Чат поддержки</b>\n"
-            "@workzin\n\n"
-            "📢 <b>Новости</b>\n"
-            "@profitgeld"
-        ),
+        caption=support_caption(),
         reply_markup=back_home(),
     )
 
@@ -738,12 +730,7 @@ async def support(callback: CallbackQuery) -> None:
     await render_screen(
         callback,
         "support",
-        "<b>🛟 Поддержка</b>\n\n"
-        "Если у вас возникли вопросы или проблемы, свяжитесь с нами.\n\n"
-        "💬 <b>Чат поддержки</b>\n"
-        "@workzin\n\n"
-        "📢 <b>Новости</b>\n"
-        "@profitgeld",
+        support_caption(),
         back_home(),
     )
     await callback.answer()
@@ -752,39 +739,9 @@ async def support(callback: CallbackQuery) -> None:
 async def show_admin_home(target: Message | CallbackQuery) -> None:
     data = await get_dashboard_summary()
     work_enabled = await is_work_enabled()
-    work_status = "🟢 START WORK" if work_enabled else "🔴 STOP WORK"
-    text = (
-        "━━━━━━━━━━━━━━\n"
-        "📊 <b>DT TEAM · DASHBOARD</b>\n"
-        "━━━━━━━━━━━━━━\n\n"
-        f"Режим: <b>{work_status}</b>\n\n"
-        f"🟢 Свободных PayPal: <b>{data['available']}</b>\n"
-        f"🔵 В работе: <b>{data['working']}</b>\n"
-        f"📥 Новых заявок: <b>{data['queue']}</b>\n"
-        f"🟠 На проверке: <b>{data['waiting_check']}</b>\n"
-        f"🟣 Нужно выплатить: <b>{data['payout_pending']}</b>\n"
-        f"✅ Выплачено сегодня: <b>{data['paid_today']}</b>\n"
-        f"🔴 GS: <b>{data['gs']}</b>\n"
-        f"👥 Активных пользователей: <b>{data['users']}</b>\n\n"
-        f"🔄 Обновлено: <b>{datetime.now(ZoneInfo('Europe/Moscow')).strftime('%H:%M:%S')}</b>\n\n"
-        "Выберите нужный раздел:"
-    )
-    markup = admin_main_menu(0, data["queue"])
-    if isinstance(target, Message):
-        await target.answer(text, reply_markup=markup)
-    else:
-        if target.message.photo:
-            try: await target.message.delete()
-            except TelegramBadRequest: pass
-            await target.bot.send_message(target.message.chat.id, text, reply_markup=markup)
-        else:
-            try:
-                await target.message.edit_text(text, reply_markup=markup)
-            except TelegramBadRequest as exc:
-                # Telegram возвращает ошибку, если текст и клавиатура не изменились.
-                # Для кнопки «Обновить» это нормальная ситуация, а не сбой бота.
-                if "message is not modified" not in str(exc).lower():
-                    raise
+    updated_at = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%H:%M:%S")
+    text = admin_dashboard_caption(data, work_enabled, updated_at)
+    await render_screen(target, "admin", text, admin_main_menu(0, data["queue"]))
 
 
 @router.message(Command("admin"))

@@ -117,3 +117,10 @@
 
 - Исправлена кнопка «🔄 Обновить» в Dashboard.
 - Если данные не изменились, Telegram больше не вызывает падение обработчика с `message is not modified`.
+
+## v2.0 Premium Design
+- New DT Team black/gold visual system.
+- New branded banners for user home, requests, issued PayPal, support and admin CRM.
+- Redesigned user and admin keyboards.
+- Shared UI card helpers in `app/ui.py`.
+- Admin dashboard now uses a branded image card and always shows refresh time.

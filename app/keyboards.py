@@ -3,13 +3,13 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Запросить PayPal", callback_data="paypal_request")],
+        [InlineKeyboardButton(text="💳 ПОЛУЧИТЬ PAYPAL", callback_data="paypal_request")],
         [
-            InlineKeyboardButton(text="📂 Мои PayPal", callback_data="my_paypals"),
-            InlineKeyboardButton(text="📈 Мои профиты", callback_data="my_profits"),
+            InlineKeyboardButton(text="📂 МОИ PAYPAL", callback_data="my_paypals"),
+            InlineKeyboardButton(text="💰 МОИ ВЫПЛАТЫ", callback_data="my_profits"),
         ],
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
-        [InlineKeyboardButton(text="🛟 Поддержка", callback_data="support")],
+        [InlineKeyboardButton(text="👤 ЛИЧНЫЙ КАБИНЕТ", callback_data="profile")],
+        [InlineKeyboardButton(text="🛟 ПОДДЕРЖКА", callback_data="support")],
     ])
 
 
@@ -34,15 +34,15 @@ def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeybo
     pending_label = f"👥 Участники · {pending_count} ждут" if pending_count else "👥 Участники"
     queue_label = f"📥 Очередь PayPal ({queue_count})"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 Start Work / 🔴 Stop Work", callback_data="work_control")],
-        [InlineKeyboardButton(text="💰 Платежи", callback_data="payments_menu")],
-        [InlineKeyboardButton(text="📣 Рассылка", callback_data="broadcast_start")],
-        [InlineKeyboardButton(text="💳 База PayPal", callback_data="paypal_database"), InlineKeyboardButton(text="↩️ Возвраты", callback_data="returns_menu")],
-        [InlineKeyboardButton(text="📈 Статистика", callback_data="statistics_menu"), InlineKeyboardButton(text="⚙️ Проценты", callback_data="rates_menu")],
-        [InlineKeyboardButton(text="🔍 Глобальный поиск", callback_data="global_search")],
+        [InlineKeyboardButton(text="▶️ START / ⏹ STOP", callback_data="work_control")],
+        [InlineKeyboardButton(text="💰 ПЛАТЕЖИ", callback_data="payments_menu")],
+        [InlineKeyboardButton(text="📣 РАССЫЛКА", callback_data="broadcast_start")],
+        [InlineKeyboardButton(text="💳 БАЗА PAYPAL", callback_data="paypal_database"), InlineKeyboardButton(text="↩️ ВОЗВРАТЫ", callback_data="returns_menu")],
+        [InlineKeyboardButton(text="📊 СТАТИСТИКА", callback_data="statistics_menu"), InlineKeyboardButton(text="⚙️ ПРОЦЕНТЫ", callback_data="rates_menu")],
+        [InlineKeyboardButton(text="🔍 ПОИСК", callback_data="global_search")],
         [InlineKeyboardButton(text=queue_label, callback_data="paypal_queue:0")],
         [InlineKeyboardButton(text=pending_label, callback_data="members_menu")],
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_home")],
+        [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="admin_home")],
     ])
 
 
@@ -124,7 +124,7 @@ def paypal_queue_menu(requests: list, offset: int, page_size: int, has_next: boo
         navigation.append(InlineKeyboardButton(text="➡️", callback_data=f"paypal_queue:{offset+page_size}"))
     if navigation:
         rows.append(navigation)
-    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"paypal_queue:{offset}")])
+    rows.append([InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=f"paypal_queue:{offset}")])
     rows.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -178,7 +178,7 @@ def payments_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"🕓 Ожидают оплаты ({counts.get('waiting', 0)})", callback_data="payments_list:waiting:0")],
         [InlineKeyboardButton(text=f"🔴 Оплата не найдена ({counts.get('notfound', 0)})", callback_data="payments_list:notfound:0")],
         [InlineKeyboardButton(text=f"📋 Все ({counts.get('all', 0)})", callback_data="payments_list:all:0")],
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="payments_menu")],
+        [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="payments_menu")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
     ])
 
@@ -202,7 +202,7 @@ def payments_list_menu(requests: list, filter_name: str, offset: int, page_size:
         nav.append(InlineKeyboardButton(text="➡️", callback_data=f"payments_list:{filter_name}:{offset+page_size}"))
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"payments_list:{filter_name}:{offset}")])
+    rows.append([InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=f"payments_list:{filter_name}:{offset}")])
     rows.append([InlineKeyboardButton(text="⬅️ К платежам", callback_data="payments_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -261,7 +261,7 @@ def rates_menu(rules: list) -> InlineKeyboardMarkup:
 
 def finance_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="finance_menu")],
+        [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="finance_menu")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
     ])
 
@@ -316,7 +316,7 @@ def return_confirm_menu(request_id: int) -> InlineKeyboardMarkup:
 
 def returns_menu(items: list) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f"↩️ #{item.id} · заявка #{item.request_id}", callback_data=f"return_card:{item.id}")] for item in items]
-    rows += [[InlineKeyboardButton(text="🔄 Обновить", callback_data="returns_menu")], [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")]]
+    rows += [[InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="returns_menu")], [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")]]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
