@@ -577,11 +577,17 @@ async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
 
 
 async def mark_payment_not_found(request_id: int, admin_id: int) -> Request | None:
+    """Return a request to the user without removing the issued PayPal.
+
+    The user can press "Я оплатил" again and resend the same request for
+    another payment check.
+    """
     async with SessionLocal() as session:
         req = await session.get(Request, request_id, with_for_update=True)
         if req is None or req.status != "waiting_check":
             return None
-        req.status = "not_found"
+        req.status = "paypal_issued"
+        req.paid_clicked_at = None
         req.processed_at = datetime.utcnow()
         req.processed_by = admin_id
         req.updated_at = datetime.utcnow()

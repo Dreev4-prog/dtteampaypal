@@ -1885,17 +1885,34 @@ async def admin_not_found(callback: CallbackQuery) -> None:
     try:
         await callback.bot.send_photo(
             req.user_id,
-            photo=FSInputFile(BANNERS["requests"]),
-            caption=f"⚠️ Оплата по заявке #{req.id} не найдена. Проверьте перевод и свяжитесь с поддержкой.",
-            reply_markup=back_home(),
+            photo=FSInputFile(BANNERS["issued"]),
+            caption=(
+                f"⚠️ <b>Оплата по заявке #{req.id} пока не найдена</b>\n\n"
+                "PayPal остаётся у вас. Проверьте перевод и после этого снова "
+                "нажмите кнопку «✅ Я оплатил», чтобы повторно отправить заявку на проверку."
+            ),
+            reply_markup=paid_button(req.id),
         )
     except Exception:
         pass
-    await callback.message.edit_text(
-        f"🔴 По заявке #{req.id} оплата не найдена.",
-        reply_markup=payments_menu(await get_payment_counts()),
-    )
-    await callback.answer("Отмечено: оплата не найдена")
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(
+                caption=(
+                    f"🔴 По заявке #{req.id} оплата не найдена.\n\n"
+                    "Заявка возвращена пользователю для повторной отправки на проверку."
+                ),
+                reply_markup=payments_menu(await get_payment_counts()),
+            )
+        else:
+            await callback.message.edit_text(
+                f"🔴 По заявке #{req.id} оплата не найдена.\n\n"
+                "Заявка возвращена пользователю для повторной отправки на проверку.",
+                reply_markup=payments_menu(await get_payment_counts()),
+            )
+    except TelegramBadRequest:
+        pass
+    await callback.answer("Заявка возвращена пользователю")
 
 
 @router.callback_query(F.data.startswith("admin_reject:"))
