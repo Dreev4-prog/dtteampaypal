@@ -50,7 +50,7 @@ from app.db import (
     create_paypal_return, list_paypal_returns, get_paypal_return, resolve_paypal_return,
     get_paypal_database_counts, list_paypal_tags, set_paypal_tag_status, delete_free_paypal_tag,
     get_working_dates, get_working_requests_by_date, mark_collection_notified,
-    confirm_paypal_keep, list_unconfirmed_collection,
+    confirm_paypal_keep, user_return_paypal_after_warning, list_unconfirmed_collection,
     admin_recall_working_request, bulk_delete_working_day, search_working_requests,
     get_app_setting, set_app_setting, is_work_enabled, set_work_enabled, list_approved_user_ids, mark_payment_gs,
 )
@@ -84,7 +84,7 @@ from app.keyboards import (
     paid_or_return_menu, return_reasons_menu, return_confirm_menu, returns_menu,
     return_card_menu, return_checked_menu, paypal_database_menu, paypal_list_menu,
     paypal_card_admin_menu, paypal_delete_confirm_menu, working_dates_menu, working_day_menu, collection_choice_menu,
-    working_card_menu, working_recall_confirm_menu, working_delete_day_confirm_menu, working_search_results_menu,
+    working_card_menu, working_notify_confirm_menu, collection_return_confirm_menu, working_recall_confirm_menu, working_delete_day_confirm_menu, working_search_results_menu,
     working_search_cancel_menu, work_control_menu, work_edit_cancel_menu, work_image_edit_menu,
     paypal_add_photo_menu, paypal_add_confirm_menu, paypal_add_cancel_menu, gender_choice_menu,
     broadcast_photo_menu, broadcast_confirm_menu, gs_photo_menu,
@@ -2349,6 +2349,114 @@ async def working_card_handler(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("working_notify_ask:"))
+async def working_notify_ask_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, request_id_raw, day = callback.data.split(":", 2)
+    req = await get_request(int(request_id_raw))
+    if req is None or req.status != "paypal_issued" or req.paypal_tag_id is None:
+        await callback.answer("PayPal уже не находится в работе", show_alert=True)
+        return
+    tag = await get_paypal_tag(req.paypal_tag_id)
+    await callback.message.edit_caption(
+        caption=(
+            "<b>⏳ Отправить индивидуальное предупреждение?</b>\n\n"
+            f"PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+            f"Пользователь: <code>{req.user_id}</code>\n\n"
+            "Пользователь получит сообщение, что PayPal будет забран через 30 минут."
+        ),
+        reply_markup=working_notify_confirm_menu(req.id, day),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("working_notify_confirm:"))
+async def working_notify_confirm_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, request_id_raw, day = callback.data.split(":", 2)
+    request_id = int(request_id_raw)
+    req = await mark_collection_notified(request_id)
+    if req is None or req.paypal_tag_id is None:
+        await callback.answer("PayPal уже не находится в работе", show_alert=True)
+        return
+    tag = await get_paypal_tag(req.paypal_tag_id)
+    try:
+        await callback.bot.send_message(
+            req.user_id,
+            f"⚠️ <b>Внимание!</b>\n\n"
+            f"Через <b>30 минут</b> PayPal <code>{tag.tag if tag else '—'}</code> будет возвращён в базу, "
+            "если вы не завершите оплату.\n\n"
+            "Если вы уже оплатили — нажмите <b>«✅ Я оплатил»</b>.\n"
+            "Если PayPal больше не нужен — нажмите <b>«↩️ Вернуть PayPal»</b>.",
+            reply_markup=collection_choice_menu(req.id),
+        )
+    except Exception:
+        await callback.answer("Не удалось отправить уведомление", show_alert=True)
+        return
+    await callback.message.edit_caption(
+        caption=(
+            "<b>✅ Индивидуальное предупреждение отправлено</b>\n\n"
+            f"PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+            f"Пользователь: <code>{req.user_id}</code>\n"
+            "Срок: <b>30 минут</b>"
+        ),
+        reply_markup=working_card_menu(req.id, day, req.user_id),
+    )
+    await callback.answer("Пользователь уведомлён")
+
+
+@router.callback_query(F.data.startswith("collect_return_ask:"))
+async def collect_return_ask_handler(callback: CallbackQuery) -> None:
+    request_id = int(callback.data.split(":")[1])
+    req = await get_request(request_id)
+    if req is None or req.user_id != callback.from_user.id or req.status != "paypal_issued":
+        await callback.answer("PayPal уже обработан или недоступен", show_alert=True)
+        return
+    await callback.message.answer(
+        "↩️ <b>Вернуть PayPal?</b>\n\nПосле подтверждения он сразу станет доступен другим пользователям.",
+        reply_markup=collection_return_confirm_menu(request_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("collect_return_cancel:"))
+async def collect_return_cancel_handler(callback: CallbackQuery) -> None:
+    await callback.message.edit_text("Действие отменено. PayPal остаётся у вас.")
+    await callback.answer("Отменено")
+
+
+@router.callback_query(F.data.startswith("collect_return_confirm:"))
+async def collect_return_confirm_handler(callback: CallbackQuery) -> None:
+    request_id = int(callback.data.split(":")[1])
+    req, tag = await user_return_paypal_after_warning(request_id, callback.from_user.id)
+    if req is None:
+        await callback.answer("PayPal уже обработан или недоступен", show_alert=True)
+        return
+    user = await get_user(callback.from_user.id)
+    username = f"@{user.username}" if user and user.username else "без username"
+    await callback.message.edit_text(
+        f"✅ PayPal <code>{tag.tag if tag else '—'}</code> возвращён в базу. Больше не переводите на него деньги."
+    )
+    for admin_id in settings.admin_ids:
+        try:
+            await callback.bot.send_message(
+                admin_id,
+                "🔄 <b>Пользователь самостоятельно вернул PayPal</b>\n\n"
+                f"👤 Пользователь: <b>{username}</b>\n"
+                f'🔗 Профиль: <a href="tg://user?id={req.user_id}">открыть пользователя</a>\n'
+                f"🆔 Telegram ID: <code>{req.user_id}</code>\n"
+                f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+                f"💶 Сумма: <b>{req.amount} €</b>"
+            )
+        except Exception:
+            pass
+    await callback.answer("PayPal возвращён")
+
+
 @router.callback_query(F.data.startswith("working_recall_ask:"))
 async def working_recall_ask_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
@@ -2586,7 +2694,7 @@ async def _finish_gs(message_or_callback, state: FSMContext, screenshot: str | N
     data=await state.get_data(); request_id=int(data['gs_request_id']); admin_id=message_or_callback.from_user.id
     req=await mark_payment_gs(request_id, admin_id, screenshot); await state.clear()
     if req is None: return None
-    try: await message_or_callback.bot.send_message(req.user_id, "🚫 <b>Платёж отправлен через Goods & Services.</b>\n\nPayPal заблокирован из-за GS. Обратитесь в поддержку: @workzin")
+    try: await message_or_callback.bot.send_message(req.user_id, "❌ <b>Платёж отправлен через Goods & Services.</b>\n\nЭтот PayPal заблокирован и больше не используется. Не переводите на него деньги.")
     except Exception: pass
     return req
 

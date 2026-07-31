@@ -451,6 +451,7 @@ def collect_take_confirm_menu(date_label: str) -> InlineKeyboardMarkup:
 
 def working_card_menu(request_id: int, day: str, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏳ Заберу через 30 минут", callback_data=f"working_notify_ask:{request_id}:{day}")],
         [InlineKeyboardButton(text="↩️ Вернуть PayPal в работу", callback_data=f"working_recall_ask:{request_id}:available:{day}")],
         [InlineKeyboardButton(text="🚫 Gestop", callback_data=f"working_recall_ask:{request_id}:gestoppt:{day}")],
         [InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"working_recall_ask:{request_id}:deleted:{day}")],
@@ -458,6 +459,20 @@ def working_card_menu(request_id: int, day: str, user_id: int) -> InlineKeyboard
         [InlineKeyboardButton(text="⬅️ К списку за день", callback_data=f"working_day:{day}")],
     ])
 
+
+
+def working_notify_confirm_menu(request_id: int, day: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить уведомление", callback_data=f"working_notify_confirm:{request_id}:{day}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"working_card:{request_id}:{day}")],
+    ])
+
+
+def collection_return_confirm_menu(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, вернуть PayPal", callback_data=f"collect_return_confirm:{request_id}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"collect_return_cancel:{request_id}")],
+    ])
 
 def working_recall_confirm_menu(request_id: int, action: str, day: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -482,8 +497,8 @@ def working_search_results_menu(requests: list) -> InlineKeyboardMarkup:
 
 def collection_choice_menu(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Ещё нужен", callback_data=f"collect_keep:{request_id}")],
-        [InlineKeyboardButton(text="↩️ Вернуть", callback_data=f"return_start:{request_id}")],
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_paid:{request_id}")],
+        [InlineKeyboardButton(text="↩️ Вернуть PayPal", callback_data=f"collect_return_ask:{request_id}")],
     ])
 
 

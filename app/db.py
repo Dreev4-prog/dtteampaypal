@@ -846,6 +846,29 @@ async def mark_collection_notified(request_id: int) -> Request | None:
         await session.commit(); await session.refresh(req); return req
 
 
+async def user_return_paypal_after_warning(request_id: int, user_id: int) -> tuple[Request | None, PaypalTag | None]:
+    """Immediately return an issued PayPal to the free pool after a 30-minute warning."""
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if req is None or req.user_id != user_id or req.status != "paypal_issued" or req.paypal_tag_id is None:
+            return None, None
+        tag = await session.get(PaypalTag, req.paypal_tag_id, with_for_update=True)
+        if tag is None or tag.status != "issued":
+            return None, None
+        now = datetime.utcnow()
+        tag.status = "available"
+        tag.issued_to_user_id = None
+        tag.issued_at = None
+        req.status = "user_returned_after_warning"
+        req.processed_at = now
+        req.processed_by = user_id
+        req.updated_at = now
+        await session.commit()
+        await session.refresh(req)
+        await session.refresh(tag)
+        return req, tag
+
+
 async def confirm_paypal_keep(request_id: int, user_id: int) -> Request | None:
     async with SessionLocal() as session:
         req = await session.get(Request, request_id)
