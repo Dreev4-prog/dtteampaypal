@@ -190,8 +190,10 @@ def payments_list_menu(requests: list, filter_name: str, offset: int, page_size:
     rows = []
     for req in requests:
         icon = status_icons.get(req.status, "•")
+        username = getattr(req, "_display_username", f"ID {req.user_id}")
+        paypal_tag = getattr(req, "_display_tag", "—")
         rows.append([InlineKeyboardButton(
-            text=f"{icon} #{req.id} · {req.amount} € · ID {req.user_id}",
+            text=f"{icon} 👤 {username} · 💳 {paypal_tag} · 💶 {req.amount} €",
             callback_data=f"payment_card:{req.id}:{filter_name}:{offset}",
         )])
     nav = []

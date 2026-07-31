@@ -1314,6 +1314,38 @@ def format_dt(value) -> str:
     return value.strftime("%d.%m.%Y %H:%M") if value else "—"
 
 
+async def _attach_request_display(requests) -> None:
+    """Attach human-readable username and PayPal tag for admin list buttons."""
+    for req in requests:
+        user = await get_user(req.user_id)
+        tag = await get_paypal_tag(req.paypal_tag_id) if getattr(req, "paypal_tag_id", None) else None
+        if user and user.username:
+            username = f"@{user.username}"
+        elif user and user.full_name:
+            username = user.full_name
+        else:
+            username = f"ID {req.user_id}"
+        setattr(req, "_display_username", username)
+        setattr(req, "_display_tag", tag.tag if tag else "—")
+
+
+async def _attach_return_display(items) -> None:
+    """Attach user, tag and amount to PayPal return rows."""
+    for item in items:
+        user = await get_user(item.user_id)
+        tag = await get_paypal_tag(item.paypal_tag_id) if getattr(item, "paypal_tag_id", None) else None
+        req = await get_request(item.request_id) if getattr(item, "request_id", None) else None
+        if user and user.username:
+            username = f"@{user.username}"
+        elif user and user.full_name:
+            username = user.full_name
+        else:
+            username = f"ID {item.user_id}"
+        setattr(item, "_display_username", username)
+        setattr(item, "_display_tag", tag.tag if tag else "—")
+        setattr(item, "_display_amount", getattr(req, "amount", 0) or 0)
+
+
 async def show_member_card(callback: CallbackQuery, user_id: int) -> None:
     user = await get_user(user_id)
     if user is None:
@@ -1660,6 +1692,7 @@ async def payments_list_handler(callback: CallbackQuery) -> None:
     offset = max(0, int(offset_text))
     page_size = 10
     requests, has_next = await list_payment_requests(filter_name, offset, page_size)
+    await _attach_request_display(requests)
     titles = {
         "check": "🟠 Ожидают проверки оплаты",
         "payout": "🟢 Нужно выплатить",
@@ -2320,6 +2353,7 @@ async def return_confirm_handler(callback: CallbackQuery, state: FSMContext) -> 
 async def returns_panel_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id): await callback.answer("Нет доступа", show_alert=True); return
     items = await list_paypal_returns()
+    await _attach_return_display(items)
     await render_screen(callback, "paypal", f"<b>↩️ Возвраты PayPal</b>\n\nОжидают проверки: <b>{len(items)}</b>", returns_menu(items))
     await callback.answer()
 
@@ -2351,7 +2385,9 @@ async def _finish_return(callback: CallbackQuery, action: str, reason: str) -> N
     messages = {"returned": "✅ PayPal проверен и возвращён в работу.", "gestoppt": "🚫 PayPal отмечен как Gestop и исключён из выдачи.", "deleted": "🗑 PayPal удалён из активной базы."}
     try: await callback.bot.send_message(item.user_id, messages[action], reply_markup=back_home())
     except Exception: pass
-    await callback.message.edit_text(messages[action], reply_markup=returns_menu(await list_paypal_returns())); await callback.answer("Готово")
+    remaining_returns = await list_paypal_returns()
+    await _attach_return_display(remaining_returns)
+    await callback.message.edit_text(messages[action], reply_markup=returns_menu(remaining_returns)); await callback.answer("Готово")
 
 
 @router.callback_query(F.data.startswith("return_release:"))
@@ -2452,6 +2488,7 @@ async def working_dates_handler(callback: CallbackQuery) -> None:
 async def working_day_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id): return
     day=callback.data.split(":",1)[1]; reqs=await get_working_requests_by_date(day)
+    await _attach_request_display(reqs)
     total=sum(r.amount for r in reqs)
     await callback.message.edit_caption(caption=f"<b>📅 PayPal в работе за {day}</b>\n\nКоличество: <b>{len(reqs)}</b>\nОбщая сумма: <b>{total} €</b>", reply_markup=working_day_menu(day,reqs)); await callback.answer()
 
@@ -2780,6 +2817,7 @@ async def working_recall_confirm_handler(callback: CallbackQuery) -> None:
     except Exception:
         pass
     reqs = await get_working_requests_by_date(day) if day != "search" else []
+    await _attach_request_display(reqs)
     if day == "search":
         await callback.message.edit_caption(
             caption="✅ PayPal обработан. Выполните новый поиск или вернитесь к датам.",
