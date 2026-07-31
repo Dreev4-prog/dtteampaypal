@@ -775,7 +775,13 @@ async def show_admin_home(target: Message | CallbackQuery) -> None:
             except TelegramBadRequest: pass
             await target.bot.send_message(target.message.chat.id, text, reply_markup=markup)
         else:
-            await target.message.edit_text(text, reply_markup=markup)
+            try:
+                await target.message.edit_text(text, reply_markup=markup)
+            except TelegramBadRequest as exc:
+                # Telegram возвращает ошибку, если текст и клавиатура не изменились.
+                # Для кнопки «Обновить» это нормальная ситуация, а не сбой бота.
+                if "message is not modified" not in str(exc).lower():
+                    raise
 
 
 @router.message(Command("admin"))
