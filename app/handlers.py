@@ -824,11 +824,18 @@ async def paypal_payments_hub_handler(callback: CallbackQuery, state: FSMContext
         await callback.answer("Нет доступа", show_alert=True)
         return
     await state.clear()
+    payment_counts = await get_payment_counts()
+    database_counts = await get_paypal_database_counts()
     text = (
-        "💳 <b>PAYPAL И ПЛАТЕЖИ</b>\n\n"
-        "В одном разделе собраны база PayPal, платежи, возвраты и выплаты."
+        "💳 <b>РАБОТА С PAYPAL</b>\n\n"
+        "Проверка оплат, PayPal в работе, свободная база, возвраты, GS и Gestop.\n\n"
+        "Для поиска пользователя или PayPal используйте общий поиск на главной админ-панели."
     )
-    await replace_photo_with_text(callback, text, paypal_payments_hub_menu())
+    await replace_photo_with_text(
+        callback,
+        text,
+        paypal_payments_hub_menu(payment_counts, database_counts),
+    )
     await callback.answer()
 
 

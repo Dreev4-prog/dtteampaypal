@@ -29,31 +29,66 @@ def membership_admin_menu(user_id: int) -> InlineKeyboardMarkup:
 
 
 def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeyboardMarkup:
-    pending_label = f"👥 Участники · {pending_count} ждут" if pending_count else "👥 Участники"
-    queue_label = f"📥 Очередь PayPal ({queue_count})"
+    queue_label = f"📥 ОЧЕРЕДЬ PAYPAL ({queue_count})"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="▶️ START / ⏹ STOP", callback_data="work_control")],
-        [InlineKeyboardButton(text="💳 PAYPAL И ПЛАТЕЖИ", callback_data="paypal_payments_hub")],
-        [InlineKeyboardButton(text="📣 КОНТЕНТ И РАССЫЛКИ", callback_data="content_menu")],
-        [InlineKeyboardButton(text="👥 ПОЛЬЗОВАТЕЛИ И СТАТИСТИКА", callback_data="members_menu")],
-        [InlineKeyboardButton(text="⚙️ ПРОЦЕНТЫ", callback_data="rates_menu")],
-        [InlineKeyboardButton(text="🔍 ПОИСК", callback_data="global_search")],
         [InlineKeyboardButton(text=queue_label, callback_data="paypal_queue:0")],
+        [
+            InlineKeyboardButton(text="💳 РАБОТА С PAYPAL", callback_data="paypal_payments_hub"),
+            InlineKeyboardButton(text="💼 ВЫПЛАТЫ", callback_data="payouts_v22"),
+        ],
+        [InlineKeyboardButton(text="👥 ПОЛЬЗОВАТЕЛИ И СТАТИСТИКА", callback_data="members_menu")],
+        [InlineKeyboardButton(text="📣 КОНТЕНТ И РАССЫЛКИ", callback_data="content_menu")],
+        [
+            InlineKeyboardButton(text="⚙️ ПРОЦЕНТЫ", callback_data="rates_menu"),
+            InlineKeyboardButton(text="▶️ START / ⏹ STOP", callback_data="work_control"),
+        ],
+        [InlineKeyboardButton(text="🔍 ОБЩИЙ ПОИСК", callback_data="global_search")],
         [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="admin_home")],
     ])
 
 
-def paypal_payments_hub_menu() -> InlineKeyboardMarkup:
+def paypal_payments_hub_menu(
+    payment_counts: dict[str, int] | None = None,
+    database_counts: dict[str, int] | None = None,
+) -> InlineKeyboardMarkup:
+    payment_counts = payment_counts or {}
+    database_counts = database_counts or {}
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="💰 Платежи", callback_data="payments_menu"),
-            InlineKeyboardButton(text="💳 База PayPal", callback_data="paypal_database"),
+            InlineKeyboardButton(
+                text=f"🟠 Проверка оплат ({payment_counts.get('check', 0)})",
+                callback_data="payments_menu",
+            ),
+            InlineKeyboardButton(
+                text=f"🟡 PayPal в работе ({database_counts.get('issued', 0)})",
+                callback_data="working_dates",
+            ),
         ],
         [
-            InlineKeyboardButton(text="↩️ Возвраты", callback_data="returns_menu"),
-            InlineKeyboardButton(text="💼 Выплаты", callback_data="payouts_v22"),
+            InlineKeyboardButton(
+                text=f"🟢 Свободные ({database_counts.get('available', 0)})",
+                callback_data="paypal_db_list:available:0",
+            ),
+            InlineKeyboardButton(
+                text=f"↩️ Возвраты ({database_counts.get('return_pending', 0)})",
+                callback_data="returns_menu",
+            ),
         ],
-        [InlineKeyboardButton(text="🔍 Поиск", callback_data="global_search")],
+        [
+            InlineKeyboardButton(
+                text=f"🚫 Gestop ({database_counts.get('gestoppt', 0)})",
+                callback_data="paypal_db_list:gestoppt:0",
+            ),
+            InlineKeyboardButton(
+                text=f"🚫 GS ({database_counts.get('gs', 0)})",
+                callback_data="paypal_db_list:gs:0",
+            ),
+        ],
+        [
+            InlineKeyboardButton(text="➕ Добавить PayPal", callback_data="paypal_add_single"),
+            InlineKeyboardButton(text="📥 Массовое добавление", callback_data="paypal_add_bulk"),
+        ],
+        [InlineKeyboardButton(text="📋 Вся база PayPal", callback_data="paypal_database")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
     ])
 
@@ -192,7 +227,7 @@ def payments_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"🔴 Оплата не найдена ({counts.get('notfound', 0)})", callback_data="payments_list:notfound:0")],
         [InlineKeyboardButton(text=f"📋 Все ({counts.get('all', 0)})", callback_data="payments_list:all:0")],
         [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="payments_menu")],
-        [InlineKeyboardButton(text="⬅️ PayPal и платежи", callback_data="paypal_payments_hub")],
+        [InlineKeyboardButton(text="⬅️ Работа с PayPal", callback_data="paypal_payments_hub")],
     ])
 
 
@@ -334,7 +369,7 @@ def returns_menu(items: list) -> InlineKeyboardMarkup:
         text=f"↩️ {getattr(item, '_display_username', item.user_id)} · {getattr(item, '_display_tag', '—')} · {getattr(item, '_display_amount', 0)} €",
         callback_data=f"return_card:{item.id}",
     )] for item in items]
-    rows += [[InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="returns_menu")], [InlineKeyboardButton(text="⬅️ PayPal и платежи", callback_data="paypal_payments_hub")]]
+    rows += [[InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="returns_menu")], [InlineKeyboardButton(text="⬅️ Работа с PayPal", callback_data="paypal_payments_hub")]]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -414,13 +449,13 @@ def paypal_database_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"🚫 Gestop ({counts.get('gestoppt', 0)})", callback_data="paypal_db_list:gestoppt:0")],
         [InlineKeyboardButton(text=f"🚫 GS ({counts.get('gs', 0)})", callback_data="paypal_db_list:gs:0")],
         [InlineKeyboardButton(text=f"📋 Все ({counts.get('all', 0)})", callback_data="paypal_db_list:all:0")],
-        [InlineKeyboardButton(text="⬅️ PayPal и платежи", callback_data="paypal_payments_hub")],
+        [InlineKeyboardButton(text="⬅️ Работа с PayPal", callback_data="paypal_payments_hub")],
     ])
 
 
 def paypal_list_menu(tags: list, filter_name: str) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f"💳 {tag.tag}", callback_data=f"paypal_card:{tag.id}:{filter_name}")] for tag in tags]
-    rows.append([InlineKeyboardButton(text="⬅️ База PayPal", callback_data="paypal_database")])
+    rows.append([InlineKeyboardButton(text="⬅️ Работа с PayPal", callback_data="paypal_payments_hub")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -444,8 +479,7 @@ def paypal_delete_confirm_menu(tag_id: int, filter_name: str) -> InlineKeyboardM
 
 def working_dates_menu(rows: list[tuple[str, int]]) -> InlineKeyboardMarkup:
     buttons = [[InlineKeyboardButton(text=f"📅 {date_label} — {count}", callback_data=f"working_day:{date_label}")] for date_label, count in rows]
-    buttons.append([InlineKeyboardButton(text="🔍 Поиск PayPal / пользователя", callback_data="working_search")])
-    buttons.append([InlineKeyboardButton(text="⬅️ База PayPal", callback_data="paypal_database")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Работа с PayPal", callback_data="paypal_payments_hub")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
