@@ -825,8 +825,8 @@ async def content_menu_handler(callback: CallbackQuery, state: FSMContext) -> No
     await state.clear()
     home_image = await get_app_setting("content_home_image", "")
     text = (
-        "📝 <b>КОНТЕНТ</b>\n\n"
-        "Здесь можно менять основные тексты и картинку главного экрана без обновления кода.\n\n"
+        "📣 <b>КОНТЕНТ И РАССЫЛКИ</b>\n\n"
+        "Здесь можно создавать рассылки, менять основные тексты и картинку главного экрана без обновления кода.\n\n"
         "Подсказка: в приветствии можно использовать <code>{status}</code> — "
         "бот автоматически подставит статус работы."
     )
@@ -2948,7 +2948,11 @@ async def broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True); return
     await state.clear(); await state.set_state(BroadcastForm.text)
-    await callback.message.answer("📣 <b>Рассылка</b>\n\nОтправьте текст сообщения.")
+    await replace_photo_with_text(
+        callback,
+        "📣 <b>НОВАЯ РАССЫЛКА</b>\n\nОтправьте текст сообщения.",
+        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")]]),
+    )
     await callback.answer()
 
 
@@ -2987,13 +2991,27 @@ async def broadcast_send(callback: CallbackQuery, state: FSMContext) -> None:
             else: await callback.bot.send_message(uid, data.get('broadcast_text',''))
             sent+=1
         except Exception: failed+=1
-    await state.clear(); await callback.message.answer(f"✅ Доставлено: <b>{sent}</b>\n❌ Не доставлено: <b>{failed}</b>", reply_markup=admin_main_menu())
+    await state.clear()
+    has_image = bool(await get_app_setting("content_home_image", ""))
+    await callback.message.answer(
+        f"✅ Доставлено: <b>{sent}</b>\n❌ Не доставлено: <b>{failed}</b>",
+        reply_markup=content_menu(has_image),
+    )
     await callback.answer("Рассылка завершена")
 
 
 @router.callback_query(F.data == "broadcast_cancel")
 async def broadcast_cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear(); await show_admin_home(callback); await callback.answer("Отменено")
+    await state.clear()
+    home_image = await get_app_setting("content_home_image", "")
+    text = (
+        "📣 <b>КОНТЕНТ И РАССЫЛКИ</b>\n\n"
+        "Здесь можно создавать рассылки, менять основные тексты и картинку главного экрана без обновления кода.\n\n"
+        "Подсказка: в приветствии можно использовать <code>{status}</code> — "
+        "бот автоматически подставит статус работы."
+    )
+    await replace_photo_with_text(callback, text, content_menu(bool(home_image)))
+    await callback.answer("Отменено")
 
 
 @router.callback_query(F.data.startswith("admin_gs:"))
