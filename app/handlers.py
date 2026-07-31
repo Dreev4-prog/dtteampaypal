@@ -64,6 +64,7 @@ from app.db import (
 )
 from app.keyboards import (
     admin_check_menu,
+    paypal_payments_hub_menu,
     admin_main_menu,
     admin_request_menu,
     request_cancel_menu,
@@ -815,6 +816,20 @@ async def admin_home(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await show_admin_home(callback)
     await callback.answer("✅ Данные обновлены")
+
+
+@router.callback_query(F.data == "paypal_payments_hub")
+async def paypal_payments_hub_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    text = (
+        "💳 <b>PAYPAL И ПЛАТЕЖИ</b>\n\n"
+        "В одном разделе собраны база PayPal, платежи, возвраты и выплаты."
+    )
+    await replace_photo_with_text(callback, text, paypal_payments_hub_menu())
+    await callback.answer()
 
 
 @router.callback_query(F.data == "content_menu")
