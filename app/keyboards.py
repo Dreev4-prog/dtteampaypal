@@ -57,7 +57,7 @@ def paypal_payments_hub_menu(
         [
             InlineKeyboardButton(
                 text=f"🟠 Проверка оплат ({payment_counts.get('check', 0)})",
-                callback_data="payments_menu",
+                callback_data="payments_list:check:0",
             ),
             InlineKeyboardButton(
                 text=f"🟡 PayPal в работе ({database_counts.get('issued', 0)})",
@@ -253,7 +253,20 @@ def payments_list_menu(requests: list, filter_name: str, offset: int, page_size:
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=f"payments_list:{filter_name}:{offset}")])
-    rows.append([InlineKeyboardButton(text="⬅️ К платежам", callback_data="payments_menu")])
+    if filter_name == "check":
+        rows.append([
+            InlineKeyboardButton(
+                text="⬅️ Работа с PayPal",
+                callback_data="paypal_payments_hub",
+            )
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton(
+                text="⬅️ К категориям платежей",
+                callback_data="payments_menu",
+            )
+        ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

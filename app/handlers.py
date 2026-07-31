@@ -831,8 +831,9 @@ async def paypal_payments_hub_handler(callback: CallbackQuery, state: FSMContext
         "Проверка оплат, PayPal в работе, свободная база, возвраты, GS и Gestop.\n\n"
         "Для поиска пользователя или PayPal используйте общий поиск на главной админ-панели."
     )
-    await replace_photo_with_text(
+    await render_screen(
         callback,
+        "paypal",
         text,
         paypal_payments_hub_menu(payment_counts, database_counts),
     )
