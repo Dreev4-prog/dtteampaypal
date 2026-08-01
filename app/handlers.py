@@ -1735,14 +1735,22 @@ async def payments_list_handler(callback: CallbackQuery) -> None:
     await _attach_request_display(requests)
     titles = {
         "check": "🟠 Ожидают проверки оплаты",
-        "payout": "🟢 Нужно выплатить",
+        "payout": "💸 Вывести деньги",
         "paidout": "✅ Выплаченные за последние 24 часа",
         "waiting": "🕓 Ожидают оплаты",
         "notfound": "🔴 Оплата не найдена",
         "all": "📋 Все платежные заявки",
     }
     text = f"{titles.get(filter_name, titles['all'])}\nСтраница: <b>{offset // page_size + 1}</b>\n\n"
-    text += "Выберите заявку." if requests else "В этой категории заявок нет."
+    if filter_name == "payout":
+        text += (
+            "Здесь показаны отдельные PayPal, на которых подтверждены деньги. "
+            "После общей выплаты пользователю связанные заявки исчезнут из этого списка автоматически."
+            if requests
+            else "Сейчас нет подтверждённых платежей, деньги с которых нужно вывести."
+        )
+    else:
+        text += "Выберите заявку." if requests else "В этой категории заявок нет."
     markup = payments_list_menu(requests, filter_name, offset, page_size, has_next)
     if callback.message.photo:
         try:
@@ -1773,7 +1781,7 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
     status_names = {
         "paypal_issued": "🕓 PayPal выдан — ожидается оплата",
         "waiting_check": "🟠 Ожидает проверки оплаты",
-        "payout_pending": "🟢 Оплата получена — нужно выплатить клиенту",
+        "payout_pending": "💸 Деньги подтверждены — нужно вывести с PayPal",
         "paid_out": "✅ Выплачено клиенту",
         "not_found": "🔴 Оплата не найдена",
     }
@@ -1785,7 +1793,7 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
         f"🆔 <code>{req.user_id}</code>\n\n"
         f"💳 PayPal: <code>{tag.tag if tag else 'не найден'}</code>\n"
         f"💶 Сумма: <b>{req.amount} €</b>\n"
-        + (f"📊 Процент: <b>{req.payout_percent}%</b>\n💸 К выплате: <b>{float(req.payout_amount):.2f} €</b>\n" if req.payout_percent is not None and req.payout_amount is not None else "")
+        + (f"📊 Процент: <b>{req.payout_percent}%</b>\n💰 Начислено пользователю: <b>{float(req.payout_amount):.2f} USDT</b>\n" if req.payout_percent is not None and req.payout_amount is not None else "")
         + f"\nСтатус: <b>{status_names.get(req.status, req.status)}</b>\n\n"
         f"📅 Создана: {format_dt(req.created_at)}\n"
         f"📤 PayPal выдан: {format_dt(req.processed_at)}\n"
@@ -2679,7 +2687,8 @@ async def working_money_received_handler(callback: CallbackQuery) -> None:
         f"💶 Получено: <b>{req.amount} €</b>\n"
         f"📊 Процент: <b>{req.payout_percent}%</b>\n"
         f"💰 Начислено: <b>{float(req.payout_amount or 0):.2f} USDT</b>\n"
-        f"💼 Баланс пользователя: <b>{balance['available']:.2f} USDT</b>"
+        f"💼 Баланс пользователя: <b>{balance['available']:.2f} USDT</b>\n\n"
+        "Платёж добавлен в список <b>«💸 Вывести деньги»</b>."
     )
     if day == "search":
         await callback.message.edit_caption(caption=text, reply_markup=working_search_results_menu([]))

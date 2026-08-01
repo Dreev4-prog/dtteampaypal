@@ -66,6 +66,12 @@ def paypal_payments_hub_menu(
         ],
         [
             InlineKeyboardButton(
+                text=f"💸 Вывести деньги ({payment_counts.get('payout', 0)})",
+                callback_data="payments_list:payout:0",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
                 text=f"🟢 Свободные ({database_counts.get('available', 0)})",
                 callback_data="paypal_db_list:available:0",
             ),
@@ -221,7 +227,7 @@ def back_home() -> InlineKeyboardMarkup:
 def payments_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🟠 Проверить оплату ({counts.get('check', 0)})", callback_data="payments_list:check:0")],
-        [InlineKeyboardButton(text=f"🟢 Нужно выплатить ({counts.get('payout', 0)})", callback_data="payments_list:payout:0")],
+        [InlineKeyboardButton(text=f"💸 Вывести деньги ({counts.get('payout', 0)})", callback_data="payments_list:payout:0")],
         [InlineKeyboardButton(text=f"✅ Выплаченные ({counts.get('paidout', 0)})", callback_data="payments_list:paidout:0")],
         [InlineKeyboardButton(text=f"🕓 Ожидают оплаты ({counts.get('waiting', 0)})", callback_data="payments_list:waiting:0")],
         [InlineKeyboardButton(text=f"🔴 Оплата не найдена ({counts.get('notfound', 0)})", callback_data="payments_list:notfound:0")],
@@ -253,7 +259,7 @@ def payments_list_menu(requests: list, filter_name: str, offset: int, page_size:
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=f"payments_list:{filter_name}:{offset}")])
-    if filter_name == "check":
+    if filter_name in {"check", "payout"}:
         rows.append([
             InlineKeyboardButton(
                 text="⬅️ Работа с PayPal",
@@ -278,8 +284,12 @@ def payment_card_menu(request_id: int, user_id: int, status: str, filter_name: s
             InlineKeyboardButton(text="❌ Не найдено", callback_data=f"admin_not_found:{request_id}"),
         ])
     elif status == "payout_pending":
-        rows.append([InlineKeyboardButton(text="💸 Я выплатил", callback_data=f"payout_confirm:{request_id}")])
-        rows.append([InlineKeyboardButton(text="✏️ Изменить сумму", callback_data=f"payment_amount_edit:{request_id}")])
+        rows.append([
+            InlineKeyboardButton(
+                text="💼 Открыть выплаты пользователя",
+                callback_data=f"payout_user:{user_id}",
+            )
+        ])
     elif status == "not_found":
         rows.append([InlineKeyboardButton(text="↩️ Вернуть на проверку", callback_data=f"payment_recheck:{request_id}")])
     rows.append([InlineKeyboardButton(text="💬 Написать клиенту", url=f"tg://user?id={user_id}")])
