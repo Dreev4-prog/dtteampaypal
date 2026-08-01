@@ -865,8 +865,24 @@ async def resolve_paypal_return(return_id: int, action: str, admin_id: int, admi
 
 async def get_paypal_database_counts() -> dict[str, int]:
     async with SessionLocal() as session:
-        result = {key: int(await session.scalar(select(func.count()).select_from(PaypalTag).where(PaypalTag.status == key)) or 0)
-                  for key in ("available", "issued", "return_pending", "gestoppt", "gs")}
+        result = {
+            key: int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(PaypalTag)
+                    .where(PaypalTag.status == key)
+                )
+                or 0
+            )
+            for key in (
+                "available",
+                "issued",
+                "return_pending",
+                "gestoppt",
+                "gs",
+                "deleted",
+            )
+        }
         result["all"] = int(await session.scalar(
             select(func.count()).select_from(PaypalTag).where(PaypalTag.status != "deleted")
         ) or 0)
@@ -875,18 +891,21 @@ async def get_paypal_database_counts() -> dict[str, int]:
 
 async def list_paypal_tags(filter_name: str = "all", limit: int = 50) -> list[PaypalTag]:
     async with SessionLocal() as session:
-        query = select(PaypalTag).where(PaypalTag.status != "deleted").order_by(PaypalTag.id.desc())
-        if filter_name != "all":
-            query = query.where(PaypalTag.status == filter_name)
+        query = select(PaypalTag).order_by(PaypalTag.id.desc())
+        if filter_name == "deleted":
+            query = query.where(PaypalTag.status == "deleted")
+        elif filter_name == "all":
+            query = query.where(PaypalTag.status != "deleted")
+        else:
+            query = query.where(
+                PaypalTag.status == filter_name,
+                PaypalTag.status != "deleted",
+            )
         return list(await session.scalars(query.limit(limit)))
 
 
 async def delete_free_paypal_tag(tag_id: int) -> tuple[bool, str]:
-    """Delete a PayPal tag only when it is currently free.
-
-    Tags referenced by old requests are soft-deleted to preserve CRM history;
-    unreferenced tags are removed physically.
-    """
+    """Move a free PayPal tag to the trash without deleting its database row."""
     async with SessionLocal() as session:
         tag = await session.get(PaypalTag, tag_id, with_for_update=True)
         if tag is None or tag.status == "deleted":
@@ -894,22 +913,30 @@ async def delete_free_paypal_tag(tag_id: int) -> tuple[bool, str]:
         if tag.status != "available":
             return False, "not_available"
 
-        request_refs = int(await session.scalar(
-            select(func.count()).select_from(Request).where(Request.paypal_tag_id == tag_id)
-        ) or 0)
-        return_refs = int(await session.scalar(
-            select(func.count()).select_from(PaypalReturn).where(PaypalReturn.paypal_tag_id == tag_id)
-        ) or 0)
-
-        if request_refs or return_refs:
-            tag.status = "deleted"
-            tag.issued_to_user_id = None
-            tag.issued_at = None
-        else:
-            await session.delete(tag)
+        tag.status = "deleted"
+        tag.issued_to_user_id = None
+        tag.issued_at = None
 
         await session.commit()
         return True, "deleted"
+
+
+async def restore_deleted_paypal_tag(tag_id: int) -> tuple[PaypalTag | None, str]:
+    """Restore a PayPal tag from the trash to the free active pool."""
+    async with SessionLocal() as session:
+        tag = await session.get(PaypalTag, tag_id, with_for_update=True)
+        if tag is None:
+            return None, "not_found"
+        if tag.status != "deleted":
+            return None, "not_deleted"
+
+        tag.status = "available"
+        tag.issued_to_user_id = None
+        tag.issued_at = None
+
+        await session.commit()
+        await session.refresh(tag)
+        return tag, "restored"
 
 
 async def set_paypal_tag_status(tag_id: int, status: str) -> PaypalTag | None:

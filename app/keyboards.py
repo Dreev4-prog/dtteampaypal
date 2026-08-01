@@ -94,6 +94,12 @@ def paypal_payments_hub_menu(
             InlineKeyboardButton(text="➕ Добавить PayPal", callback_data="paypal_add_single"),
             InlineKeyboardButton(text="📥 Массовое добавление", callback_data="paypal_add_bulk"),
         ],
+        [
+            InlineKeyboardButton(
+                text=f"🗑 Корзина ({database_counts.get('deleted', 0)})",
+                callback_data="paypal_db_list:deleted:0",
+            ),
+        ],
         [InlineKeyboardButton(text="📋 Вся база PayPal", callback_data="paypal_database")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
     ])
@@ -471,6 +477,7 @@ def paypal_database_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"↩️ Возвраты ({counts.get('return_pending', 0)})", callback_data="returns_menu")],
         [InlineKeyboardButton(text=f"🚫 Gestop ({counts.get('gestoppt', 0)})", callback_data="paypal_db_list:gestoppt:0")],
         [InlineKeyboardButton(text=f"🚫 GS ({counts.get('gs', 0)})", callback_data="paypal_db_list:gs:0")],
+        [InlineKeyboardButton(text=f"🗑 Корзина ({counts.get('deleted', 0)})", callback_data="paypal_db_list:deleted:0")],
         [InlineKeyboardButton(text=f"📋 Все ({counts.get('all', 0)})", callback_data="paypal_db_list:all:0")],
         [InlineKeyboardButton(text="⬅️ Работа с PayPal", callback_data="paypal_payments_hub")],
     ])
@@ -483,6 +490,22 @@ def paypal_list_menu(tags: list, filter_name: str) -> InlineKeyboardMarkup:
 
 
 def paypal_card_admin_menu(tag_id: int, filter_name: str, status: str) -> InlineKeyboardMarkup:
+    if status == "deleted":
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="♻️ Восстановить в активные",
+                    callback_data=f"paypal_restore_ask:{tag_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ К корзине",
+                    callback_data="paypal_db_list:deleted:0",
+                )
+            ],
+        ])
+
     rows = [
         [InlineKeyboardButton(text="🚫 Пометить Gestop", callback_data=f"paypal_mark_gestoppt:{tag_id}:{filter_name}")],
         [InlineKeyboardButton(text="🟢 Сделать свободным", callback_data=f"paypal_mark_available:{tag_id}:{filter_name}")],
@@ -497,6 +520,23 @@ def paypal_delete_confirm_menu(tag_id: int, filter_name: str) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"paypal_delete_confirm:{tag_id}:{filter_name}")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data=f"paypal_card:{tag_id}:{filter_name}")],
+    ])
+
+
+def paypal_restore_confirm_menu(tag_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Да, восстановить",
+                callback_data=f"paypal_restore_confirm:{tag_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"paypal_card:{tag_id}:deleted",
+            )
+        ],
     ])
 
 
