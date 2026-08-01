@@ -3008,7 +3008,7 @@ async def working_recall_confirm_handler(callback: CallbackQuery) -> None:
             await callback.answer("PayPal уже обработан или изменил статус", show_alert=True)
             return
     user_messages = {
-        "available": "ℹ️ Администратор забрал выданный вам PayPal на проверку. Он помещён в раздел возвратов.",
+        "available": "ℹ️ Администратор забрал выданный вам PayPal.\n\nБольше не используйте его и не переводите на него деньги.",
         "gestoppt": "ℹ️ Администратор забрал выданный вам PayPal и пометил его как Gestop.",
         "deleted": "ℹ️ Администратор забрал выданный вам PayPal и переместил его в корзину.",
     }
