@@ -934,6 +934,37 @@ async def get_paypal_database_counts() -> dict[str, int]:
         return result
 
 
+async def get_paypal_gender_counts(status: str = "available") -> dict[str, int]:
+    """Return exact PayPal counts by gender for the selected status."""
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(PaypalTag.gender, func.count(PaypalTag.id))
+                .where(PaypalTag.status == status)
+                .group_by(PaypalTag.gender)
+            )
+        ).all()
+
+        counts = {
+            "male": 0,
+            "female": 0,
+            "other": 0,
+            "total": 0,
+        }
+        for gender, count in rows:
+            value = int(count or 0)
+            normalized = (gender or "").lower()
+            if normalized == "male":
+                counts["male"] += value
+            elif normalized == "female":
+                counts["female"] += value
+            else:
+                counts["other"] += value
+            counts["total"] += value
+
+        return counts
+
+
 async def list_paypal_tags(filter_name: str = "all", limit: int = 50) -> list[PaypalTag]:
     async with SessionLocal() as session:
         query = select(PaypalTag).order_by(PaypalTag.id.desc())

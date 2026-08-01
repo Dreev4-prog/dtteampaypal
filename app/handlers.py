@@ -52,7 +52,8 @@ from app.db import (
     delete_rate_rule,
     get_finance_summary,
     create_paypal_return, list_paypal_returns, get_paypal_return, resolve_paypal_return,
-    get_paypal_database_counts, list_paypal_tags, set_paypal_tag_status,
+    get_paypal_database_counts, get_paypal_gender_counts,
+    list_paypal_tags, set_paypal_tag_status,
     delete_free_paypal_tag, restore_deleted_paypal_tag,
     get_deleted_working_request, list_deleted_working_requests,
     restore_deleted_paypal_to_work, get_active_requests_for_tag,
@@ -2556,7 +2557,24 @@ async def paypal_db_list_handler(callback: CallbackQuery) -> None:
         "all": "📋 Вся база PayPal",
     }
     title = titles.get(filter_name, f"💳 PayPal: {filter_name}")
-    caption = f"<b>{title}</b>\n\nНайдено: <b>{len(tags)}</b>"
+    caption = f"<b>{title}</b>"
+
+    if filter_name == "available":
+        gender_counts = await get_paypal_gender_counts("available")
+        caption += (
+            "\n\n"
+            f"👨 Мужские: <b>{gender_counts['male']}</b>\n"
+            f"👩 Женские: <b>{gender_counts['female']}</b>\n"
+            f"📦 Всего свободных: <b>{gender_counts['total']}</b>"
+        )
+        if gender_counts["other"]:
+            caption += (
+                f"\n❓ Без указанного типа: <b>{gender_counts['other']}</b>"
+            )
+        caption += f"\n\nПоказано в списке: <b>{len(tags)}</b>"
+    else:
+        caption += f"\n\nНайдено: <b>{len(tags)}</b>"
+
     if filter_name == "deleted":
         caption += "\n\nОткройте PayPal, чтобы восстановить его в активную свободную базу."
     await callback.message.edit_caption(
