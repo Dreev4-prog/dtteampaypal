@@ -493,15 +493,22 @@ def paypal_card_admin_menu(
     tag_id: int,
     filter_name: str,
     status: str,
-    can_restore_working: bool = False,
+    restore_working_count: int = 0,
 ) -> InlineKeyboardMarkup:
     if status == "deleted":
         rows = []
-        if can_restore_working:
+        if restore_working_count == 1:
             rows.append([
                 InlineKeyboardButton(
-                    text="↩️ Вернуть тому же пользователю",
+                    text="↩️ Вернуть прежнему пользователю",
                     callback_data=f"paypal_restore_working_ask:{tag_id}",
+                )
+            ])
+        elif restore_working_count > 1:
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"👥 Выбрать пользователя ({restore_working_count})",
+                    callback_data=f"paypal_restore_working_users:{tag_id}",
                 )
             ])
         rows.append([
@@ -552,12 +559,41 @@ def paypal_restore_confirm_menu(tag_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def paypal_restore_working_confirm_menu(tag_id: int) -> InlineKeyboardMarkup:
+def paypal_restore_working_users_menu(
+    tag_id: int,
+    requests: list,
+) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=(
+                    f"👤 {getattr(req, '_display_username', req.user_id)}"
+                    f" · {req.amount} €"
+                ),
+                callback_data=f"paypal_restore_working_ask:{tag_id}:{req.id}",
+            )
+        ]
+        for req in requests
+    ]
+    rows.append([
+        InlineKeyboardButton(
+            text="⬅️ К карточке PayPal",
+            callback_data=f"paypal_card:{tag_id}:deleted",
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def paypal_restore_working_confirm_menu(
+    tag_id: int,
+    request_id: int | None = None,
+) -> InlineKeyboardMarkup:
+    suffix = f":{request_id}" if request_id is not None else ""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
                 text="✅ Да, вернуть в работу",
-                callback_data=f"paypal_restore_working_confirm:{tag_id}",
+                callback_data=f"paypal_restore_working_confirm:{tag_id}{suffix}",
             )
         ],
         [
@@ -577,7 +613,12 @@ def working_dates_menu(rows: list[tuple[str, int]]) -> InlineKeyboardMarkup:
 
 def working_day_menu(date_label: str, requests: list) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(
-        text=f"👤 {getattr(req, '_display_username', req.user_id)} · 💳 {getattr(req, '_display_tag', '—')} · 💶 {req.amount} €",
+        text=(
+            ("⚠️ ДУБЛЬ · " if getattr(req, "_display_duplicate_count", 1) > 1 else "")
+            + f"👤 {getattr(req, '_display_username', req.user_id)}"
+            + f" · 💳 {getattr(req, '_display_tag', '—')}"
+            + f" · 💶 {req.amount} €"
+        ),
         callback_data=f"working_card:{req.id}:{date_label}",
     )] for req in requests[:50]]
     rows += [
@@ -597,17 +638,52 @@ def collect_take_confirm_menu(date_label: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="❌ Отмена", callback_data=f"working_day:{date_label}")],
     ])
 
-def working_card_menu(request_id: int, day: str, user_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def working_card_menu(
+    request_id: int,
+    day: str,
+    user_id: int,
+    duplicate_count: int = 1,
+) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton(text="✅ Деньги поступили", callback_data=f"working_money_received:{request_id}:{day}")],
         [InlineKeyboardButton(text="📣 Уведомить пользователя", callback_data=f"quick_notify_menu:{request_id}:{day}")],
+    ]
+    if duplicate_count > 1:
+        rows.append([
+            InlineKeyboardButton(
+                text="❌ Отменить эту ошибочную выдачу",
+                callback_data=f"duplicate_cancel_ask:{request_id}:{day}",
+            )
+        ])
+    rows.extend([
         [InlineKeyboardButton(text="📥 Забрать в возвраты", callback_data=f"working_recall_ask:{request_id}:available:{day}")],
         [InlineKeyboardButton(text="🚫 Gestop", callback_data=f"working_recall_ask:{request_id}:gestoppt:{day}")],
         [InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"working_recall_ask:{request_id}:deleted:{day}")],
         [InlineKeyboardButton(text="👤 Открыть пользователя", url=f"tg://user?id={user_id}")],
         [InlineKeyboardButton(text="⬅️ К списку за день", callback_data=f"working_day:{day}")],
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+
+def duplicate_cancel_confirm_menu(
+    request_id: int,
+    day: str,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Да, отменить эту выдачу",
+                callback_data=f"duplicate_cancel_confirm:{request_id}:{day}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"working_card:{request_id}:{day}",
+            )
+        ],
+    ])
 
 
 def working_notify_confirm_menu(request_id: int, day: str) -> InlineKeyboardMarkup:
@@ -639,7 +715,12 @@ def working_delete_day_confirm_menu(day: str) -> InlineKeyboardMarkup:
 
 def working_search_results_menu(requests: list) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(
-        text=f"👤 {getattr(req, '_display_username', req.user_id)} · 💳 {getattr(req, '_display_tag', '—')} · 💶 {req.amount} €",
+        text=(
+            ("⚠️ ДУБЛЬ · " if getattr(req, "_display_duplicate_count", 1) > 1 else "")
+            + f"👤 {getattr(req, '_display_username', req.user_id)}"
+            + f" · 💳 {getattr(req, '_display_tag', '—')}"
+            + f" · 💶 {req.amount} €"
+        ),
         callback_data=f"working_card:{req.id}:search",
     )] for req in requests]
     rows.append([InlineKeyboardButton(text="🔍 Новый поиск", callback_data="working_search")])

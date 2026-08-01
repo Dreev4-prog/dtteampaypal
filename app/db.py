@@ -663,9 +663,33 @@ async def confirm_working_payment(request_id: int, admin_id: int) -> Request | N
                 status="available",
             ))
         if req.paypal_tag_id is not None:
-            tag = await session.get(PaypalTag, req.paypal_tag_id, with_for_update=True)
-            if tag is not None and tag.status == "issued":
-                tag.status = "used"
+            tag = await session.get(
+                PaypalTag,
+                req.paypal_tag_id,
+                with_for_update=True,
+            )
+            if tag is not None:
+                remaining_req = await session.scalar(
+                    select(Request)
+                    .where(
+                        Request.paypal_tag_id == req.paypal_tag_id,
+                        Request.status == "paypal_issued",
+                        Request.id != req.id,
+                    )
+                    .order_by(Request.id.desc())
+                    .limit(1)
+                )
+                if remaining_req is None:
+                    tag.status = "used"
+                    tag.issued_to_user_id = None
+                else:
+                    tag.status = "issued"
+                    tag.issued_to_user_id = remaining_req.user_id
+                    tag.issued_at = (
+                        remaining_req.processed_at
+                        or remaining_req.updated_at
+                        or remaining_req.created_at
+                    )
         await session.commit()
         await session.refresh(req)
         return req
@@ -893,8 +917,7 @@ async def get_paypal_database_counts() -> dict[str, int]:
                 .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
                 .where(
                     Request.status == "paypal_issued",
-                    PaypalTag.status == "issued",
-                    PaypalTag.issued_at.is_not(None),
+                    Request.paypal_tag_id.is_not(None),
                 )
             )
             or 0
@@ -969,6 +992,7 @@ async def get_deleted_working_request(tag_id: int) -> Request | None:
 async def restore_deleted_paypal_to_work(
     tag_id: int,
     admin_id: int,
+    source_request_id: int | None = None,
 ) -> tuple[Request | None, PaypalTag | None, str]:
     """Restore a deleted PayPal to the same user.
 
@@ -983,17 +1007,19 @@ async def restore_deleted_paypal_to_work(
         if tag.status != "deleted":
             return None, None, "not_deleted"
 
+        source_query = select(Request).where(
+            Request.paypal_tag_id == tag_id,
+            Request.status.in_(
+                (
+                    "admin_recalled_deleted",
+                    "returned_deleted",
+                )
+            ),
+        )
+        if source_request_id is not None:
+            source_query = source_query.where(Request.id == source_request_id)
         source_req = await session.scalar(
-            select(Request)
-            .where(
-                Request.paypal_tag_id == tag_id,
-                Request.status.in_(
-                    (
-                        "admin_recalled_deleted",
-                        "returned_deleted",
-                    )
-                ),
-            )
+            source_query
             .order_by(Request.updated_at.desc(), Request.id.desc())
             .limit(1)
             .with_for_update()
@@ -1075,19 +1101,22 @@ async def set_paypal_tag_status(tag_id: int, status: str) -> PaypalTag | None:
 
 async def get_working_dates() -> list[tuple[str, int]]:
     async with SessionLocal() as session:
-        day_expr = func.to_char(PaypalTag.issued_at, "YYYY-MM-DD")
+        issued_expr = func.coalesce(
+            Request.processed_at,
+            Request.updated_at,
+            Request.created_at,
+        )
+        day_expr = func.to_char(issued_expr, "YYYY-MM-DD")
         rows = (
             await session.execute(
                 select(
                     day_expr.label("day"),
-                    func.count(func.distinct(Request.id)),
+                    func.count(Request.id),
                 )
                 .select_from(Request)
-                .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
                 .where(
                     Request.status == "paypal_issued",
-                    PaypalTag.status == "issued",
-                    PaypalTag.issued_at.is_not(None),
+                    Request.paypal_tag_id.is_not(None),
                 )
                 .group_by(day_expr)
                 .order_by(day_expr.desc())
@@ -1098,23 +1127,160 @@ async def get_working_dates() -> list[tuple[str, int]]:
 
 async def get_working_requests_by_date(day: str) -> list[Request]:
     async with SessionLocal() as session:
-        rows = (await session.execute(
-            select(Request, User.username, User.full_name, PaypalTag.tag)
-            .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
-            .join(User, User.id == Request.user_id)
-            .where(
-                PaypalTag.status == "issued",
-                func.to_char(PaypalTag.issued_at, 'YYYY-MM-DD') == day,
-                Request.status == "paypal_issued",
+        issued_expr = func.coalesce(
+            Request.processed_at,
+            Request.updated_at,
+            Request.created_at,
+        )
+        rows = (
+            await session.execute(
+                select(Request, User.username, User.full_name, PaypalTag.tag)
+                .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
+                .join(User, User.id == Request.user_id)
+                .where(
+                    func.to_char(issued_expr, "YYYY-MM-DD") == day,
+                    Request.status == "paypal_issued",
+                )
+                .order_by(issued_expr.asc(), Request.id.asc())
             )
-            .order_by(PaypalTag.issued_at.asc())
-        )).all()
+        ).all()
+
         result: list[Request] = []
         for req, username, full_name, paypal_tag in rows:
-            req._display_username = f"@{username}" if username else (full_name or str(req.user_id))
+            duplicate_count = int(
+                await session.scalar(
+                    select(func.count(Request.id)).where(
+                        Request.paypal_tag_id == req.paypal_tag_id,
+                        Request.status == "paypal_issued",
+                    )
+                )
+                or 0
+            )
+            req._display_username = (
+                f"@{username}" if username else (full_name or str(req.user_id))
+            )
             req._display_tag = paypal_tag
+            req._display_duplicate_count = duplicate_count
+            req._display_issued_at = (
+                req.processed_at or req.updated_at or req.created_at
+            )
             result.append(req)
         return result
+
+
+async def get_active_requests_for_tag(tag_id: int) -> list[Request]:
+    """Return every active request linked to the same PayPal tag."""
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(Request, User.username, User.full_name)
+                .join(User, User.id == Request.user_id)
+                .where(
+                    Request.paypal_tag_id == tag_id,
+                    Request.status == "paypal_issued",
+                )
+                .order_by(
+                    func.coalesce(
+                        Request.processed_at,
+                        Request.updated_at,
+                        Request.created_at,
+                    ).asc(),
+                    Request.id.asc(),
+                )
+            )
+        ).all()
+
+        result: list[Request] = []
+        for req, username, full_name in rows:
+            req._display_username = (
+                f"@{username}" if username else (full_name or str(req.user_id))
+            )
+            result.append(req)
+        return result
+
+
+async def list_deleted_working_requests(tag_id: int) -> list[Request]:
+    """Return all previous users linked to a PayPal currently in the trash."""
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(Request, User.username, User.full_name)
+                .join(User, User.id == Request.user_id)
+                .where(
+                    Request.paypal_tag_id == tag_id,
+                    Request.status.in_(
+                        (
+                            "admin_recalled_deleted",
+                            "returned_deleted",
+                        )
+                    ),
+                )
+                .order_by(Request.updated_at.desc(), Request.id.desc())
+            )
+        ).all()
+
+        result: list[Request] = []
+        for req, username, full_name in rows:
+            req._display_username = (
+                f"@{username}" if username else (full_name or str(req.user_id))
+            )
+            result.append(req)
+        return result
+
+
+async def cancel_duplicate_working_request(
+    request_id: int,
+    admin_id: int,
+) -> tuple[Request | None, PaypalTag | None, int, str]:
+    """Cancel one mistaken duplicate assignment without touching the others."""
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if (
+            req is None
+            or req.status != "paypal_issued"
+            or req.paypal_tag_id is None
+        ):
+            return None, None, 0, "not_active"
+
+        active_requests = list(
+            await session.scalars(
+                select(Request)
+                .where(
+                    Request.paypal_tag_id == req.paypal_tag_id,
+                    Request.status == "paypal_issued",
+                )
+                .order_by(Request.id.asc())
+                .with_for_update()
+            )
+        )
+        if len(active_requests) <= 1:
+            return None, None, len(active_requests), "not_duplicate"
+
+        tag = await session.get(PaypalTag, req.paypal_tag_id, with_for_update=True)
+        if tag is None:
+            return None, None, 0, "tag_not_found"
+
+        now = datetime.utcnow()
+        req.status = "duplicate_cancelled"
+        req.processed_at = now
+        req.processed_by = admin_id
+        req.updated_at = now
+
+        remaining = [item for item in active_requests if item.id != req.id]
+        current = remaining[-1]
+        tag.status = "issued"
+        tag.issued_to_user_id = current.user_id
+        tag.issued_at = (
+            current.processed_at
+            or current.updated_at
+            or current.created_at
+            or now
+        )
+
+        await session.commit()
+        await session.refresh(req)
+        await session.refresh(tag)
+        return req, tag, len(remaining), "cancelled"
 
 
 async def mark_collection_notified(request_id: int) -> Request | None:
@@ -1261,7 +1427,7 @@ async def search_working_requests(query: str, limit: int = 50) -> list[Request]:
             select(Request, User.username, User.full_name, PaypalTag.tag)
             .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
             .join(User, User.id == Request.user_id)
-            .where(PaypalTag.status == "issued", Request.status == "paypal_issued")
+            .where(Request.status == "paypal_issued")
             .where(
                 PaypalTag.tag.ilike(pattern)
                 | User.username.ilike(pattern)
@@ -1274,8 +1440,20 @@ async def search_working_requests(query: str, limit: int = 50) -> list[Request]:
         rows = (await session.execute(stmt)).all()
         result: list[Request] = []
         for req, username, full_name, paypal_tag in rows:
-            req._display_username = f"@{username}" if username else (full_name or str(req.user_id))
+            duplicate_count = int(
+                await session.scalar(
+                    select(func.count(Request.id)).where(
+                        Request.paypal_tag_id == req.paypal_tag_id,
+                        Request.status == "paypal_issued",
+                    )
+                )
+                or 0
+            )
+            req._display_username = (
+                f"@{username}" if username else (full_name or str(req.user_id))
+            )
             req._display_tag = paypal_tag
+            req._display_duplicate_count = duplicate_count
             result.append(req)
         return result
 
