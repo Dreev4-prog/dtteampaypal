@@ -2765,7 +2765,9 @@ async def collect_return_ask_handler(callback: CallbackQuery) -> None:
         await callback.answer("PayPal уже обработан или недоступен", show_alert=True)
         return
     await callback.message.answer(
-        "↩️ <b>Вернуть PayPal?</b>\n\nПосле подтверждения он сразу станет доступен другим пользователям.",
+        "↩️ <b>Вернуть PayPal?</b>\n\n"
+        "После подтверждения он попадёт в раздел <b>«Возвраты»</b> "
+        "и будет проверен администратором.",
         reply_markup=collection_return_confirm_menu(request_id),
     )
     await callback.answer()
@@ -2780,29 +2782,41 @@ async def collect_return_cancel_handler(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("collect_return_confirm:"))
 async def collect_return_confirm_handler(callback: CallbackQuery) -> None:
     request_id = int(callback.data.split(":")[1])
-    req, tag = await user_return_paypal_after_warning(request_id, callback.from_user.id)
-    if req is None:
+    req, tag, return_item = await user_return_paypal_after_warning(
+        request_id,
+        callback.from_user.id,
+    )
+    if req is None or return_item is None:
         await callback.answer("PayPal уже обработан или недоступен", show_alert=True)
         return
+
     user = await get_user(callback.from_user.id)
     username = f"@{user.username}" if user and user.username else "без username"
+
     await callback.message.edit_text(
-        f"✅ PayPal <code>{tag.tag if tag else '—'}</code> возвращён в базу. Больше не переводите на него деньги."
+        f"✅ PayPal <code>{tag.tag if tag else '—'}</code> передан в раздел "
+        "<b>«Возвраты»</b> для проверки администратором. "
+        "Больше не переводите на него деньги."
     )
+
     for admin_id in settings.admin_ids:
         try:
             await callback.bot.send_message(
                 admin_id,
-                "🔄 <b>Пользователь самостоятельно вернул PayPal</b>\n\n"
+                "↩️ <b>PayPal передан в возвраты после предупреждения</b>\n\n"
                 f"👤 Пользователь: <b>{username}</b>\n"
                 f'🔗 Профиль: <a href="tg://user?id={req.user_id}">открыть пользователя</a>\n'
                 f"🆔 Telegram ID: <code>{req.user_id}</code>\n"
                 f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n"
-                f"💶 Сумма: <b>{req.amount} €</b>"
+                f"💶 Сумма: <b>{req.amount} €</b>\n\n"
+                "PayPal не возвращён в свободную базу и ожидает проверки.",
+                reply_markup=return_card_menu(return_item.id, req.user_id),
             )
         except Exception:
             pass
-    await callback.answer("PayPal возвращён")
+
+    await callback.answer("PayPal передан в возвраты")
+
 
 
 @router.callback_query(F.data.startswith("working_recall_ask:"))
