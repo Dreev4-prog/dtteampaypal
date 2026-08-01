@@ -2410,34 +2410,104 @@ async def returns_panel_handler(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("return_card:"))
 async def return_card_handler(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id): await callback.answer("Нет доступа", show_alert=True); return
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
     item = await get_paypal_return(int(callback.data.split(":")[1]))
-    if item is None: await callback.answer("Возврат не найден", show_alert=True); return
-    req = await get_request(item.request_id); tag = await get_paypal_tag(item.paypal_tag_id); user = await get_user(item.user_id)
-    username = f"@{user.username}" if user and user.username else (user.full_name if user and user.full_name else str(item.user_id))
-    text = (f"<b>↩️ Возврат #{item.id}</b>\n\n👤 Пользователь: <b>{username}</b>\n🆔 ID: <code>{item.user_id}</code>\n"
-            f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n💶 Сумма: <b>{req.amount if req else 0} €</b>\n"
-            f"🕒 Выдан: {format_dt(tag.issued_at if tag else None)}\n📝 Причина: {item.reason_text}\n"
-            f"📌 Статус: {item.status}")
-    await callback.message.edit_text(text, reply_markup=return_card_menu(item.id, item.user_id)); await callback.answer()
+    if item is None:
+        await callback.answer("Возврат не найден", show_alert=True)
+        return
+
+    req = await get_request(item.request_id)
+    tag = await get_paypal_tag(item.paypal_tag_id)
+    user = await get_user(item.user_id)
+    username = (
+        f"@{user.username}"
+        if user and user.username
+        else (user.full_name if user and user.full_name else str(item.user_id))
+    )
+
+    text = (
+        f"<b>↩️ Возврат #{item.id}</b>\n\n"
+        f"👤 Пользователь: <b>{username}</b>\n"
+        f"🆔 ID: <code>{item.user_id}</code>\n"
+        f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+        f"💶 Сумма: <b>{req.amount if req else 0} €</b>\n"
+        f"🕒 Выдан: {format_dt(tag.issued_at if tag else None)}\n"
+        f"📝 Причина: {item.reason_text}\n"
+        f"📌 Статус: {item.status}"
+    )
+
+    await render_screen(
+        callback,
+        "paypal",
+        text,
+        return_card_menu(item.id, item.user_id),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("return_checked:"))
 async def return_checked_handler(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id): await callback.answer("Нет доступа", show_alert=True); return
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
     rid = int(callback.data.split(":")[1])
-    await callback.message.edit_text("🔍 <b>PayPal проверен. Как поступить?</b>", reply_markup=return_checked_menu(rid)); await callback.answer()
+    await render_screen(
+        callback,
+        "paypal",
+        "🔍 <b>PayPal проверен. Как поступить?</b>",
+        return_checked_menu(rid),
+    )
+    await callback.answer()
 
 
-async def _finish_return(callback: CallbackQuery, action: str, reason: str) -> None:
-    rid = int(callback.data.split(":")[1]); item = await resolve_paypal_return(rid, action, callback.from_user.id, reason)
-    if item is None: await callback.answer("Возврат уже обработан", show_alert=True); return
-    messages = {"returned": "✅ PayPal проверен и возвращён в работу.", "gestoppt": "🚫 PayPal отмечен как Gestop и исключён из выдачи.", "deleted": "🗑 PayPal перемещён в корзину."}
-    try: await callback.bot.send_message(item.user_id, messages[action], reply_markup=back_home())
-    except Exception: pass
+async def _finish_return(
+    callback: CallbackQuery,
+    action: str,
+    reason: str,
+) -> None:
+    rid = int(callback.data.split(":")[1])
+    item = await resolve_paypal_return(
+        rid,
+        action,
+        callback.from_user.id,
+        reason,
+    )
+    if item is None:
+        await callback.answer("Возврат уже обработан", show_alert=True)
+        return
+
+    messages = {
+        "returned": "✅ PayPal проверен и возвращён в работу.",
+        "gestoppt": "🚫 PayPal отмечен как Gestop и исключён из выдачи.",
+        "deleted": "🗑 PayPal перемещён в корзину.",
+    }
+
+    try:
+        await callback.bot.send_message(
+            item.user_id,
+            messages[action],
+            reply_markup=back_home(),
+        )
+    except Exception:
+        pass
+
     remaining_returns = await list_paypal_returns()
     await _attach_return_display(remaining_returns)
-    await callback.message.edit_text(messages[action], reply_markup=returns_menu(remaining_returns)); await callback.answer("Готово")
+
+    await render_screen(
+        callback,
+        "paypal",
+        (
+            f"{messages[action]}\n\n"
+            f"Осталось возвратов на проверке: <b>{len(remaining_returns)}</b>"
+        ),
+        returns_menu(remaining_returns),
+    )
+    await callback.answer("Готово")
 
 
 @router.callback_query(F.data.startswith("return_release:"))
