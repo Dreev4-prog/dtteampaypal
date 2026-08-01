@@ -876,16 +876,38 @@ async def get_paypal_database_counts() -> dict[str, int]:
             )
             for key in (
                 "available",
-                "issued",
                 "return_pending",
                 "gestoppt",
                 "gs",
                 "deleted",
             )
         }
-        result["all"] = int(await session.scalar(
-            select(func.count()).select_from(PaypalTag).where(PaypalTag.status != "deleted")
-        ) or 0)
+
+        # «PayPal в работе» должен совпадать с реальным списком заявок.
+        # Один статус issued у тега недостаточен: у него должна быть
+        # активная связанная заявка paypal_issued.
+        result["issued"] = int(
+            await session.scalar(
+                select(func.count(func.distinct(Request.id)))
+                .select_from(Request)
+                .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
+                .where(
+                    Request.status == "paypal_issued",
+                    PaypalTag.status == "issued",
+                    PaypalTag.issued_at.is_not(None),
+                )
+            )
+            or 0
+        )
+
+        result["all"] = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(PaypalTag)
+                .where(PaypalTag.status != "deleted")
+            )
+            or 0
+        )
         return result
 
 
@@ -922,13 +944,22 @@ async def delete_free_paypal_tag(tag_id: int) -> tuple[bool, str]:
 
 
 async def get_deleted_working_request(tag_id: int) -> Request | None:
-    """Return the latest request when this PayPal was deleted from active work."""
+    """Return the latest user request linked to a deleted working PayPal.
+
+    Supports both direct deletion from «PayPal в работе» and deletion after
+    the PayPal was sent to the returns section for an administrator check.
+    """
     async with SessionLocal() as session:
         return await session.scalar(
             select(Request)
             .where(
                 Request.paypal_tag_id == tag_id,
-                Request.status == "admin_recalled_deleted",
+                Request.status.in_(
+                    (
+                        "admin_recalled_deleted",
+                        "returned_deleted",
+                    )
+                ),
             )
             .order_by(Request.updated_at.desc(), Request.id.desc())
             .limit(1)
@@ -939,7 +970,12 @@ async def restore_deleted_paypal_to_work(
     tag_id: int,
     admin_id: int,
 ) -> tuple[Request | None, PaypalTag | None, str]:
-    """Restore a deleted working PayPal to the same user and request."""
+    """Restore a deleted PayPal to the same user.
+
+    Directly recalled PayPal restores the original request. A PayPal deleted
+    after the returns workflow gets a fresh active request so that the old
+    return history remains intact and future returns still work correctly.
+    """
     async with SessionLocal() as session:
         tag = await session.get(PaypalTag, tag_id, with_for_update=True)
         if tag is None:
@@ -947,31 +983,54 @@ async def restore_deleted_paypal_to_work(
         if tag.status != "deleted":
             return None, None, "not_deleted"
 
-        req = await session.scalar(
+        source_req = await session.scalar(
             select(Request)
             .where(
                 Request.paypal_tag_id == tag_id,
-                Request.status == "admin_recalled_deleted",
+                Request.status.in_(
+                    (
+                        "admin_recalled_deleted",
+                        "returned_deleted",
+                    )
+                ),
             )
             .order_by(Request.updated_at.desc(), Request.id.desc())
             .limit(1)
             .with_for_update()
         )
-        if req is None:
+        if source_req is None:
             return None, tag, "no_working_request"
 
         now = datetime.utcnow()
 
+        if source_req.status == "returned_deleted":
+            # The old request already has a resolved PaypalReturn record with
+            # a unique request_id. Preserve that history and create a clean
+            # request for the restored work.
+            req = Request(
+                user_id=source_req.user_id,
+                amount=source_req.amount,
+                status="paypal_issued",
+                paypal_tag_id=tag.id,
+                screenshot_file_id=source_req.screenshot_file_id,
+                paypal_gender=source_req.paypal_gender,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(req)
+            await session.flush()
+        else:
+            req = source_req
+            req.status = "paypal_issued"
+            req.processed_at = None
+            req.processed_by = None
+            req.collection_notified_at = None
+            req.keep_confirmed_at = None
+            req.updated_at = now
+
         tag.status = "issued"
         tag.issued_to_user_id = req.user_id
         tag.issued_at = now
-
-        req.status = "paypal_issued"
-        req.processed_at = None
-        req.processed_by = None
-        req.collection_notified_at = None
-        req.keep_confirmed_at = None
-        req.updated_at = now
 
         await session.commit()
         await session.refresh(req)
@@ -1016,12 +1075,24 @@ async def set_paypal_tag_status(tag_id: int, status: str) -> PaypalTag | None:
 
 async def get_working_dates() -> list[tuple[str, int]]:
     async with SessionLocal() as session:
-        rows = (await session.execute(text("""
-            SELECT TO_CHAR(issued_at, 'YYYY-MM-DD') AS day, COUNT(*)
-            FROM paypal_tags
-            WHERE status = 'issued' AND issued_at IS NOT NULL
-            GROUP BY day ORDER BY day DESC
-        """))).all()
+        day_expr = func.to_char(PaypalTag.issued_at, "YYYY-MM-DD")
+        rows = (
+            await session.execute(
+                select(
+                    day_expr.label("day"),
+                    func.count(func.distinct(Request.id)),
+                )
+                .select_from(Request)
+                .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
+                .where(
+                    Request.status == "paypal_issued",
+                    PaypalTag.status == "issued",
+                    PaypalTag.issued_at.is_not(None),
+                )
+                .group_by(day_expr)
+                .order_by(day_expr.desc())
+            )
+        ).all()
         return [(str(day), int(count)) for day, count in rows]
 
 

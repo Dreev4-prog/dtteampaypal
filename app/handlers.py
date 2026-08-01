@@ -2595,8 +2595,13 @@ async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
             if deleted_working_user and deleted_working_user.username
             else str(deleted_working_req.user_id)
         )
+        deletion_source = (
+            "Удалён после проверки возврата"
+            if deleted_working_req.status == "returned_deleted"
+            else "Удалён из PayPal в работе"
+        )
         text += (
-            "\n\n⚠️ <b>Удалён из работы</b>\n"
+            f"\n\n⚠️ <b>{deletion_source}</b>\n"
             f"Прежний пользователь: <b>{username}</b>\n"
             f"Сумма заявки: <b>{deleted_working_req.amount} €</b>\n"
             "Его можно вернуть тому же пользователю."
