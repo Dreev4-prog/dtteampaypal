@@ -921,6 +921,64 @@ async def delete_free_paypal_tag(tag_id: int) -> tuple[bool, str]:
         return True, "deleted"
 
 
+async def get_deleted_working_request(tag_id: int) -> Request | None:
+    """Return the latest request when this PayPal was deleted from active work."""
+    async with SessionLocal() as session:
+        return await session.scalar(
+            select(Request)
+            .where(
+                Request.paypal_tag_id == tag_id,
+                Request.status == "admin_recalled_deleted",
+            )
+            .order_by(Request.updated_at.desc(), Request.id.desc())
+            .limit(1)
+        )
+
+
+async def restore_deleted_paypal_to_work(
+    tag_id: int,
+    admin_id: int,
+) -> tuple[Request | None, PaypalTag | None, str]:
+    """Restore a deleted working PayPal to the same user and request."""
+    async with SessionLocal() as session:
+        tag = await session.get(PaypalTag, tag_id, with_for_update=True)
+        if tag is None:
+            return None, None, "not_found"
+        if tag.status != "deleted":
+            return None, None, "not_deleted"
+
+        req = await session.scalar(
+            select(Request)
+            .where(
+                Request.paypal_tag_id == tag_id,
+                Request.status == "admin_recalled_deleted",
+            )
+            .order_by(Request.updated_at.desc(), Request.id.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        if req is None:
+            return None, tag, "no_working_request"
+
+        now = datetime.utcnow()
+
+        tag.status = "issued"
+        tag.issued_to_user_id = req.user_id
+        tag.issued_at = now
+
+        req.status = "paypal_issued"
+        req.processed_at = None
+        req.processed_by = None
+        req.collection_notified_at = None
+        req.keep_confirmed_at = None
+        req.updated_at = now
+
+        await session.commit()
+        await session.refresh(req)
+        await session.refresh(tag)
+        return req, tag, "restored_to_work"
+
+
 async def restore_deleted_paypal_tag(tag_id: int) -> tuple[PaypalTag | None, str]:
     """Restore a PayPal tag from the trash to the free active pool."""
     async with SessionLocal() as session:

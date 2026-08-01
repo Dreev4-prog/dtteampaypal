@@ -54,6 +54,7 @@ from app.db import (
     create_paypal_return, list_paypal_returns, get_paypal_return, resolve_paypal_return,
     get_paypal_database_counts, list_paypal_tags, set_paypal_tag_status,
     delete_free_paypal_tag, restore_deleted_paypal_tag,
+    get_deleted_working_request, restore_deleted_paypal_to_work,
     get_working_dates, get_working_requests_by_date, mark_collection_notified,
     confirm_paypal_keep, user_return_paypal_after_warning, list_unconfirmed_collection,
     admin_recall_working_request, bulk_delete_working_day, search_working_requests,
@@ -94,6 +95,7 @@ from app.keyboards import (
     paid_or_return_menu, return_reasons_menu, return_confirm_menu, returns_menu,
     return_card_menu, return_checked_menu, paypal_database_menu, paypal_list_menu,
     paypal_card_admin_menu, paypal_delete_confirm_menu, paypal_restore_confirm_menu,
+    paypal_restore_working_confirm_menu,
     working_dates_menu, working_day_menu, collection_choice_menu, collect_take_confirm_menu,
     working_card_menu, working_notify_confirm_menu, collection_return_confirm_menu, working_recall_confirm_menu, working_delete_day_confirm_menu, working_search_results_menu,
     working_search_cancel_menu, work_control_menu, work_edit_cancel_menu, work_image_edit_menu,
@@ -2562,12 +2564,54 @@ async def paypal_db_list_handler(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("paypal_card:"))
 async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id): return
-    _, tid, filter_name = callback.data.split(":", 2); tag = await get_paypal_tag(int(tid))
-    if tag is None: await callback.answer("Не найден", show_alert=True); return
-    text=(f"<b>💳 {tag.tag}</b>\n\nСтатус: <b>{tag.status}</b>\nПользователь ID: <code>{tag.issued_to_user_id or '—'}</code>\n"
-          f"Выдан: {format_dt(tag.issued_at)}\nДобавлен: {format_dt(tag.created_at)}")
-    await callback.message.edit_caption(caption=text, reply_markup=paypal_card_admin_menu(tag.id, filter_name, tag.status)); await callback.answer()
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    _, tid, filter_name = callback.data.split(":", 2)
+    tag = await get_paypal_tag(int(tid))
+    if tag is None:
+        await callback.answer("Не найден", show_alert=True)
+        return
+
+    deleted_working_req = None
+    deleted_working_user = None
+    if tag.status == "deleted":
+        deleted_working_req = await get_deleted_working_request(tag.id)
+        if deleted_working_req is not None:
+            deleted_working_user = await get_user(deleted_working_req.user_id)
+
+    text = (
+        f"<b>💳 {tag.tag}</b>\n\n"
+        f"Статус: <b>{tag.status}</b>\n"
+        f"Пользователь ID: <code>{tag.issued_to_user_id or '—'}</code>\n"
+        f"Выдан: {format_dt(tag.issued_at)}\n"
+        f"Добавлен: {format_dt(tag.created_at)}"
+    )
+
+    if deleted_working_req is not None:
+        username = (
+            f"@{deleted_working_user.username}"
+            if deleted_working_user and deleted_working_user.username
+            else str(deleted_working_req.user_id)
+        )
+        text += (
+            "\n\n⚠️ <b>Удалён из работы</b>\n"
+            f"Прежний пользователь: <b>{username}</b>\n"
+            f"Сумма заявки: <b>{deleted_working_req.amount} €</b>\n"
+            "Его можно вернуть тому же пользователю."
+        )
+
+    await callback.message.edit_caption(
+        caption=text,
+        reply_markup=paypal_card_admin_menu(
+            tag.id,
+            filter_name,
+            tag.status,
+            can_restore_working=deleted_working_req is not None,
+        ),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("paypal_delete_ask:"))
@@ -2600,6 +2644,106 @@ async def paypal_delete_confirm_handler(callback: CallbackQuery) -> None:
         reply_markup=paypal_list_menu(tags, filter_name),
     )
     await callback.answer("PayPal перемещён в корзину")
+
+
+@router.callback_query(F.data.startswith("paypal_restore_working_ask:"))
+async def paypal_restore_working_ask_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    tag_id = int(callback.data.split(":")[1])
+    tag = await get_paypal_tag(tag_id)
+    req = await get_deleted_working_request(tag_id)
+
+    if tag is None or tag.status != "deleted":
+        await callback.answer("PayPal уже восстановлен или не найден", show_alert=True)
+        return
+    if req is None:
+        await callback.answer(
+            "Этот PayPal не был удалён из раздела «PayPal в работе»",
+            show_alert=True,
+        )
+        return
+
+    user = await get_user(req.user_id)
+    username = (
+        f"@{user.username}"
+        if user and user.username
+        else str(req.user_id)
+    )
+
+    await callback.message.edit_caption(
+        caption=(
+            "<b>↩️ Вернуть PayPal тому же пользователю?</b>\n\n"
+            f"PayPal: <code>{tag.tag}</code>\n"
+            f"Пользователь: <b>{username}</b>\n"
+            f"Сумма: <b>{req.amount} €</b>\n\n"
+            "PayPal снова появится в разделе <b>«PayPal в работе»</b> "
+            "и не попадёт в свободную базу."
+        ),
+        reply_markup=paypal_restore_working_confirm_menu(tag_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("paypal_restore_working_confirm:"))
+async def paypal_restore_working_confirm_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    tag_id = int(callback.data.split(":")[1])
+    req, tag, reason = await restore_deleted_paypal_to_work(
+        tag_id,
+        callback.from_user.id,
+    )
+
+    if req is None or tag is None:
+        messages = {
+            "not_found": "PayPal не найден",
+            "not_deleted": "PayPal уже восстановлен",
+            "no_working_request": "Не найдена заявка, из которой PayPal был удалён",
+        }
+        await callback.answer(
+            messages.get(reason, "Не удалось восстановить PayPal"),
+            show_alert=True,
+        )
+        return
+
+    user = await get_user(req.user_id)
+    username = (
+        f"@{user.username}"
+        if user and user.username
+        else str(req.user_id)
+    )
+
+    try:
+        await callback.bot.send_message(
+            req.user_id,
+            "ℹ️ Администратор восстановил выданный вам PayPal.\n\n"
+            f"PayPal: <code>{tag.tag}</code>\n"
+            "Вы можете продолжить работу с ним.",
+            reply_markup=paid_or_return_menu(req.id),
+        )
+    except Exception:
+        pass
+
+    await callback.message.edit_caption(
+        caption=(
+            "<b>✅ PayPal возвращён в работу</b>\n\n"
+            f"PayPal: <code>{tag.tag}</code>\n"
+            f"Пользователь: <b>{username}</b>\n"
+            f"Сумма: <b>{req.amount} €</b>\n\n"
+            "Он снова отображается в разделе <b>«PayPal в работе»</b>."
+        ),
+        reply_markup=paypal_card_admin_menu(
+            tag.id,
+            "all",
+            tag.status,
+        ),
+    )
+    await callback.answer("PayPal возвращён пользователю")
 
 
 @router.callback_query(F.data.startswith("paypal_restore_ask:"))

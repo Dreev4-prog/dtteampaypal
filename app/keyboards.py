@@ -489,22 +489,34 @@ def paypal_list_menu(tags: list, filter_name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def paypal_card_admin_menu(tag_id: int, filter_name: str, status: str) -> InlineKeyboardMarkup:
+def paypal_card_admin_menu(
+    tag_id: int,
+    filter_name: str,
+    status: str,
+    can_restore_working: bool = False,
+) -> InlineKeyboardMarkup:
     if status == "deleted":
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [
+        rows = []
+        if can_restore_working:
+            rows.append([
                 InlineKeyboardButton(
-                    text="♻️ Восстановить в активные",
-                    callback_data=f"paypal_restore_ask:{tag_id}",
+                    text="↩️ Вернуть тому же пользователю",
+                    callback_data=f"paypal_restore_working_ask:{tag_id}",
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ К корзине",
-                    callback_data="paypal_db_list:deleted:0",
-                )
-            ],
+            ])
+        rows.append([
+            InlineKeyboardButton(
+                text="♻️ Восстановить свободным",
+                callback_data=f"paypal_restore_ask:{tag_id}",
+            )
         ])
+        rows.append([
+            InlineKeyboardButton(
+                text="⬅️ К корзине",
+                callback_data="paypal_db_list:deleted:0",
+            )
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
     rows = [
         [InlineKeyboardButton(text="🚫 Пометить Gestop", callback_data=f"paypal_mark_gestoppt:{tag_id}:{filter_name}")],
@@ -529,6 +541,23 @@ def paypal_restore_confirm_menu(tag_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="✅ Да, восстановить",
                 callback_data=f"paypal_restore_confirm:{tag_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"paypal_card:{tag_id}:deleted",
+            )
+        ],
+    ])
+
+
+def paypal_restore_working_confirm_menu(tag_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Да, вернуть в работу",
+                callback_data=f"paypal_restore_working_confirm:{tag_id}",
             )
         ],
         [
