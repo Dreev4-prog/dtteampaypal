@@ -95,6 +95,8 @@ from app.keyboards import (
     rate_cancel_menu,
     my_paypals_menu,
     my_paypals_back_menu,
+    my_paypals_waiting_list_menu,
+    my_paypal_waiting_card_menu,
     paid_or_return_menu, return_reasons_menu, return_confirm_menu, returns_menu,
     return_card_menu, return_checked_menu, paypal_database_menu, paypal_list_menu,
     paypal_card_admin_menu, paypal_delete_confirm_menu, paypal_restore_confirm_menu,
@@ -672,7 +674,42 @@ async def my_paypals_list(callback: CallbackQuery) -> None:
         return
 
     statuses, title = config
-    requests = await get_user_requests_by_statuses(callback.from_user.id, statuses, limit=8)
+    limit = 50 if group == "waiting" else 8
+    requests = await get_user_requests_by_statuses(
+        callback.from_user.id,
+        statuses,
+        limit=limit,
+    )
+
+    if group == "waiting":
+        if not requests:
+            text = (
+                f"<b>{title}</b>\n\n"
+                "В этом разделе пока нет PayPal, ожидающих оплаты."
+            )
+            reply_markup = my_paypals_back_menu()
+        else:
+            for req in requests:
+                tag = await get_paypal_tag(req.paypal_tag_id)
+                req._display_tag = tag.tag if tag else "PayPal не найден"
+
+            text = (
+                f"<b>{title}</b>\n\n"
+                f"Активных PayPal: <b>{len(requests)}</b>\n\n"
+                "Нажмите на нужный PayPal, чтобы отметить оплату "
+                "или вернуть его администратору."
+            )
+            reply_markup = my_paypals_waiting_list_menu(requests)
+
+        await render_screen(
+            callback,
+            "requests",
+            text,
+            reply_markup,
+        )
+        await callback.answer()
+        return
+
     if not requests:
         text = f"<b>{title}</b>\n\nВ этом разделе пока нет заявок."
     else:
@@ -693,11 +730,60 @@ async def my_paypals_list(callback: CallbackQuery) -> None:
         for req in requests:
             tag = await get_paypal_tag(req.paypal_tag_id)
             blocks.append(_user_request_line(req, tag.tag if tag else None))
-            blocks.append(f"📌 Статус: <b>{status_names.get(req.status, req.status)}</b>")
+            blocks.append(
+                f"📌 Статус: <b>{status_names.get(req.status, req.status)}</b>"
+            )
             blocks.append("━━━━━━━━━━━━")
         text = "\n".join(blocks)
 
     await render_screen(callback, "requests", text, my_paypals_back_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("my_paypal_card:"))
+async def my_paypal_card_handler(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+
+    request_id = int(callback.data.split(":", 1)[1])
+    req = await get_request(request_id)
+
+    if (
+        req is None
+        or req.user_id != callback.from_user.id
+        or req.status != "paypal_issued"
+        or req.paypal_tag_id is None
+    ):
+        await callback.answer(
+            "Этот PayPal уже обработан или больше недоступен",
+            show_alert=True,
+        )
+        return
+
+    tag = await get_paypal_tag(req.paypal_tag_id)
+    if tag is None:
+        await callback.answer("PayPal не найден", show_alert=True)
+        return
+
+    text = (
+        "<b>💳 PayPal ожидает оплаты</b>\n\n"
+        f"💳 PayPal: <code>{tag.tag}</code>\n"
+        f"💶 Сумма: <b>{req.amount} €</b>\n"
+        f"🚻 Тип: <b>"
+        f"{'👨 Мужской' if req.paypal_gender == 'male' else '👩 Женский'}"
+        f"</b>\n"
+        f"🕒 Выдан: <b>{format_dt(req.processed_at or req.updated_at)}</b>\n\n"
+        "После перевода нажмите <b>«✅ Я оплатил»</b>.\n"
+        "Если PayPal больше не нужен — нажмите "
+        "<b>«↩️ Вернуть PayPal»</b>."
+    )
+
+    await render_screen(
+        callback,
+        "issued",
+        text,
+        my_paypal_waiting_card_menu(req.id),
+    )
     await callback.answer()
 
 

@@ -367,6 +367,49 @@ def my_paypals_back_menu() -> InlineKeyboardMarkup:
     ])
 
 
+def my_paypals_waiting_list_menu(requests: list) -> InlineKeyboardMarkup:
+    rows = []
+    for req in requests:
+        paypal_tag = getattr(req, "_display_tag", "—")
+        rows.append([
+            InlineKeyboardButton(
+                text=f"💳 {paypal_tag} · 💶 {req.amount} €",
+                callback_data=f"my_paypal_card:{req.id}",
+            )
+        ])
+
+    rows.extend([
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="my_paypals_list:waiting")],
+        [InlineKeyboardButton(text="⬅️ Мои PayPal", callback_data="my_paypals")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def my_paypal_waiting_card_menu(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Я оплатил",
+                callback_data=f"user_paid:{request_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="↩️ Вернуть PayPal",
+                callback_data=f"return_start:{request_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⬅️ К ожидающим оплаты",
+                callback_data="my_paypals_list:waiting",
+            )
+        ],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="home")],
+    ])
+
+
 def paid_or_return_menu(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_paid:{request_id}")],
