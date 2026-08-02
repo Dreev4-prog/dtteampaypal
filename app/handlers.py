@@ -10,7 +10,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, InputMediaPhoto, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    Message,
+)
 
 from app.config import settings
 from app.ui import admin_dashboard_caption, request_amount_caption, support_caption, user_home_caption
@@ -3562,14 +3570,30 @@ async def working_search_query_handler(message: Message, state: FSMContext) -> N
 @router.callback_query(F.data == "broadcast_start")
 async def broadcast_start(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True); return
-    await state.clear(); await state.set_state(BroadcastForm.text)
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+    await state.clear()
+    await state.set_state(BroadcastForm.text)
+
+    cancel_menu = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="broadcast_cancel",
+                )
+            ]
+        ]
+    )
+
     await replace_photo_with_text(
         callback,
-        "📣 <b>НОВАЯ РАССЫЛКА</b>\n\nОтправьте текст сообщения.",
-        InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")]]),
+        "📣 <b>НОВАЯ РАССЫЛКА</b>\n\n"
+        "Отправьте текст сообщения одним сообщением.",
+        cancel_menu,
     )
-    await callback.answer()
 
 
 @router.message(BroadcastForm.text)
@@ -3594,7 +3618,21 @@ async def broadcast_photo(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "broadcast_no_photo")
 async def broadcast_no_photo(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(broadcast_photo=None); await _broadcast_preview(callback.message,state); await callback.answer()
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    data = await state.get_data()
+    if not data.get("broadcast_text"):
+        await callback.answer(
+            "Сначала создайте новую рассылку и отправьте текст",
+            show_alert=True,
+        )
+        return
+
+    await state.update_data(broadcast_photo=None)
+    await _broadcast_preview(callback.message, state)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "broadcast_send")
