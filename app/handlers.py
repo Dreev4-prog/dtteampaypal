@@ -2071,19 +2071,52 @@ async def admin_issue(callback: CallbackQuery) -> None:
 async def user_paid(callback: CallbackQuery) -> None:
     if not await has_access(callback):
         return
+
     request_id = int(callback.data.split(":")[1])
     req = await get_request(request_id)
-    if req is None or req.user_id != callback.from_user.id or req.status != "paypal_issued":
-        await callback.answer("Заявка уже обработана или недоступна", show_alert=True)
+    if (
+        req is None
+        or req.user_id != callback.from_user.id
+        or req.status != "paypal_issued"
+    ):
+        await callback.answer(
+            "Заявка уже обработана или недоступна",
+            show_alert=True,
+        )
         return
-    await callback.message.edit_caption(
-        caption=(
-            "💶 <b>Подтвердите сумму оплаты</b>\n\n"
-            f"Текущая сумма: <b>{req.amount} €</b>\n\n"
-            "Если оплатили другую сумму — нажмите «Изменить сумму»."
-        ),
-        reply_markup=user_amount_confirmation_menu(req.id, req.amount),
+
+    text = (
+        "💶 <b>Подтвердите сумму оплаты</b>\n\n"
+        f"Текущая сумма: <b>{req.amount} €</b>\n\n"
+        "Если оплатили другую сумму — нажмите «Изменить сумму»."
     )
+    markup = user_amount_confirmation_menu(req.id, req.amount)
+
+    # Обычная выдача приходит фотографией, а уведомление о сборе
+    # через 30 минут — текстовым сообщением. Обрабатываем оба варианта.
+    try:
+        if callback.message.photo:
+            await callback.message.edit_caption(
+                caption=text,
+                reply_markup=markup,
+            )
+        else:
+            await callback.message.edit_text(
+                text=text,
+                reply_markup=markup,
+            )
+    except TelegramBadRequest:
+        # Если старое сообщение уже нельзя изменить, открываем подтверждение
+        # новым сообщением и убираем устаревшие кнопки, когда это возможно.
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await callback.message.answer(
+            text,
+            reply_markup=markup,
+        )
+
     await callback.answer()
 
 
