@@ -117,7 +117,8 @@ def members_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=f"❌ Отклонённые ({counts.get('rejected', 0)})", callback_data="members_list:rejected:0"),
             InlineKeyboardButton(text=f"🚫 Заблокированные ({counts.get('blocked', 0)})", callback_data="members_list:blocked:0"),
         ],
-        [InlineKeyboardButton(text="🔍 Поиск пользователя", callback_data="member_search")],
+        [InlineKeyboardButton(text="🏷 Поиск по Telegram-тегу", callback_data="member_tag_search")],
+        [InlineKeyboardButton(text="🔍 Расширенный поиск", callback_data="member_search")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
     ])
 

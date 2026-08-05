@@ -40,6 +40,7 @@ from app.db import (
     list_users,
     list_waiting_requests,
     search_users,
+    search_users_by_tag,
     issue_paypal,
     mark_paid_by_user,
     set_request_status,
@@ -125,6 +126,10 @@ router = Router()
 
 
 class MemberSearch(StatesGroup):
+    query = State()
+
+
+class MemberTagSearch(StatesGroup):
     query = State()
 
 
@@ -1396,7 +1401,8 @@ async def members_panel(callback: CallbackQuery, state: FSMContext) -> None:
         f"↩️ Возвратов: <b>{stats['returns']}</b>\n"
         f"🚫 GS: <b>{stats['gs']}</b>\n"
         f"💸 Выплачено: <b>{stats['payout']:.2f}</b>\n\n"
-        "Выберите список или найдите пользователя.",
+        "Выберите список, найдите пользователя по Telegram-тегу "
+        "или используйте расширенный поиск.",
         members_menu(counts),
     )
     await callback.answer()
@@ -1537,6 +1543,88 @@ async def member_set_status_handler(callback: CallbackQuery) -> None:
         pass
     await show_member_card(callback, user_id)
     await callback.answer("Статус обновлён")
+
+
+@router.callback_query(F.data == "member_tag_search")
+async def member_tag_search_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await state.clear()
+    await state.set_state(MemberTagSearch.query)
+    await callback.message.edit_text(
+        "🏷 <b>Поиск пользователя по Telegram-тегу</b>\n\n"
+        "Отправьте тег пользователя, например:\n"
+        "<code>@username</code> или <code>username</code>.",
+        reply_markup=cancel_search_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(MemberTagSearch.query)
+async def member_tag_search_result(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    query = (message.text or "").strip()
+    normalized = query.lstrip("@").strip()
+    if not normalized:
+        await message.answer(
+            "Введите Telegram-тег, например <code>@username</code>.",
+            reply_markup=cancel_search_menu(),
+        )
+        return
+
+    users = await search_users_by_tag(normalized)
+    await state.clear()
+
+    if not users:
+        await message.answer(
+            f"🏷 Пользователь с тегом <code>@{normalized}</code> не найден.",
+            reply_markup=members_menu(await get_user_counts()),
+        )
+        return
+
+    exact = next(
+        (
+            user
+            for user in users
+            if user.username
+            and user.username.lower() == normalized.lower()
+        ),
+        None,
+    )
+
+    if exact is not None:
+        title = (
+            "🏷 <b>Пользователь найден</b>\n\n"
+            f"Точное совпадение: <b>@{exact.username}</b>"
+        )
+    else:
+        title = (
+            "🏷 <b>Результаты поиска по тегу</b>\n\n"
+            f"Запрос: <code>@{normalized}</code>\n"
+            f"Найдено: <b>{len(users)}</b>"
+        )
+
+    await message.answer(
+        title + "\n\nНажмите на пользователя, чтобы открыть карточку.",
+        reply_markup=members_list_menu(
+            users,
+            "all",
+            0,
+            len(users),
+            False,
+        ),
+    )
 
 
 @router.callback_query(F.data == "member_search")

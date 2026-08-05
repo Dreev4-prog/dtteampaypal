@@ -507,6 +507,28 @@ async def search_users(query_text: str, limit: int = 10) -> list[User]:
         return list(rows)
 
 
+async def search_users_by_tag(query_text: str, limit: int = 20) -> list[User]:
+    """Search users by Telegram username, prioritising an exact match."""
+    value = query_text.strip().lstrip("@").strip()
+    if not value:
+        return []
+
+    async with SessionLocal() as session:
+        rows = await session.scalars(
+            select(User)
+            .where(User.username.is_not(None), User.username.ilike(f"%{value}%"))
+            .order_by(
+                # Exact username first, then prefix matches, then newest users.
+                (func.lower(User.username) == value.lower()).desc(),
+                User.username.ilike(f"{value}%").desc(),
+                User.created_at.desc(),
+                User.id.desc(),
+            )
+            .limit(limit)
+        )
+        return list(rows)
+
+
 async def count_user_paypals(user_id: int) -> int:
     from sqlalchemy import func
 
