@@ -26,6 +26,11 @@ from app.db import (
     add_paypal_tag,
     add_paypal_tags,
     count_available_tags,
+    get_requestable_paypal_gender_counts,
+    subscribe_paypal_stock_waitlist,
+    list_paypal_stock_waiters,
+    clear_paypal_stock_waiter_after_notification,
+    get_paypal_stock_waitlist_counts,
     count_active_requests,
     count_waiting_requests,
     count_user_paypals,
@@ -130,6 +135,8 @@ from app.keyboards import (
     working_delete_day_confirm_menu, working_search_results_menu,
     working_search_cancel_menu, work_control_menu, work_edit_cancel_menu, work_image_edit_menu,
     paypal_add_photo_menu, paypal_add_confirm_menu, paypal_add_cancel_menu, gender_choice_menu,
+    request_gender_choice_menu, paypal_stock_empty_menu, paypal_stock_missing_menu,
+    paypal_stock_available_menu,
     broadcast_photo_menu, broadcast_confirm_menu, gs_photo_menu,
     global_search_cancel_menu, global_search_results_menu, crm_user_menu, statistics_period_menu, quick_notify_menu,
     content_menu, content_cancel_menu, content_image_menu,
@@ -519,6 +526,63 @@ async def membership_block(callback: CallbackQuery) -> None:
     await callback.answer("Пользователь заблокирован")
 
 
+async def _notify_paypal_stock_waiters(
+    bot,
+    gender: str,
+    available_count: int,
+) -> int:
+    """Notify subscribers once when the requested PayPal type is available."""
+    if gender not in {"male", "female"} or available_count <= 0:
+        return 0
+
+    user_ids = await list_paypal_stock_waiters(gender)
+    if not user_ids:
+        return 0
+
+    is_male = gender == "male"
+    title = (
+        "🟢 <b>МУЖСКИЕ PAYPAL СНОВА ДОСТУПНЫ</b>"
+        if is_male
+        else "🟢 <b>ЖЕНСКИЕ PAYPAL СНОВА ДОСТУПНЫ</b>"
+    )
+    type_line = "👨 Мужские" if is_male else "👩 Женские"
+    sent = 0
+
+    for user_id in user_ids:
+        try:
+            await bot.send_message(
+                user_id,
+                f"{title}\n\n"
+                f"{type_line} PayPal появились в наличии.\n"
+                f"Сейчас доступно для новых заявок: "
+                f"<b>{available_count}</b>\n\n"
+                "Можете создать новую заявку.",
+                reply_markup=paypal_stock_available_menu(),
+            )
+            await clear_paypal_stock_waiter_after_notification(
+                user_id,
+                gender,
+            )
+            sent += 1
+        except Exception:
+            # Keep the subscription if Telegram delivery failed.
+            pass
+
+    return sent
+
+
+async def _notify_stock_after_replenishment(
+    bot,
+    gender: str,
+) -> int:
+    counts = await get_requestable_paypal_gender_counts()
+    return await _notify_paypal_stock_waiters(
+        bot,
+        gender,
+        counts.get(gender, 0),
+    )
+
+
 @router.callback_query(F.data == "paypal_request")
 async def paypal_request(callback: CallbackQuery, state: FSMContext) -> None:
     if not await has_access(callback):
@@ -533,6 +597,22 @@ async def paypal_request(callback: CallbackQuery, state: FSMContext) -> None:
             show_alert=True,
         )
         return
+
+    stock = await get_requestable_paypal_gender_counts()
+    if stock["total"] <= 0:
+        await state.clear()
+        await render_screen(
+            callback,
+            "paypal",
+            "💳 <b>PAYPAL ВРЕМЕННО ЗАКОНЧИЛИСЬ</b>\n\n"
+            "Сейчас все PayPal разобрали. Ожидайте пополнения.\n\n"
+            "Нажмите кнопку ниже, и бот сообщит вам, "
+            "как только PayPal снова появятся.",
+            paypal_stock_empty_menu(),
+        )
+        await callback.answer()
+        return
+
     await state.clear()
     await state.set_state(PaypalRequestForm.amount)
     paypal_text = await get_app_setting("content_paypal_text", request_amount_caption())
@@ -568,14 +648,75 @@ async def paypal_amount_input(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer("❌ У вас уже есть 2 активные заявки. Дождитесь обработки одной из них.", reply_markup=back_home())
         return
+    stock = await get_requestable_paypal_gender_counts()
+    if stock["total"] <= 0:
+        await state.clear()
+        await render_screen(
+            message,
+            "paypal",
+            "💳 <b>PAYPAL ВРЕМЕННО ЗАКОНЧИЛИСЬ</b>\n\n"
+            "Пока вы оформляли заявку, все свободные PayPal разобрали.\n\n"
+            "Нажмите «Уведомить о пополнении», и бот сообщит, "
+            "когда PayPal снова появятся.",
+            paypal_stock_empty_menu(),
+        )
+        return
+
     await state.update_data(amount=amount)
     await state.set_state(PaypalRequestForm.gender)
-    await message.answer("🚻 <b>Какой PayPal вам нужен?</b>", reply_markup=gender_choice_menu("request_gender"))
+
+    lines = [
+        "🚻 <b>Какой PayPal вам нужен?</b>",
+        "",
+        f"👨 Мужские: <b>{stock['male']}</b>",
+        f"👩 Женские: <b>{stock['female']}</b>",
+    ]
+    if stock["male"] <= 0:
+        lines.append("\nМужские сейчас закончились — кнопка выбора скрыта.")
+    if stock["female"] <= 0:
+        lines.append("\nЖенские сейчас закончились — кнопка выбора скрыта.")
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=request_gender_choice_menu(stock),
+    )
 
 
 @router.callback_query(PaypalRequestForm.gender, F.data.startswith("request_gender:"))
 async def paypal_gender_choice(callback: CallbackQuery, state: FSMContext) -> None:
     gender = callback.data.split(":", 1)[1]
+    if gender not in {"male", "female"}:
+        await callback.answer("Неизвестный тип PayPal", show_alert=True)
+        return
+
+    stock = await get_requestable_paypal_gender_counts()
+    if stock.get(gender, 0) <= 0:
+        if stock["total"] <= 0:
+            await state.clear()
+            await render_screen(
+                callback,
+                "paypal",
+                "💳 <b>PAYPAL ВРЕМЕННО ЗАКОНЧИЛИСЬ</b>\n\n"
+                "Этот PayPal только что забрал другой пользователь, "
+                "и свободных вариантов больше нет.\n\n"
+                "Подпишитесь на уведомление о пополнении.",
+                paypal_stock_empty_menu(),
+            )
+        else:
+            label = "Мужские" if gender == "male" else "Женские"
+            await callback.message.edit_text(
+                f"⚠️ <b>{label} PayPal только что закончились</b>\n\n"
+                f"👨 Мужские: <b>{stock['male']}</b>\n"
+                f"👩 Женские: <b>{stock['female']}</b>\n\n"
+                "Выберите доступный тип или подпишитесь на уведомление.",
+                reply_markup=request_gender_choice_menu(stock),
+            )
+        await callback.answer(
+            "Этот тип PayPal уже закончился",
+            show_alert=True,
+        )
+        return
+
     await state.update_data(paypal_gender=gender)
     await state.set_state(PaypalRequestForm.screenshot)
     await callback.message.answer(
@@ -607,7 +748,26 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
     amount = int(data["amount"])
     screenshot_file_id = message.photo[-1].file_id
     gender = data.get("paypal_gender", "male")
-    req = await create_request(message.from_user.id, amount, screenshot_file_id, gender)
+
+    stock = await get_requestable_paypal_gender_counts()
+    if stock.get(gender, 0) <= 0:
+        await state.clear()
+        label = "мужские" if gender == "male" else "женские"
+        await message.answer(
+            "⚠️ <b>PayPal закончились во время оформления заявки</b>\n\n"
+            f"Сейчас {label} PayPal недоступны. "
+            "Заявка не создана и место не занято.\n\n"
+            "Можно подписаться на уведомление о пополнении.",
+            reply_markup=paypal_stock_missing_menu(gender),
+        )
+        return
+
+    req = await create_request(
+        message.from_user.id,
+        amount,
+        screenshot_file_id,
+        gender,
+    )
     await state.clear()
 
     await message.answer(
@@ -645,6 +805,70 @@ async def paypal_screenshot_invalid(message: Message) -> None:
     await message.answer(
         "Пришлите скриншот как фотографию/изображение. Документ или текст не подойдут.",
         reply_markup=request_cancel_menu(),
+    )
+
+
+@router.callback_query(F.data.startswith("paypal_stock_wait:"))
+async def paypal_stock_wait_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not await has_access(callback):
+        return
+
+    gender = callback.data.split(":", 1)[1]
+    if gender not in {"male", "female", "any"}:
+        await callback.answer("Неизвестный тип уведомления", show_alert=True)
+        return
+
+    # If stock became available between opening the screen and pressing
+    # Subscribe, do not create an unnecessary waiting record.
+    stock = await get_requestable_paypal_gender_counts()
+    if (
+        (gender == "any" and stock["total"] > 0)
+        or (gender in {"male", "female"} and stock[gender] > 0)
+    ):
+        await state.clear()
+        await render_screen(
+            callback,
+            "paypal",
+            "🟢 <b>PayPal уже появились в наличии</b>\n\n"
+            f"👨 Мужские: <b>{stock['male']}</b>\n"
+            f"👩 Женские: <b>{stock['female']}</b>\n\n"
+            "Можно сразу создать заявку.",
+            paypal_stock_available_menu(),
+        )
+        await callback.answer("PayPal уже доступны")
+        return
+
+    created = await subscribe_paypal_stock_waitlist(
+        callback.from_user.id,
+        gender,
+    )
+    await state.clear()
+
+    labels = {
+        "male": "мужские PayPal",
+        "female": "женские PayPal",
+        "any": "любые PayPal",
+    }
+    text = (
+        "🔔 <b>Уведомление о пополнении включено</b>\n\n"
+        f"Вы ждёте: <b>{labels[gender]}</b>.\n\n"
+        "Как только подходящие PayPal снова появятся, "
+        "бот отправит вам одно уведомление."
+    )
+    if not created:
+        text += "\n\nВы уже были подписаны — повторно добавлять не стал."
+
+    await render_screen(
+        callback,
+        "paypal",
+        text,
+        back_home(),
+    )
+    await callback.answer(
+        "Уведомление включено" if created else "Вы уже подписаны",
     )
 
 
@@ -1862,7 +2086,18 @@ async def paypal_add_save(callback: CallbackQuery, state: FSMContext) -> None:
     if not tag:
         await callback.answer("Данные устарели. Начните заново.", show_alert=True)
         return
-    item, duplicate = await add_paypal_tag(tag, data.get("paypal_add_photo"), data.get("paypal_add_gender", "male"))
+    add_gender = data.get("paypal_add_gender", "male")
+    item, duplicate = await add_paypal_tag(
+        tag,
+        data.get("paypal_add_photo"),
+        add_gender,
+    )
+    notified = 0
+    if not duplicate:
+        notified = await _notify_stock_after_replenishment(
+            callback.bot,
+            add_gender,
+        )
     await state.clear()
     payment_counts = await get_payment_counts()
     database_counts = await get_paypal_database_counts()
@@ -1874,8 +2109,13 @@ async def paypal_add_save(callback: CallbackQuery, state: FSMContext) -> None:
         )
         await callback.answer("Дубликат", show_alert=True)
         return
+    stock_now = await get_requestable_paypal_gender_counts()
     await callback.message.answer(
-        f"✅ PayPal <code>{tag}</code> сохранён и добавлен в свободную базу.",
+        f"✅ PayPal <code>{tag}</code> сохранён и добавлен в свободную базу.\n\n"
+        f"🔔 Уведомлено ожидающих: <b>{notified}</b>\n"
+        f"📲 Доступно для новых заявок:\n"
+        f"👨 Мужские: <b>{stock_now['male']}</b>\n"
+        f"👩 Женские: <b>{stock_now['female']}</b>",
         reply_markup=hub_keyboard,
     )
     await callback.answer("Сохранено")
@@ -1952,13 +2192,28 @@ async def paypal_add_bulk_input(message: Message, state: FSMContext) -> None:
         await message.answer("Не найдено ни одного корректного PayPal-тега.", reply_markup=paypal_add_cancel_menu())
         return
     data = await state.get_data()
-    added, duplicates = await add_paypal_tags(tags, data.get("paypal_add_gender", "male"))
+    add_gender = data.get("paypal_add_gender", "male")
+    added, duplicates = await add_paypal_tags(
+        tags,
+        add_gender,
+    )
+    notified = 0
+    if added > 0:
+        notified = await _notify_stock_after_replenishment(
+            message.bot,
+            add_gender,
+        )
+    stock_now = await get_requestable_paypal_gender_counts()
     await state.clear()
     await message.answer(
         "✅ <b>Массовое добавление завершено</b>\n\n"
         f"Добавлено: <b>{added}</b>\n"
         f"Уже были в базе: <b>{duplicates}</b>\n"
-        f"Некорректных: <b>{invalid}</b>",
+        f"Некорректных: <b>{invalid}</b>\n\n"
+        f"🔔 Уведомлено ожидающих: <b>{notified}</b>\n"
+        f"📲 Доступно для новых заявок:\n"
+        f"👨 Мужские: <b>{stock_now['male']}</b>\n"
+        f"👩 Женские: <b>{stock_now['female']}</b>",
         reply_markup=paypal_payments_hub_menu(
             await get_payment_counts(),
             await get_paypal_database_counts(),
@@ -1983,7 +2238,17 @@ async def add_tags_handler(message: Message) -> None:
         await message.answer("После команды укажите PayPal-теги.")
         return
     added, duplicates = await add_paypal_tags(tags)
-    await message.answer(f"✅ Добавлено: {added}\n⚠️ Дубликатов: {duplicates}")
+    notified = 0
+    if added > 0:
+        notified = await _notify_stock_after_replenishment(
+            message.bot,
+            "male",
+        )
+    await message.answer(
+        f"✅ Добавлено: {added}\n"
+        f"⚠️ Дубликатов: {duplicates}\n"
+        f"🔔 Уведомлено ожидающих: {notified}"
+    )
 
 
 @router.callback_query(F.data == "payments_menu")
@@ -3833,11 +4098,20 @@ async def paypal_db_list_handler(callback: CallbackQuery) -> None:
 
     if filter_name == "available":
         gender_counts = await get_paypal_gender_counts("available")
+        requestable_counts = await get_requestable_paypal_gender_counts()
+        wait_counts = await get_paypal_stock_waitlist_counts()
         caption += (
             "\n\n"
-            f"👨 Мужские: <b>{gender_counts['male']}</b>\n"
-            f"👩 Женские: <b>{gender_counts['female']}</b>\n"
-            f"📦 Всего свободных: <b>{gender_counts['total']}</b>"
+            f"👨 Мужские физически: <b>{gender_counts['male']}</b>\n"
+            f"👩 Женские физически: <b>{gender_counts['female']}</b>\n"
+            f"📦 Всего свободных: <b>{gender_counts['total']}</b>\n\n"
+            f"📲 <b>Доступно для новых заявок</b>\n"
+            f"👨 Мужские: <b>{requestable_counts['male']}</b>\n"
+            f"👩 Женские: <b>{requestable_counts['female']}</b>\n\n"
+            f"🔔 <b>Ждут пополнения</b>\n"
+            f"👨 Мужские: <b>{wait_counts['male']}</b>\n"
+            f"👩 Женские: <b>{wait_counts['female']}</b>\n"
+            f"📦 Любой тип: <b>{wait_counts['any']}</b>"
         )
         if gender_counts["other"]:
             caption += (

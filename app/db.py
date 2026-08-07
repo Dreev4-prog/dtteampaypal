@@ -94,6 +94,19 @@ class Request(Base):
     working_bucket_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class PaypalStockWaitlist(Base):
+    __tablename__ = "paypal_stock_waitlist"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
+    gender: Mapped[str] = mapped_column(String(12), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        server_default=func.now(),
+    )
+
+
 class PaypalReturn(Base):
     __tablename__ = "paypal_returns"
 
@@ -576,6 +589,142 @@ async def get_user_profit_summary(user_id: int) -> dict[str, float | int | datet
             "last_at": last_at,
             "pending": float(pending or 0),
         }
+
+
+async def get_requestable_paypal_gender_counts() -> dict[str, int]:
+    """Stock available for NEW requests.
+
+    waiting_issue requests reserve one PayPal of their selected gender.
+    This prevents the bot from accepting more requests than the current
+    physical stock can satisfy before the admin issues them.
+    """
+    async with SessionLocal() as session:
+        free_rows = (
+            await session.execute(
+                select(PaypalTag.gender, func.count(PaypalTag.id))
+                .where(PaypalTag.status == "available")
+                .group_by(PaypalTag.gender)
+            )
+        ).all()
+        pending_rows = (
+            await session.execute(
+                select(Request.paypal_gender, func.count(Request.id))
+                .where(Request.status == "waiting_issue")
+                .group_by(Request.paypal_gender)
+            )
+        ).all()
+
+        free = {"male": 0, "female": 0}
+        pending = {"male": 0, "female": 0}
+
+        for gender, count in free_rows:
+            normalized = (gender or "").lower()
+            if normalized in free:
+                free[normalized] += int(count or 0)
+
+        for gender, count in pending_rows:
+            normalized = (gender or "").lower()
+            if normalized in pending:
+                pending[normalized] += int(count or 0)
+
+        male = max(0, free["male"] - pending["male"])
+        female = max(0, free["female"] - pending["female"])
+        return {
+            "male": male,
+            "female": female,
+            "total": male + female,
+            "free_male": free["male"],
+            "free_female": free["female"],
+            "reserved_male": pending["male"],
+            "reserved_female": pending["female"],
+        }
+
+
+async def subscribe_paypal_stock_waitlist(
+    user_id: int,
+    gender: str,
+) -> bool:
+    """Subscribe once to male/female/any stock replenishment."""
+    if gender not in {"male", "female", "any"}:
+        raise ValueError("Unsupported stock waitlist gender")
+
+    async with SessionLocal() as session:
+        existing = await session.scalar(
+            select(PaypalStockWaitlist).where(
+                PaypalStockWaitlist.user_id == user_id,
+                PaypalStockWaitlist.gender == gender,
+            )
+        )
+        if existing is not None:
+            return False
+
+        session.add(
+            PaypalStockWaitlist(
+                user_id=user_id,
+                gender=gender,
+            )
+        )
+        await session.commit()
+        return True
+
+
+async def list_paypal_stock_waiters(gender: str) -> list[int]:
+    """Users waiting for the selected gender or any PayPal."""
+    if gender not in {"male", "female"}:
+        return []
+    async with SessionLocal() as session:
+        rows = await session.scalars(
+            select(PaypalStockWaitlist.user_id)
+            .where(
+                PaypalStockWaitlist.gender.in_((gender, "any"))
+            )
+            .distinct()
+            .order_by(PaypalStockWaitlist.user_id)
+        )
+        return [int(user_id) for user_id in rows]
+
+
+async def clear_paypal_stock_waiter_after_notification(
+    user_id: int,
+    gender: str,
+) -> None:
+    """Remove only subscriptions satisfied by this notification."""
+    if gender not in {"male", "female"}:
+        return
+    async with SessionLocal() as session:
+        rows = list(
+            await session.scalars(
+                select(PaypalStockWaitlist).where(
+                    PaypalStockWaitlist.user_id == user_id,
+                    PaypalStockWaitlist.gender.in_((gender, "any")),
+                )
+            )
+        )
+        for row in rows:
+            await session.delete(row)
+        await session.commit()
+
+
+async def get_paypal_stock_waitlist_counts() -> dict[str, int]:
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(
+                    PaypalStockWaitlist.gender,
+                    func.count(PaypalStockWaitlist.id),
+                )
+                .group_by(PaypalStockWaitlist.gender)
+            )
+        ).all()
+        result = {"male": 0, "female": 0, "any": 0, "total": 0}
+        for gender, count in rows:
+            normalized = (gender or "").lower()
+            if normalized in result:
+                result[normalized] = int(count or 0)
+        result["total"] = (
+            result["male"] + result["female"] + result["any"]
+        )
+        return result
 
 
 async def count_available_tags() -> int:

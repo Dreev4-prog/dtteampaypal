@@ -564,6 +564,122 @@ def return_checked_menu(return_id: int) -> InlineKeyboardMarkup:
 
 
 
+def request_gender_choice_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
+    """Show only PayPal genders currently available for new requests."""
+    rows = []
+    gender_row = []
+
+    if counts.get("male", 0) > 0:
+        gender_row.append(
+            InlineKeyboardButton(
+                text=f"👨 Мужской ({counts['male']})",
+                callback_data="request_gender:male",
+            )
+        )
+    if counts.get("female", 0) > 0:
+        gender_row.append(
+            InlineKeyboardButton(
+                text=f"👩 Женский ({counts['female']})",
+                callback_data="request_gender:female",
+            )
+        )
+    if gender_row:
+        rows.append(gender_row)
+
+    if counts.get("male", 0) <= 0 and counts.get("female", 0) > 0:
+        rows.append([
+            InlineKeyboardButton(
+                text="🔔 Сообщить, когда будут мужские",
+                callback_data="paypal_stock_wait:male",
+            )
+        ])
+    if counts.get("female", 0) <= 0 and counts.get("male", 0) > 0:
+        rows.append([
+            InlineKeyboardButton(
+                text="🔔 Сообщить, когда будут женские",
+                callback_data="paypal_stock_wait:female",
+            )
+        ])
+
+    if counts.get("total", 0) <= 0:
+        rows.append([
+            InlineKeyboardButton(
+                text="🔔 Уведомить о пополнении",
+                callback_data="paypal_stock_wait:any",
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data="request_cancel",
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def paypal_stock_empty_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🔔 Уведомить о пополнении",
+                callback_data="paypal_stock_wait:any",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🏠 Главное меню",
+                callback_data="home",
+            )
+        ],
+    ])
+
+
+def paypal_stock_missing_menu(gender: str) -> InlineKeyboardMarkup:
+    label = (
+        "мужские"
+        if gender == "male"
+        else "женские"
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=f"🔔 Сообщить, когда будут {label}",
+                callback_data=f"paypal_stock_wait:{gender}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="💳 Попробовать другую заявку",
+                callback_data="paypal_request",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🏠 Главное меню",
+                callback_data="home",
+            )
+        ],
+    ])
+
+
+def paypal_stock_available_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="💳 Получить PayPal",
+                callback_data="paypal_request",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🏠 Главное меню",
+                callback_data="home",
+            )
+        ],
+    ])
+
+
 def gender_choice_menu(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👨 Мужской", callback_data=f"{prefix}:male"),
