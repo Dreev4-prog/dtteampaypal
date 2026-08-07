@@ -4178,16 +4178,84 @@ async def collect_notify_handler(callback: CallbackQuery) -> None:
             await callback.bot.send_message(req.user_id,
                 f"⚠️ <b>Через 30 минут администрация заберёт PayPal, которые ожидают оплаты</b>\n\n"
                 f"Дата выдачи: <b>{day}</b>\nPayPal: <code>{tag.tag if tag else '—'}</code>\nСумма: <b>{req.amount} €</b>\n\n"
-                "Выберите: он ещё нужен или его можно вернуть.", reply_markup=collection_choice_menu(req.id)); sent+=1
+                "Выберите действие: оплатили, PayPal ещё нужен или его можно вернуть.", reply_markup=collection_choice_menu(req.id)); sent+=1
         except Exception: pass
     await callback.answer(f"Уведомлено: {sent}", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("collect_keep:"))
 async def collect_keep_handler(callback: CallbackQuery) -> None:
-    req=await confirm_paypal_keep(int(callback.data.split(":")[1]), callback.from_user.id)
-    if req is None: await callback.answer("PayPal недоступен", show_alert=True); return
-    await callback.message.edit_text("✅ Подтверждено: этот PayPal вам ещё нужен."); await callback.answer()
+    request_id = int(callback.data.split(":", 1)[1])
+    before = await get_request(request_id)
+    if (
+        before is None
+        or before.user_id != callback.from_user.id
+        or before.status != "paypal_issued"
+    ):
+        await callback.answer("PayPal недоступен", show_alert=True)
+        return
+
+    previous_work_at = (
+        before.working_bucket_at
+        or before.processed_at
+        or before.updated_at
+        or before.created_at
+    )
+    req = await confirm_paypal_keep(
+        request_id,
+        callback.from_user.id,
+    )
+    if req is None:
+        await callback.answer("PayPal недоступен", show_alert=True)
+        return
+
+    tag = await get_paypal_tag(req.paypal_tag_id)
+    user = await get_user(req.user_id)
+    previous_local = as_moscow(previous_work_at)
+    current_local = as_moscow(req.working_bucket_at)
+    previous_day = (
+        previous_local.strftime("%d.%m.%Y")
+        if previous_local
+        else "—"
+    )
+    current_day = (
+        current_local.strftime("%d.%m.%Y")
+        if current_local
+        else "—"
+    )
+    username = (
+        f"@{user.username}"
+        if user and user.username
+        else f"ID {req.user_id}"
+    )
+
+    # Keep quick payment actions available after the user confirms they still
+    # need this PayPal.
+    await callback.message.edit_text(
+        "✅ <b>PayPal оставлен в работе</b>\n\n"
+        f"💳 <code>{tag.tag if tag else '—'}</code>\n"
+        f"📅 Перенесён в работу за: <b>{current_day} МСК</b>\n\n"
+        "Когда оплатите — нажмите <b>«✅ Я оплатил»</b>.",
+        reply_markup=paid_button(req.id),
+    )
+
+    admin_text = (
+        "🟢 <b>Пользователь оставил PayPal в работе</b>\n\n"
+        f"👤 {username}\n"
+        f"🆔 <code>{req.user_id}</code>\n"
+        f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+        f"💶 Сумма: <b>{req.amount} €</b>\n\n"
+        f"📅 Был в работе за: <b>{previous_day}</b>\n"
+        f"➡️ Перенесён в: <b>{current_day} МСК</b>\n\n"
+        "Теперь этот PayPal не попадёт в сбор за предыдущую дату."
+    )
+    for admin_id in settings.admin_ids:
+        try:
+            await callback.bot.send_message(admin_id, admin_text)
+        except Exception:
+            pass
+
+    await callback.answer("PayPal перенесён в сегодняшний день")
 
 
 @router.callback_query(F.data.startswith("collect_take_ask:"))
@@ -4478,6 +4546,7 @@ async def working_notify_confirm_handler(callback: CallbackQuery) -> None:
             f"Через <b>30 минут</b> PayPal <code>{tag.tag if tag else '—'}</code> будет возвращён в базу, "
             "если вы не завершите оплату.\n\n"
             "Если вы уже оплатили — нажмите <b>«✅ Я оплатил»</b>.\n"
+            "Если PayPal ещё нужен — нажмите <b>«🟢 Ещё нужен»</b>.\n"
             "Если PayPal больше не нужен — нажмите <b>«↩️ Вернуть PayPal»</b>.",
             reply_markup=collection_choice_menu(req.id),
         )

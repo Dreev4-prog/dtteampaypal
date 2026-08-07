@@ -875,6 +875,7 @@ def working_search_results_menu(requests: list) -> InlineKeyboardMarkup:
 def collection_choice_menu(request_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"user_paid:{request_id}")],
+        [InlineKeyboardButton(text="🟢 Ещё нужен", callback_data=f"collect_keep:{request_id}")],
         [InlineKeyboardButton(text="↩️ Вернуть PayPal", callback_data=f"collect_return_ask:{request_id}")],
     ])
 

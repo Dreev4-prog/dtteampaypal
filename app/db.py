@@ -91,6 +91,7 @@ class Request(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     collection_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     keep_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    working_bucket_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class PaypalReturn(Base):
@@ -235,6 +236,9 @@ async def init_db() -> None:
         # v1.6.4: возвраты и массовый сбор PayPal.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS collection_notified_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS keep_confirmed_at TIMESTAMP"))
+        # v2.3.1: отдельная дата группировки PayPal в разделе «В работе».
+        # Реальное время выдачи processed_at не переписывается.
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS working_bucket_at TIMESTAMP"))
         # v1.6.5: режим Start Work / Stop Work и редактируемые уведомления.
         await conn.execute(text("""
             INSERT INTO app_settings (key, value, updated_at) VALUES
@@ -427,6 +431,7 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
             req.status = "paypal_issued"
             req.processed_at = now
             req.updated_at = now
+            req.working_bucket_at = now
 
             # Happy Hours applies only to PayPal actually issued while the
             # manually launched campaign is active. Older PayPal never become
@@ -1514,6 +1519,7 @@ async def set_paypal_tag_status(tag_id: int, status: str) -> PaypalTag | None:
 async def get_working_dates() -> list[tuple[str, int]]:
     async with SessionLocal() as session:
         issued_expr = func.coalesce(
+            Request.working_bucket_at,
             Request.processed_at,
             Request.updated_at,
             Request.created_at,
@@ -1543,6 +1549,7 @@ async def get_working_dates() -> list[tuple[str, int]]:
 async def get_working_requests_by_date(day: str) -> list[Request]:
     async with SessionLocal() as session:
         issued_expr = func.coalesce(
+            Request.working_bucket_at,
             Request.processed_at,
             Request.updated_at,
             Request.created_at,
@@ -1758,25 +1765,51 @@ async def user_return_paypal_after_warning(
 
 
 async def confirm_paypal_keep(request_id: int, user_id: int) -> Request | None:
+    """Keep PayPal with the user and move it into the current working day.
+
+    processed_at remains the real issue timestamp. working_bucket_at controls
+    only the date grouping inside «PayPal в работе».
+    """
     async with SessionLocal() as session:
-        req = await session.get(Request, request_id)
-        if req is None or req.user_id != user_id or req.status != "paypal_issued":
+        req = await session.get(Request, request_id, with_for_update=True)
+        if (
+            req is None
+            or req.user_id != user_id
+            or req.status != "paypal_issued"
+        ):
             return None
-        req.keep_confirmed_at = datetime.utcnow()
-        await session.commit(); await session.refresh(req); return req
+
+        now = datetime.utcnow()
+        req.keep_confirmed_at = now
+        req.collection_notified_at = None
+        req.working_bucket_at = now
+        req.updated_at = now
+
+        await session.commit()
+        await session.refresh(req)
+        return req
 
 
 async def list_unconfirmed_collection(day: str) -> list[Request]:
     async with SessionLocal() as session:
+        working_expr = func.coalesce(
+            Request.working_bucket_at,
+            Request.processed_at,
+            Request.updated_at,
+            Request.created_at,
+        )
         rows = await session.scalars(
-            select(Request).join(PaypalTag, PaypalTag.id == Request.paypal_tag_id).where(
+            select(Request)
+            .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
+            .where(
                 PaypalTag.status == "issued",
                 func.to_char(
-                    PaypalTag.issued_at + text("INTERVAL '3 hours'"),
+                    working_expr + text("INTERVAL '3 hours'"),
                     'YYYY-MM-DD',
                 ) == day,
-                Request.status == "paypal_issued", Request.collection_notified_at.is_not(None),
-                Request.keep_confirmed_at.is_(None)
+                Request.status == "paypal_issued",
+                Request.collection_notified_at.is_not(None),
+                Request.keep_confirmed_at.is_(None),
             )
         )
         return list(rows)
