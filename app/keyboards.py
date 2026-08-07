@@ -254,8 +254,21 @@ def payments_list_menu(requests: list, filter_name: str, offset: int, page_size:
         icon = status_icons.get(req.status, "•")
         username = getattr(req, "_display_username", f"ID {req.user_id}")
         paypal_tag = getattr(req, "_display_tag", "—")
+
+        if filter_name == "payout":
+            withdraw_icon = "🟢" if getattr(req, "paypal_withdrawn_at", None) else "🔴"
+            withdraw_text = "ВЫВЕДЕНО" if getattr(req, "paypal_withdrawn_at", None) else "НЕ ВЫВЕДЕНО"
+            button_text = (
+                f"{withdraw_icon} {withdraw_text} · 👤 {username} · "
+                f"💳 {paypal_tag} · 💶 {req.amount} €"
+            )
+        else:
+            button_text = (
+                f"{icon} 👤 {username} · 💳 {paypal_tag} · 💶 {req.amount} €"
+            )
+
         rows.append([InlineKeyboardButton(
-            text=f"{icon} 👤 {username} · 💳 {paypal_tag} · 💶 {req.amount} €",
+            text=button_text,
             callback_data=f"payment_card:{req.id}:{filter_name}:{offset}",
         )])
     nav = []
@@ -283,7 +296,14 @@ def payments_list_menu(requests: list, filter_name: str, offset: int, page_size:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def payment_card_menu(request_id: int, user_id: int, status: str, filter_name: str = "all", offset: int = 0) -> InlineKeyboardMarkup:
+def payment_card_menu(
+    request_id: int,
+    user_id: int,
+    status: str,
+    filter_name: str = "all",
+    offset: int = 0,
+    paypal_withdrawn: bool = False,
+) -> InlineKeyboardMarkup:
     rows = []
     if status == "waiting_check":
         rows.append([
@@ -291,6 +311,20 @@ def payment_card_menu(request_id: int, user_id: int, status: str, filter_name: s
             InlineKeyboardButton(text="❌ Не найдено", callback_data=f"admin_not_found:{request_id}"),
         ])
     elif status == "payout_pending":
+        if not paypal_withdrawn:
+            rows.append([
+                InlineKeyboardButton(
+                    text="✅ Сделано — деньги выведены",
+                    callback_data=f"paypal_withdraw_done:{request_id}:{filter_name}:{offset}",
+                )
+            ])
+        else:
+            rows.append([
+                InlineKeyboardButton(
+                    text="🟢 Деньги уже выведены",
+                    callback_data=f"paypal_withdraw_info:{request_id}",
+                )
+            ])
         rows.append([
             InlineKeyboardButton(
                 text="💼 Открыть выплаты пользователя",

@@ -49,6 +49,8 @@ from app.db import (
     get_paypal_tag,
     get_payment_counts,
     list_payment_requests,
+    get_paypal_withdrawal_counts,
+    mark_paypal_withdrawn,
     confirm_payment,
     confirm_working_payment,
     mark_payment_not_found,
@@ -1934,9 +1936,16 @@ async def payments_list_handler(callback: CallbackQuery) -> None:
     }
     text = f"{titles.get(filter_name, titles['all'])}\nСтраница: <b>{offset // page_size + 1}</b>\n\n"
     if filter_name == "payout":
+        withdrawal_counts = await get_paypal_withdrawal_counts()
         text += (
-            "Здесь показаны отдельные PayPal, на которых подтверждены деньги. "
-            "После общей выплаты пользователю связанные заявки исчезнут из этого списка автоматически."
+            f"🔴 Не выведено: <b>{withdrawal_counts['not_withdrawn']}</b>\n"
+            f"🟢 Выведено: <b>{withdrawal_counts['withdrawn']}</b>\n"
+            f"📦 Всего: <b>{withdrawal_counts['total']}</b>\n\n"
+        )
+        text += (
+            "Откройте платёж и нажмите <b>«✅ Сделано»</b>, когда деньги "
+            "выведены с конкретного PayPal. Заявка останется здесь до общей "
+            "выплаты пользователю."
             if requests
             else "Сейчас нет подтверждённых платежей, деньги с которых нужно вывести."
         )
@@ -1990,9 +1999,28 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
         f"📤 PayPal выдан: {format_dt(req.processed_at)}\n"
         f"✅ Нажал «Я оплатил»: {format_dt(req.paid_clicked_at)}\n"
         f"🔎 Оплата подтверждена: {format_dt(req.payment_confirmed_at)}\n"
-        f"💸 Выплата клиенту: {format_dt(req.payout_at)}"
+        + (
+            (
+                f"🟢 Вывод с PayPal: <b>ВЫВЕДЕНО</b>\n"
+                f"🕒 Выведено: {format_dt(req.paypal_withdrawn_at)}\n"
+            )
+            if req.status == "payout_pending" and req.paypal_withdrawn_at is not None
+            else (
+                "🔴 Вывод с PayPal: <b>НЕ ВЫВЕДЕНО</b>\n"
+                if req.status == "payout_pending"
+                else ""
+            )
+        )
+        + f"💸 Выплата клиенту: {format_dt(req.payout_at)}"
     )
-    markup = payment_card_menu(req.id, req.user_id, req.status, filter_name, offset)
+    markup = payment_card_menu(
+        req.id,
+        req.user_id,
+        req.status,
+        filter_name,
+        offset,
+        paypal_withdrawn=req.paypal_withdrawn_at is not None,
+    )
     if callback.message.photo:
         try:
             await callback.message.delete()
@@ -2002,6 +2030,88 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
     else:
         await callback.message.edit_text(text, reply_markup=markup)
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("paypal_withdraw_done:"))
+async def paypal_withdraw_done_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    _, request_id_raw, filter_name, offset_raw = callback.data.split(":", 3)
+    request_id = int(request_id_raw)
+    offset = int(offset_raw)
+
+    req, result = await mark_paypal_withdrawn(
+        request_id,
+        callback.from_user.id,
+    )
+    if req is None:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    if result == "not_pending":
+        await callback.answer(
+            "Заявка уже не находится в разделе «Вывести деньги»",
+            show_alert=True,
+        )
+        return
+    if result == "already_done":
+        await callback.answer("Уже отмечено как выведено", show_alert=True)
+        return
+
+    user = await get_user(req.user_id)
+    tag = await get_paypal_tag(req.paypal_tag_id)
+    username = f"@{user.username}" if user and user.username else "не указан"
+
+    text = (
+        f"💰 <b>Платёжная заявка #{req.id}</b>\n\n"
+        f"👤 {user.full_name if user and user.full_name else 'не указано'}\n"
+        f"Username: {username}\n"
+        f"🆔 <code>{req.user_id}</code>\n\n"
+        f"💳 PayPal: <code>{tag.tag if tag else 'не найден'}</code>\n"
+        f"💶 Сумма: <b>{req.amount} €</b>\n"
+        + (
+            f"📊 Процент: <b>{req.payout_percent}%</b>\n"
+            f"💰 Начислено пользователю: <b>{float(req.payout_amount):.2f} USDT</b>\n"
+            if req.payout_percent is not None and req.payout_amount is not None
+            else ""
+        )
+        + "\n🟢 Вывод с PayPal: <b>ВЫВЕДЕНО</b>\n"
+        f"🕒 Выведено: {format_dt(req.paypal_withdrawn_at)}\n\n"
+        "Заявка останется в разделе <b>«💸 Вывести деньги»</b> "
+        "до общей выплаты пользователю."
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=payment_card_menu(
+            req.id,
+            req.user_id,
+            req.status,
+            filter_name,
+            offset,
+            paypal_withdrawn=True,
+        ),
+    )
+    await callback.answer("🟢 Отмечено как выведено")
+
+
+@router.callback_query(F.data.startswith("paypal_withdraw_info:"))
+async def paypal_withdraw_info_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    request_id = int(callback.data.split(":", 1)[1])
+    req = await get_request(request_id)
+    if req is None or req.paypal_withdrawn_at is None:
+        await callback.answer("Статус вывода не найден", show_alert=True)
+        return
+
+    await callback.answer(
+        f"Деньги выведены: {format_dt(req.paypal_withdrawn_at)}",
+        show_alert=True,
+    )
 
 
 @router.callback_query(F.data.startswith("payment_amount_edit:"))

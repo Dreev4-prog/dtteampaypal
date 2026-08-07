@@ -59,6 +59,8 @@ class Request(Base):
     payout_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     payout_percent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     payout_amount: Mapped[Optional[float]] = mapped_column(Numeric(12, 2), nullable=True)
+    paypal_withdrawn_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    paypal_withdrawn_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     collection_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -167,6 +169,9 @@ async def init_db() -> None:
         # v1.6: автоматический расчёт процентов и суммы к выплате.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_percent INTEGER"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_amount NUMERIC(12,2)"))
+        # v2.2.24: внутренний статус вывода денег с конкретного PayPal.
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paypal_withdrawn_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paypal_withdrawn_by BIGINT"))
         # v1.6.8: изображение, прикреплённое к отдельному PayPal.
         await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS photo_file_id VARCHAR(512)"))
         # v1.6.9: пол PayPal и GS-архив.
@@ -618,13 +623,72 @@ async def list_payment_requests(filter_name: str, offset: int = 0, limit: int = 
             Request.payout_at >= paid_cutoff,
         )
     async with SessionLocal() as session:
+        if filter_name == "payout":
+            query = query.order_by(
+                Request.paypal_withdrawn_at.is_not(None).asc(),
+                Request.updated_at.desc(),
+                Request.id.desc(),
+            )
+        else:
+            query = query.order_by(Request.updated_at.desc(), Request.id.desc())
+
         rows = list(await session.scalars(
             query
-            .order_by(Request.updated_at.desc(), Request.id.desc())
             .offset(offset)
             .limit(limit + 1)
         ))
         return rows[:limit], len(rows) > limit
+
+
+async def get_paypal_withdrawal_counts() -> dict[str, int]:
+    """Counts for the admin-only «Вывести деньги» control list."""
+    async with SessionLocal() as session:
+        not_withdrawn = int(
+            await session.scalar(
+                select(func.count(Request.id)).where(
+                    Request.status == "payout_pending",
+                    Request.paypal_withdrawn_at.is_(None),
+                )
+            )
+            or 0
+        )
+        withdrawn = int(
+            await session.scalar(
+                select(func.count(Request.id)).where(
+                    Request.status == "payout_pending",
+                    Request.paypal_withdrawn_at.is_not(None),
+                )
+            )
+            or 0
+        )
+        return {
+            "not_withdrawn": not_withdrawn,
+            "withdrawn": withdrawn,
+            "total": not_withdrawn + withdrawn,
+        }
+
+
+async def mark_paypal_withdrawn(
+    request_id: int,
+    admin_id: int,
+) -> tuple[Request | None, str]:
+    """Mark money as withdrawn from this PayPal without completing user payout."""
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if req is None:
+            return None, "not_found"
+        if req.status != "payout_pending":
+            return req, "not_pending"
+        if req.paypal_withdrawn_at is not None:
+            return req, "already_done"
+
+        req.paypal_withdrawn_at = datetime.utcnow()
+        req.paypal_withdrawn_by = admin_id
+        req.updated_at = datetime.utcnow()
+
+        await session.commit()
+        await session.refresh(req)
+        return req, "done"
 
 
 async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
