@@ -1,11 +1,33 @@
 from datetime import date, datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.config import settings
+
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+UTC_TZ = ZoneInfo("UTC")
+
+
+def _moscow_day_utc_bounds(day: date) -> tuple[datetime, datetime]:
+    start_msk = datetime.combine(
+        day,
+        datetime.min.time(),
+        tzinfo=MOSCOW_TZ,
+    )
+    end_msk = start_msk + timedelta(days=1)
+    return (
+        start_msk.astimezone(UTC_TZ).replace(tzinfo=None),
+        end_msk.astimezone(UTC_TZ).replace(tzinfo=None),
+    )
+
+
+def _moscow_today() -> date:
+    return datetime.now(UTC_TZ).astimezone(MOSCOW_TZ).date()
 
 
 class Base(DeclarativeBase):
@@ -61,6 +83,10 @@ class Request(Base):
     payout_amount: Mapped[Optional[float]] = mapped_column(Numeric(12, 2), nullable=True)
     paypal_withdrawn_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     paypal_withdrawn_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    happy_hours_campaign_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    happy_hours_percent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    happy_hours_locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    happy_hours_applied: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     collection_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -106,6 +132,24 @@ class ManualPayout(Base):
     admin_id: Mapped[int] = mapped_column(BigInteger)
     source_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+
+
+class HappyHoursCampaign(Base):
+    __tablename__ = "happy_hours_campaigns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    start_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    end_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    min_amount: Mapped[int] = mapped_column(Integer)
+    percent: Mapped[int] = mapped_column(Integer)
+    broadcast_text: Mapped[str] = mapped_column(String(4096))
+    photo_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    is_enabled: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    activated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    activated_by: Mapped[int] = mapped_column(BigInteger)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    ended_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class RateRule(Base):
@@ -172,6 +216,13 @@ async def init_db() -> None:
         # v2.2.24: внутренний статус вывода денег с конкретного PayPal.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paypal_withdrawn_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paypal_withdrawn_by BIGINT"))
+        # v2.3.0: Happy Hours snapshot fields on requests.
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS happy_hours_campaign_id INTEGER"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS happy_hours_percent INTEGER"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS happy_hours_locked_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS happy_hours_applied INTEGER DEFAULT 0"))
+        await conn.execute(text("UPDATE requests SET happy_hours_applied = 0 WHERE happy_hours_applied IS NULL"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_requests_happy_hours_campaign_id ON requests (happy_hours_campaign_id)"))
         # v1.6.8: изображение, прикреплённое к отдельному PayPal.
         await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS photo_file_id VARCHAR(512)"))
         # v1.6.9: пол PayPal и GS-архив.
@@ -196,6 +247,17 @@ async def init_db() -> None:
             ('content_home_image', '', CURRENT_TIMESTAMP),
             ('content_paypal_text', '━━━━━━━━━━━━━━━━━━\n<b>💳 НОВАЯ ЗАЯВКА</b>\n━━━━━━━━━━━━━━━━━━\n\nВведите необходимую сумму в евро одним числом.\n\nПример: <code>150</code>\n\nСледующий шаг — выбор типа PayPal\n\n━━━━━━━━━━━━━━━━━━', CURRENT_TIMESTAMP),
             ('content_support_text', '🆘 <b>ПОДДЕРЖКА</b>\n\nЕсли у вас возникли вопросы,\nобратитесь в службу поддержки.\n\n💬 <b>Чат поддержки:</b>\n@workzin\n@profitgeld', CURRENT_TIMESTAMP)
+            ON CONFLICT (key) DO NOTHING
+        """))
+        # v2.3.0: Happy Hours draft configuration. Times are entered/displayed as Europe/Moscow.
+        await conn.execute(text("""
+            INSERT INTO app_settings (key, value, updated_at) VALUES
+            ('happy_hours_start_time', '13:00', CURRENT_TIMESTAMP),
+            ('happy_hours_end_time', '17:00', CURRENT_TIMESTAMP),
+            ('happy_hours_min_amount', '100', CURRENT_TIMESTAMP),
+            ('happy_hours_percent', '80', CURRENT_TIMESTAMP),
+            ('happy_hours_text', '🔥 <b>СЧАСТЛИВЫЕ ЧАСЫ DT TEAM</b>\n\nТолько с {start} до {end} МСК!\n\n💶 От {min_amount} €\n🚀 Выплата — {percent}%\n\nПолучите PayPal во время акции и отправьте оплату на проверку до {end} МСК, чтобы повышенный процент зафиксировался.', CURRENT_TIMESTAMP),
+            ('happy_hours_photo', '', CURRENT_TIMESTAMP)
             ON CONFLICT (key) DO NOTHING
         """))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_paypal_returns_status ON paypal_returns (status)"))
@@ -356,14 +418,33 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
             if tag is None:
                 return req, None
 
+            now = datetime.utcnow()
             tag.status = "issued"
             tag.issued_to_user_id = req.user_id
-            tag.issued_at = datetime.utcnow()
+            tag.issued_at = now
 
             req.paypal_tag_id = tag.id
             req.status = "paypal_issued"
-            req.processed_at = datetime.utcnow()
-            req.updated_at = datetime.utcnow()
+            req.processed_at = now
+            req.updated_at = now
+
+            # Happy Hours applies only to PayPal actually issued while the
+            # manually launched campaign is active. Older PayPal never become
+            # promo-eligible retroactively.
+            campaign = await session.scalar(
+                select(HappyHoursCampaign)
+                .where(
+                    HappyHoursCampaign.is_enabled == 1,
+                    HappyHoursCampaign.start_at <= now,
+                    HappyHoursCampaign.end_at > now,
+                )
+                .order_by(HappyHoursCampaign.id.desc())
+                .limit(1)
+            )
+            req.happy_hours_campaign_id = campaign.id if campaign else None
+            req.happy_hours_percent = None
+            req.happy_hours_locked_at = None
+            req.happy_hours_applied = 0
 
         await session.refresh(req)
         await session.refresh(tag)
@@ -384,9 +465,10 @@ async def update_request_amount(request_id: int, amount: int, user_id: int | Non
             return None
         req.amount = amount
         if req.status in {"payout_pending", "paid_out"}:
-            percent = await _get_rate_percent(session, amount)
+            percent, is_happy = await _get_effective_request_rate(session, req)
             req.payout_percent = percent
             req.payout_amount = round(amount * percent / 100, 2) if percent is not None else None
+            req.happy_hours_applied = 1 if is_happy else 0
         req.updated_at = datetime.utcnow()
         await session.commit()
         await session.refresh(req)
@@ -395,12 +477,36 @@ async def update_request_amount(request_id: int, amount: int, user_id: int | Non
 
 async def mark_paid_by_user(request_id: int, user_id: int) -> bool:
     async with SessionLocal() as session:
-        req = await session.get(Request, request_id)
+        req = await session.get(Request, request_id, with_for_update=True)
         if req is None or req.user_id != user_id or req.status != "paypal_issued":
             return False
+
+        now = datetime.utcnow()
         req.status = "waiting_check"
-        req.paid_clicked_at = datetime.utcnow()
-        req.updated_at = datetime.utcnow()
+        req.paid_clicked_at = now
+        req.updated_at = now
+
+        # A previously locked Happy Hours rate survives a later re-check.
+        # Otherwise lock it only when ALL conditions are true:
+        # PayPal was issued during this campaign, amount meets the threshold,
+        # and the user sends the payment to check before the campaign ends.
+        if req.happy_hours_percent is None and req.happy_hours_campaign_id is not None:
+            campaign = await session.get(
+                HappyHoursCampaign,
+                req.happy_hours_campaign_id,
+            )
+            if (
+                campaign is not None
+                and campaign.is_enabled == 1
+                # campaign_id is assigned only by issue_paypal while the
+                # campaign is active, so it is the authoritative proof that
+                # this PayPal was taken during Happy Hours.
+                and campaign.start_at <= now < campaign.end_at
+                and req.amount >= campaign.min_amount
+            ):
+                req.happy_hours_percent = campaign.percent
+                req.happy_hours_locked_at = now
+
         await session.commit()
         return True
 
@@ -696,12 +802,13 @@ async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
         req = await session.get(Request, request_id, with_for_update=True)
         if req is None or req.status != "waiting_check":
             return None
-        percent = await _get_rate_percent(session, req.amount)
+        percent, is_happy = await _get_effective_request_rate(session, req)
         if percent is None:
             return None
         req.status = "payout_pending"
         req.payout_percent = percent
         req.payout_amount = round(req.amount * percent / 100, 2)
+        req.happy_hours_applied = 1 if is_happy else 0
         req.payment_confirmed_at = datetime.utcnow()
         req.payment_confirmed_by = admin_id
         req.updated_at = datetime.utcnow()
@@ -735,6 +842,7 @@ async def confirm_working_payment(request_id: int, admin_id: int) -> Request | N
         req.status = "payout_pending"
         req.payout_percent = percent
         req.payout_amount = round(req.amount * percent / 100, 2)
+        req.happy_hours_applied = 0
         req.payment_confirmed_at = now
         req.payment_confirmed_by = admin_id
         req.updated_at = now
@@ -838,6 +946,31 @@ async def _get_rate_percent(session: AsyncSession, amount: int) -> int | None:
     )
 
 
+async def _get_effective_request_rate(
+    session: AsyncSession,
+    req: Request,
+) -> tuple[int | None, bool]:
+    """Return rate for a request, respecting a Happy Hours snapshot."""
+    if req.happy_hours_percent is not None and req.happy_hours_campaign_id is not None:
+        campaign = await session.get(HappyHoursCampaign, req.happy_hours_campaign_id)
+        if campaign is not None and req.amount >= campaign.min_amount:
+            return int(req.happy_hours_percent), True
+
+    return await _get_rate_percent(session, req.amount), False
+
+
+async def get_effective_rate_for_request(
+    request_id: int,
+) -> tuple[int | None, float | None, bool]:
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id)
+        if req is None:
+            return None, None, False
+        percent, is_happy = await _get_effective_request_rate(session, req)
+        payout = round(req.amount * percent / 100, 2) if percent is not None else None
+        return percent, payout, is_happy
+
+
 async def get_rate_for_amount(amount: int) -> tuple[int | None, float | None]:
     async with SessionLocal() as session:
         percent = await _get_rate_percent(session, amount)
@@ -874,6 +1007,168 @@ async def delete_rate_rule(rule_id: int) -> bool:
         await session.delete(rule)
         await session.commit()
         return True
+
+
+async def get_happy_hours_campaign(
+    campaign_id: int | None,
+) -> HappyHoursCampaign | None:
+    if campaign_id is None:
+        return None
+    async with SessionLocal() as session:
+        return await session.get(HappyHoursCampaign, campaign_id)
+
+
+async def get_open_happy_hours_campaign(
+    now: datetime | None = None,
+) -> HappyHoursCampaign | None:
+    now = now or datetime.utcnow()
+    async with SessionLocal() as session:
+        return await session.scalar(
+            select(HappyHoursCampaign)
+            .where(
+                HappyHoursCampaign.is_enabled == 1,
+                HappyHoursCampaign.end_at > now,
+            )
+            .order_by(HappyHoursCampaign.id.desc())
+            .limit(1)
+        )
+
+
+async def get_current_happy_hours_campaign(
+    now: datetime | None = None,
+) -> HappyHoursCampaign | None:
+    now = now or datetime.utcnow()
+    async with SessionLocal() as session:
+        return await session.scalar(
+            select(HappyHoursCampaign)
+            .where(
+                HappyHoursCampaign.is_enabled == 1,
+                HappyHoursCampaign.start_at <= now,
+                HappyHoursCampaign.end_at > now,
+            )
+            .order_by(HappyHoursCampaign.id.desc())
+            .limit(1)
+        )
+
+
+async def create_happy_hours_campaign(
+    start_at: datetime,
+    end_at: datetime,
+    min_amount: int,
+    percent: int,
+    broadcast_text: str,
+    photo_file_id: str | None,
+    admin_id: int,
+) -> tuple[HappyHoursCampaign | None, str]:
+    now = datetime.utcnow()
+    async with SessionLocal() as session:
+        async with session.begin():
+            # Expired campaigns never block a new manual launch.
+            stale = list(await session.scalars(
+                select(HappyHoursCampaign).where(
+                    HappyHoursCampaign.is_enabled == 1,
+                    HappyHoursCampaign.end_at <= now,
+                )
+            ))
+            for item in stale:
+                item.is_enabled = 0
+                item.ended_at = item.ended_at or item.end_at
+
+            existing = await session.scalar(
+                select(HappyHoursCampaign)
+                .where(
+                    HappyHoursCampaign.is_enabled == 1,
+                    HappyHoursCampaign.end_at > now,
+                )
+                .order_by(HappyHoursCampaign.id.desc())
+                .limit(1)
+                .with_for_update()
+            )
+            if existing is not None:
+                return None, "already_open"
+
+            campaign = HappyHoursCampaign(
+                start_at=start_at,
+                end_at=end_at,
+                min_amount=min_amount,
+                percent=percent,
+                broadcast_text=broadcast_text,
+                photo_file_id=photo_file_id or None,
+                is_enabled=1,
+                activated_at=now,
+                activated_by=admin_id,
+            )
+            session.add(campaign)
+
+        await session.refresh(campaign)
+        return campaign, "created"
+
+
+async def stop_happy_hours_campaign(
+    admin_id: int,
+) -> HappyHoursCampaign | None:
+    now = datetime.utcnow()
+    async with SessionLocal() as session:
+        campaign = await session.scalar(
+            select(HappyHoursCampaign)
+            .where(
+                HappyHoursCampaign.is_enabled == 1,
+                HappyHoursCampaign.end_at > now,
+            )
+            .order_by(HappyHoursCampaign.id.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        if campaign is None:
+            return None
+        campaign.is_enabled = 0
+        campaign.ended_at = now
+        campaign.ended_by = admin_id
+        await session.commit()
+        await session.refresh(campaign)
+        return campaign
+
+
+async def list_happy_hours_campaigns(limit: int = 10) -> list[HappyHoursCampaign]:
+    async with SessionLocal() as session:
+        return list(await session.scalars(
+            select(HappyHoursCampaign)
+            .order_by(HappyHoursCampaign.id.desc())
+            .limit(limit)
+        ))
+
+
+async def get_happy_hours_stats(campaign_id: int) -> dict[str, float | int]:
+    async with SessionLocal() as session:
+        issued = int(await session.scalar(
+            select(func.count(Request.id)).where(
+                Request.happy_hours_campaign_id == campaign_id
+            )
+        ) or 0)
+        locked = int(await session.scalar(
+            select(func.count(Request.id)).where(
+                Request.happy_hours_campaign_id == campaign_id,
+                Request.happy_hours_percent.is_not(None),
+            )
+        ) or 0)
+        applied = int(await session.scalar(
+            select(func.count(Request.id)).where(
+                Request.happy_hours_campaign_id == campaign_id,
+                Request.happy_hours_applied == 1,
+            )
+        ) or 0)
+        turnover = float(await session.scalar(
+            select(func.coalesce(func.sum(Request.amount), 0)).where(
+                Request.happy_hours_campaign_id == campaign_id,
+                Request.happy_hours_applied == 1,
+            )
+        ) or 0)
+        return {
+            "issued": issued,
+            "locked": locked,
+            "applied": applied,
+            "turnover": turnover,
+        }
 
 
 async def get_finance_summary() -> dict[str, float | int]:
@@ -1223,7 +1518,10 @@ async def get_working_dates() -> list[tuple[str, int]]:
             Request.updated_at,
             Request.created_at,
         )
-        day_expr = func.to_char(issued_expr, "YYYY-MM-DD")
+        day_expr = func.to_char(
+            issued_expr + text("INTERVAL '3 hours'"),
+            "YYYY-MM-DD",
+        )
         rows = (
             await session.execute(
                 select(
@@ -1255,7 +1553,10 @@ async def get_working_requests_by_date(day: str) -> list[Request]:
                 .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
                 .join(User, User.id == Request.user_id)
                 .where(
-                    func.to_char(issued_expr, "YYYY-MM-DD") == day,
+                    func.to_char(
+                        issued_expr + text("INTERVAL '3 hours'"),
+                        "YYYY-MM-DD",
+                    ) == day,
                     Request.status == "paypal_issued",
                 )
                 .order_by(issued_expr.asc(), Request.id.asc())
@@ -1469,7 +1770,11 @@ async def list_unconfirmed_collection(day: str) -> list[Request]:
     async with SessionLocal() as session:
         rows = await session.scalars(
             select(Request).join(PaypalTag, PaypalTag.id == Request.paypal_tag_id).where(
-                PaypalTag.status == "issued", func.to_char(PaypalTag.issued_at, 'YYYY-MM-DD') == day,
+                PaypalTag.status == "issued",
+                func.to_char(
+                    PaypalTag.issued_at + text("INTERVAL '3 hours'"),
+                    'YYYY-MM-DD',
+                ) == day,
                 Request.status == "paypal_issued", Request.collection_notified_at.is_not(None),
                 Request.keep_confirmed_at.is_(None)
             )
@@ -1515,7 +1820,10 @@ async def bulk_delete_working_day(day: str, admin_id: int) -> list[tuple[int, st
         rows = (await session.execute(
             select(Request, PaypalTag).join(PaypalTag, PaypalTag.id == Request.paypal_tag_id).where(
                 PaypalTag.status == "issued",
-                func.to_char(PaypalTag.issued_at, "YYYY-MM-DD") == day,
+                func.to_char(
+                    PaypalTag.issued_at + text("INTERVAL '3 hours'"),
+                    "YYYY-MM-DD",
+                ) == day,
                 Request.status == "paypal_issued",
             ).with_for_update()
         )).all()
@@ -1626,13 +1934,19 @@ async def get_dashboard_summary() -> dict:
     async with SessionLocal() as session:
         async def scalar(stmt):
             return (await session.scalar(stmt)) or 0
-        today = datetime.utcnow().date()
+        today_start, today_end = _moscow_day_utc_bounds(_moscow_today())
         return {
             "available": await scalar(select(func.count(PaypalTag.id)).where(PaypalTag.status == "available")),
             "working": await scalar(select(func.count(Request.id)).where(Request.status == "paypal_issued")),
             "waiting_check": await scalar(select(func.count(Request.id)).where(Request.status == "waiting_check")),
             "payout_pending": await scalar(select(func.count(Request.id)).where(Request.status == "payout_pending")),
-            "paid_today": await scalar(select(func.count(Request.id)).where(Request.status == "paid_out", func.date(Request.payout_at) == today)),
+            "paid_today": await scalar(
+                select(func.count(Request.id)).where(
+                    Request.status == "paid_out",
+                    Request.payout_at >= today_start,
+                    Request.payout_at < today_end,
+                )
+            ),
             "gs": await scalar(select(func.count(PaypalTag.id)).where(PaypalTag.status == "gs")),
             "users": await scalar(select(func.count(User.id)).where(User.status == "approved")),
             "queue": await scalar(select(func.count(Request.id)).where(Request.status == "waiting_issue")),
@@ -1676,16 +1990,24 @@ async def global_admin_search(query: str, limit: int = 30) -> dict:
 async def get_period_statistics(period: str) -> dict:
     now = datetime.utcnow()
     start = None
-    if period == "today": start = datetime.combine(now.date(), datetime.min.time())
+    end = None
+    today_msk = _moscow_today()
+    if period == "today":
+        start, end = _moscow_day_utc_bounds(today_msk)
     elif period == "yesterday":
-        start = datetime.combine(now.date() - timedelta(days=1), datetime.min.time())
-        end = datetime.combine(now.date(), datetime.min.time())
-    elif period == "7d": start = now - timedelta(days=7)
-    elif period == "30d": start = now - timedelta(days=30)
+        start, end = _moscow_day_utc_bounds(
+            today_msk - timedelta(days=1)
+        )
+    elif period == "7d":
+        start = now - timedelta(days=7)
+    elif period == "30d":
+        start = now - timedelta(days=30)
     async with SessionLocal() as session:
         conditions = []
-        if start: conditions.append(Request.created_at >= start)
-        if period == "yesterday": conditions.append(Request.created_at < end)
+        if start:
+            conditions.append(Request.created_at >= start)
+        if end:
+            conditions.append(Request.created_at < end)
         stmt = select(Request).where(*conditions)
         requests = list(await session.scalars(stmt))
         return {

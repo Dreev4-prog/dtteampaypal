@@ -42,6 +42,7 @@ def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeybo
             InlineKeyboardButton(text="⚙️ ПРОЦЕНТЫ", callback_data="rates_menu"),
             InlineKeyboardButton(text="▶️ START / ⏹ STOP", callback_data="work_control"),
         ],
+        [InlineKeyboardButton(text="🔥 HAPPY HOURS", callback_data="happy_hours_menu")],
         [InlineKeyboardButton(text="🔍 ОБЩИЙ ПОИСК", callback_data="global_search")],
         [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="admin_home")],
     ])
@@ -373,6 +374,68 @@ def rates_menu(rules: list) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def happy_hours_menu(is_open: bool, has_photo: bool = False) -> InlineKeyboardMarkup:
+    if is_open:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛑 Завершить Happy Hours", callback_data="happy_hours_stop")],
+            [InlineKeyboardButton(text="🔄 Обновить статистику", callback_data="happy_hours_menu")],
+            [InlineKeyboardButton(text="📜 История акций", callback_data="happy_hours_history")],
+            [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
+        ])
+
+    photo_label = "🖼 Картинка ✅" if has_photo else "🖼 Картинка"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Запустить Happy Hours", callback_data="happy_hours_launch_ask")],
+        [
+            InlineKeyboardButton(text="🕐 Начало", callback_data="happy_hours_edit_start"),
+            InlineKeyboardButton(text="🕔 Окончание", callback_data="happy_hours_edit_end"),
+        ],
+        [
+            InlineKeyboardButton(text="💶 Минимальная сумма", callback_data="happy_hours_edit_min"),
+            InlineKeyboardButton(text="📈 Процент", callback_data="happy_hours_edit_percent"),
+        ],
+        [
+            InlineKeyboardButton(text="📝 Текст рассылки", callback_data="happy_hours_edit_text"),
+            InlineKeyboardButton(text=photo_label, callback_data="happy_hours_edit_photo"),
+        ],
+        [InlineKeyboardButton(text="👁 Предпросмотр рассылки", callback_data="happy_hours_preview")],
+        [InlineKeyboardButton(text="📜 История акций", callback_data="happy_hours_history")],
+        [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
+    ])
+
+
+def happy_hours_cancel_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="happy_hours_menu")]
+    ])
+
+
+def happy_hours_photo_menu(has_photo: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if has_photo:
+        rows.append([
+            InlineKeyboardButton(
+                text="🗑 Удалить картинку",
+                callback_data="happy_hours_photo_delete",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="happy_hours_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def happy_hours_launch_confirm_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Запустить и разослать", callback_data="happy_hours_launch_confirm")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="happy_hours_menu")],
+    ])
+
+
+def happy_hours_preview_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К Happy Hours", callback_data="happy_hours_menu")]
+    ])
+
+
 def finance_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="finance_menu")],
@@ -408,7 +471,10 @@ def my_paypals_waiting_list_menu(requests: list) -> InlineKeyboardMarkup:
         paypal_tag = getattr(req, "_display_tag", "—")
         rows.append([
             InlineKeyboardButton(
-                text=f"💳 {paypal_tag} · 💶 {req.amount} €",
+                text=(
+                    f"{'🔥 ' if getattr(req, '_happy_hours_badge', False) else ''}"
+                    f"💳 {paypal_tag} · 💶 {req.amount} €"
+                ),
                 callback_data=f"my_paypal_card:{req.id}",
             )
         ])
@@ -964,7 +1030,7 @@ def payout_history_menu(rows, offset: int, has_next: bool, page_size: int = 10) 
     buttons = []
     for payout in rows:
         provider = "🤖" if payout.provider == "cryptobot" else "🚀"
-        date = payout.created_at.strftime("%d.%m.%Y") if payout.created_at else "—"
+        date = getattr(payout, "_display_date", "—")
         buttons.append([InlineKeyboardButton(
             text=f"✅ {date} · {float(payout.total_amount):.2f} USDT · {provider}",
             callback_data=f"payout_history_card:{payout.id}",

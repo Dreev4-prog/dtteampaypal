@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from io import BytesIO
 
@@ -58,6 +58,13 @@ from app.db import (
     mark_payout_done,
     update_request_amount,
     get_rate_for_amount,
+    get_effective_rate_for_request,
+    get_happy_hours_campaign,
+    get_open_happy_hours_campaign,
+    create_happy_hours_campaign,
+    stop_happy_hours_campaign,
+    list_happy_hours_campaigns,
+    get_happy_hours_stats,
     list_rate_rules,
     upsert_rate_rule,
     delete_rate_rule,
@@ -102,6 +109,11 @@ from app.keyboards import (
     user_amount_confirmation_menu,
     admin_amount_confirmation_menu,
     rates_menu,
+    happy_hours_menu,
+    happy_hours_cancel_menu,
+    happy_hours_photo_menu,
+    happy_hours_launch_confirm_menu,
+    happy_hours_preview_menu,
     finance_menu,
     rate_cancel_menu,
     my_paypals_menu,
@@ -154,6 +166,15 @@ class ManualPayoutForm(StatesGroup):
 class RateForm(StatesGroup):
     add_rule = State()
     edit_rule = State()
+
+
+class HappyHoursForm(StatesGroup):
+    start_time = State()
+    end_time = State()
+    min_amount = State()
+    percent = State()
+    text = State()
+    photo = State()
 
 
 class ReturnForm(StatesGroup):
@@ -704,9 +725,21 @@ async def my_paypals_list(callback: CallbackQuery) -> None:
             )
             reply_markup = my_paypals_back_menu()
         else:
+            now_utc = datetime.utcnow()
             for req in requests:
                 tag = await get_paypal_tag(req.paypal_tag_id)
                 req._display_tag = tag.tag if tag else "PayPal не найден"
+                campaign = await get_happy_hours_campaign(
+                    req.happy_hours_campaign_id
+                )
+                req._happy_hours_badge = bool(
+                    req.happy_hours_percent is not None
+                    or (
+                        campaign is not None
+                        and campaign.is_enabled == 1
+                        and campaign.start_at <= now_utc < campaign.end_at
+                    )
+                )
 
             text = (
                 f"<b>{title}</b>\n\n"
@@ -748,6 +781,15 @@ async def my_paypals_list(callback: CallbackQuery) -> None:
             blocks.append(
                 f"📌 Статус: <b>{status_names.get(req.status, req.status)}</b>"
             )
+            if req.happy_hours_applied:
+                blocks.append(
+                    f"🔥 Happy Hours применён: <b>{req.payout_percent}%</b>"
+                )
+            elif req.happy_hours_percent is not None:
+                blocks.append(
+                    f"🔥 Happy Hours зафиксирован: "
+                    f"<b>{req.happy_hours_percent}%</b>"
+                )
             blocks.append("━━━━━━━━━━━━")
         text = "\n".join(blocks)
 
@@ -780,6 +822,36 @@ async def my_paypal_card_handler(callback: CallbackQuery) -> None:
         await callback.answer("PayPal не найден", show_alert=True)
         return
 
+    campaign = await get_happy_hours_campaign(req.happy_hours_campaign_id)
+    now_utc = datetime.utcnow()
+    happy_text = ""
+    if req.happy_hours_percent is not None:
+        happy_text = (
+            "\n🔥 <b>HAPPY HOURS ЗАФИКСИРОВАН</b>\n"
+            f"📈 Ваш процент: <b>{req.happy_hours_percent}%</b>\n"
+            f"✅ Зафиксировано: <b>{format_dt(req.happy_hours_locked_at)}</b>\n"
+        )
+    elif (
+        campaign is not None
+        and campaign.is_enabled == 1
+        and campaign.start_at <= now_utc < campaign.end_at
+    ):
+        if req.amount >= campaign.min_amount:
+            happy_text = (
+                "\n🔥 <b>HAPPY HOURS</b>\n"
+                f"📈 Повышенный процент: <b>{campaign.percent}%</b>\n"
+                f"💶 Условие: от <b>{campaign.min_amount} €</b>\n"
+                f"⏳ Отправьте оплату на проверку до "
+                f"<b>{format_happy_clock(campaign.end_at)} МСК</b>.\n"
+            )
+        else:
+            happy_text = (
+                "\n🔥 <b>HAPPY HOURS</b>\n"
+                f"💶 Акция действует от <b>{campaign.min_amount} €</b>.\n"
+                f"Текущая сумма <b>{req.amount} €</b> — "
+                "по ней применяется стандартный процент.\n"
+            )
+
     text = (
         "<b>💳 PayPal ожидает оплаты</b>\n\n"
         f"💳 PayPal: <code>{tag.tag}</code>\n"
@@ -787,7 +859,8 @@ async def my_paypal_card_handler(callback: CallbackQuery) -> None:
         f"🚻 Тип: <b>"
         f"{'👨 Мужской' if req.paypal_gender == 'male' else '👩 Женский'}"
         f"</b>\n"
-        f"🕒 Выдан: <b>{format_dt(req.processed_at or req.updated_at)}</b>\n\n"
+        f"🕒 Выдан: <b>{format_dt(req.processed_at or req.updated_at)}</b>\n"
+        f"{happy_text}\n"
         "После перевода нажмите <b>«✅ Я оплатил»</b>.\n"
         "Если PayPal больше не нужен — нажмите "
         "<b>«↩️ Вернуть PayPal»</b>."
@@ -1444,8 +1517,27 @@ async def members_list_handler(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+UTC_TZ = ZoneInfo("UTC")
+
+
+def as_moscow(value: datetime | None) -> datetime | None:
+    """Database timestamps are UTC-naive; all UI times are shown in Moscow."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC_TZ)
+    return value.astimezone(MOSCOW_TZ)
+
+
 def format_dt(value) -> str:
-    return value.strftime("%d.%m.%Y %H:%M") if value else "—"
+    local = as_moscow(value)
+    return local.strftime("%d.%m.%Y %H:%M МСК") if local else "—"
+
+
+def format_happy_clock(value: datetime | None) -> str:
+    local = as_moscow(value)
+    return local.strftime("%H:%M") if local else "—"
 
 
 async def _attach_request_display(requests) -> None:
@@ -1986,6 +2078,16 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
         "not_found": "🔴 Оплата не найдена",
     }
     username = f"@{user.username}" if user and user.username else "не указан"
+    if req.happy_hours_applied:
+        rate_source_line = f"🔥 Happy Hours: <b>{req.payout_percent}%</b>\n"
+    elif req.happy_hours_percent is not None:
+        rate_source_line = (
+            f"🔥 Happy Hours зафиксирован: "
+            f"<b>{req.happy_hours_percent}%</b>\n"
+        )
+    else:
+        rate_source_line = ""
+
     text = (
         f"💰 <b>Платёжная заявка #{req.id}</b>\n\n"
         f"👤 {user.full_name if user and user.full_name else 'не указано'}\n"
@@ -1994,6 +2096,7 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
         f"💳 PayPal: <code>{tag.tag if tag else 'не найден'}</code>\n"
         f"💶 Сумма: <b>{req.amount} €</b>\n"
         + (f"📊 Процент: <b>{req.payout_percent}%</b>\n💰 Начислено пользователю: <b>{float(req.payout_amount):.2f} USDT</b>\n" if req.payout_percent is not None and req.payout_amount is not None else "")
+        + rate_source_line
         + f"\nСтатус: <b>{status_names.get(req.status, req.status)}</b>\n\n"
         f"📅 Создана: {format_dt(req.created_at)}\n"
         f"📤 PayPal выдан: {format_dt(req.processed_at)}\n"
@@ -2240,11 +2343,37 @@ async def admin_issue(callback: CallbackQuery) -> None:
         return
     await set_request_status(request_id, "paypal_issued", callback.from_user.id)
 
+    campaign = await get_happy_hours_campaign(req.happy_hours_campaign_id)
+    promo_text = ""
+    if (
+        campaign is not None
+        and campaign.is_enabled == 1
+        and datetime.utcnow() < campaign.end_at
+    ):
+        if req.amount >= campaign.min_amount:
+            promo_text = (
+                "\n🔥 <b>HAPPY HOURS</b>\n"
+                f"📈 Повышенный процент: <b>{campaign.percent}%</b>\n"
+                f"💶 Условие: от <b>{campaign.min_amount} €</b>\n"
+                f"⏳ Нажмите «Я оплатил» до "
+                f"<b>{format_happy_clock(campaign.end_at)} МСК</b>, "
+                "чтобы процент зафиксировался.\n"
+            )
+        else:
+            promo_text = (
+                "\n🔥 <b>HAPPY HOURS</b>\n"
+                f"Акция действует от <b>{campaign.min_amount} €</b>. "
+                f"Для текущей суммы <b>{req.amount} €</b> "
+                "останется стандартный процент.\n"
+            )
+
     issued_caption = (
         "✅ <b>PayPal выдан</b>\n\n"
         f"Заявка: <b>#{req.id}</b>\n"
         f"Сумма: <b>{req.amount} €</b>\n"
-        f"PayPal: <code>{tag.tag}</code>\n\n"
+        f"PayPal: <code>{tag.tag}</code>\n"
+        f"🕒 Выдан: <b>{format_dt(req.processed_at)}</b>\n"
+        f"{promo_text}\n"
         "После оплаты нажмите кнопку ниже."
     )
     await callback.bot.send_photo(
@@ -2318,15 +2447,25 @@ async def user_paid(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-async def finish_user_paid(callback_or_message, request_id: int, user_id: int) -> bool:
+async def finish_user_paid(callback_or_message, request_id: int, user_id: int):
     ok = await mark_paid_by_user(request_id, user_id)
     if not ok:
-        return False
+        return None
     req = await get_request(request_id)
+    if req is None:
+        return None
+
     user = await get_user(user_id)
-    tag = await get_paypal_tag(req.paypal_tag_id) if req and req.paypal_tag_id else None
+    tag = await get_paypal_tag(req.paypal_tag_id) if req.paypal_tag_id else None
     username = f"@{user.username}" if user and user.username else "без username"
     profile = f'<a href="tg://user?id={user_id}">Открыть профиль</a>'
+    happy_line = (
+        f"\n🔥 Happy Hours зафиксирован: <b>{req.happy_hours_percent}%</b>"
+        f"\n🕒 Фиксация: <b>{format_dt(req.happy_hours_locked_at)}</b>"
+        if req.happy_hours_percent is not None
+        else ""
+    )
+
     bot = callback_or_message.bot
     for admin_id in settings.admin_ids:
         await bot.send_message(
@@ -2337,19 +2476,54 @@ async def finish_user_paid(callback_or_message, request_id: int, user_id: int) -
             f"🆔 ID: <code>{user_id}</code>\n\n"
             f"💳 PayPal: <code>{tag.tag if tag else 'не найден'}</code>\n"
             f"🚻 Тип: {'👨 Мужской' if getattr(req, 'paypal_gender', 'male') == 'male' else '👩 Женский'}\n"
-            f"💶 Сумма: <b>{req.amount} €</b>",
+            f"💶 Сумма: <b>{req.amount} €</b>"
+            f"{happy_line}",
             reply_markup=admin_check_menu(request_id),
         )
-    return True
+    return req
 
 
 @router.callback_query(F.data.startswith("user_paid_confirm:"))
 async def user_paid_confirm(callback: CallbackQuery) -> None:
     request_id = int(callback.data.split(":")[1])
-    if not await finish_user_paid(callback, request_id, callback.from_user.id):
-        await callback.answer("Заявка уже обработана или недоступна", show_alert=True)
+    req = await finish_user_paid(
+        callback,
+        request_id,
+        callback.from_user.id,
+    )
+    if req is None:
+        await callback.answer(
+            "Заявка уже обработана или недоступна",
+            show_alert=True,
+        )
         return
-    await render_screen(callback, "requests", "🔎 <b>Оплата отправлена на проверку</b>\n\nАдминистратор проверит поступление и подтвердит заявку.", back_home())
+
+    if req.happy_hours_percent is not None:
+        rate_text = (
+            "\n\n🔥 <b>HAPPY HOURS ЗАФИКСИРОВАН</b>\n"
+            f"📈 Ваш процент: <b>{req.happy_hours_percent}%</b>\n"
+            f"✅ Отправлено на проверку: "
+            f"<b>{format_dt(req.happy_hours_locked_at)}</b>\n\n"
+            "Даже если администратор подтвердит деньги после окончания акции, "
+            "этот процент сохранится."
+        )
+    else:
+        standard_percent, _ = await get_rate_for_amount(req.amount)
+        rate_text = (
+            f"\n\n📊 Стандартный тариф: "
+            f"<b>{standard_percent}%</b>"
+            if standard_percent is not None
+            else ""
+        )
+
+    await render_screen(
+        callback,
+        "requests",
+        "🔎 <b>Оплата отправлена на проверку</b>\n\n"
+        "Администратор проверит поступление и подтвердит заявку."
+        f"{rate_text}",
+        back_home(),
+    )
     await callback.answer()
 
 
@@ -2383,13 +2557,36 @@ async def user_paid_amount_input(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer("Заявка уже обработана или недоступна.")
         return
-    if not await finish_user_paid(message, request_id, message.from_user.id):
+    paid_req = await finish_user_paid(
+        message,
+        request_id,
+        message.from_user.id,
+    )
+    if paid_req is None:
         await state.clear()
         await message.answer("Заявка уже обработана или недоступна.")
         return
     await state.clear()
+
+    if paid_req.happy_hours_percent is not None:
+        rate_text = (
+            "\n\n🔥 <b>HAPPY HOURS ЗАФИКСИРОВАН</b>\n"
+            f"📈 Ваш процент: <b>{paid_req.happy_hours_percent}%</b>\n"
+            f"✅ Зафиксировано: "
+            f"<b>{format_dt(paid_req.happy_hours_locked_at)}</b>"
+        )
+    else:
+        standard_percent, _ = await get_rate_for_amount(amount)
+        rate_text = (
+            f"\n\n📊 Стандартный тариф: <b>{standard_percent}%</b>"
+            if standard_percent is not None
+            else ""
+        )
+
     await message.answer(
-        f"🔎 <b>Оплата отправлена на проверку</b>\n\nСумма заявки обновлена: <b>{amount} €</b>.",
+        f"🔎 <b>Оплата отправлена на проверку</b>\n\n"
+        f"Сумма заявки обновлена: <b>{amount} €</b>."
+        f"{rate_text}",
         reply_markup=back_home(),
     )
 
@@ -2404,9 +2601,22 @@ async def admin_confirm(callback: CallbackQuery) -> None:
     if req is None or req.status != "waiting_check":
         await callback.answer("Заявка уже обработана или не найдена", show_alert=True)
         return
+
+    percent, payout, is_happy = await get_effective_rate_for_request(req.id)
+    if percent is None:
+        await callback.answer(
+            "Для этой суммы не настроен процент",
+            show_alert=True,
+        )
+        return
+    source = "🔥 <b>HAPPY HOURS</b>" if is_happy else "📊 <b>Стандартный тариф</b>"
+
     await callback.message.edit_text(
         "💶 <b>Подтвердите полученную сумму</b>\n\n"
-        f"Сумма в заявке: <b>{req.amount} €</b>\n\n"
+        f"Сумма в заявке: <b>{req.amount} €</b>\n"
+        f"{source}\n"
+        f"📈 Процент: <b>{percent}%</b>\n"
+        f"💰 К выплате: <b>{float(payout or 0):.2f} €</b>\n\n"
         "Если на PayPal поступила другая сумма — измените её.",
         reply_markup=admin_amount_confirmation_menu(req.id, req.amount),
     )
@@ -2421,7 +2631,18 @@ async def finish_admin_confirm(callback_or_message, request_id: int, admin_id: i
         await callback_or_message.bot.send_photo(
             req.user_id,
             photo=FSInputFile(BANNERS["issued"]),
-            caption=(f"✅ <b>Платёж произведён успешно</b>\n\nСумма: <b>{req.amount} €</b>\nВаш процент: <b>{req.payout_percent}%</b>\nСумма к выплате: <b>{float(req.payout_amount or 0):.2f} €</b>\n\nОжидайте выплату от администрации."),
+            caption=(
+                f"✅ <b>Платёж произведён успешно</b>\n\n"
+                f"Сумма: <b>{req.amount} €</b>\n"
+                + (
+                    "🔥 <b>Happy Hours</b>\n"
+                    if req.happy_hours_applied
+                    else "📊 <b>Стандартный тариф</b>\n"
+                )
+                + f"Ваш процент: <b>{req.payout_percent}%</b>\n"
+                f"Сумма к выплате: <b>{float(req.payout_amount or 0):.2f} €</b>\n\n"
+                "Ожидайте выплату от администрации."
+            ),
             reply_markup=back_home(),
         )
     except Exception:
@@ -2440,7 +2661,12 @@ async def admin_confirm_same(callback: CallbackQuery) -> None:
         await callback.answer("Заявка уже обработана", show_alert=True)
         return
     await callback.message.edit_text(
-        f"✅ Оплата по заявке #{req.id} подтверждена.\nСумма: <b>{req.amount} €</b>\nПроцент: <b>{req.payout_percent}%</b>\nК выплате: <b>{float(req.payout_amount or 0):.2f} €</b>\n\nЗаявка перемещена в «🟢 Нужно выплатить».",
+        f"✅ Оплата по заявке #{req.id} подтверждена.\n"
+        f"Сумма: <b>{req.amount} €</b>\n"
+        + ("🔥 Happy Hours\n" if req.happy_hours_applied else "📊 Стандартный тариф\n")
+        + f"Процент: <b>{req.payout_percent}%</b>\n"
+        f"К выплате: <b>{float(req.payout_amount or 0):.2f} €</b>\n\n"
+        "Заявка перемещена в «🟢 Нужно выплатить».",
         reply_markup=payments_menu(await get_payment_counts()),
     )
     await callback.answer("Оплата подтверждена")
@@ -2488,7 +2714,12 @@ async def admin_paid_amount_input(message: Message, state: FSMContext) -> None:
         await message.answer("Заявка уже обработана или недоступна.")
         return
     await message.answer(
-        f"✅ Оплата по заявке #{req.id} подтверждена.\nСумма: <b>{amount} €</b>\nПроцент: <b>{req.payout_percent}%</b>\nК выплате: <b>{float(req.payout_amount or 0):.2f} €</b>\n\nЗаявка перемещена в «🟢 Нужно выплатить».",
+        f"✅ Оплата по заявке #{req.id} подтверждена.\n"
+        f"Сумма: <b>{amount} €</b>\n"
+        + ("🔥 Happy Hours\n" if req.happy_hours_applied else "📊 Стандартный тариф\n")
+        + f"Процент: <b>{req.payout_percent}%</b>\n"
+        f"К выплате: <b>{float(req.payout_amount or 0):.2f} €</b>\n\n"
+        "Заявка перемещена в «🟢 Нужно выплатить».",
         reply_markup=payments_menu(await get_payment_counts()),
     )
 
@@ -2644,6 +2875,722 @@ async def rate_delete_handler(callback: CallbackQuery) -> None:
         await callback.answer("Нельзя удалить последнее правило", show_alert=True); return
     await callback.message.edit_text("⚙️ <b>Проценты выплат</b>", reply_markup=rates_menu(await list_rate_rules()))
     await callback.answer("Диапазон удалён")
+
+
+
+# ==================== v2.3.0 HAPPY HOURS ====================
+
+async def _happy_hours_draft() -> dict:
+    return {
+        "start": await get_app_setting("happy_hours_start_time", "13:00"),
+        "end": await get_app_setting("happy_hours_end_time", "17:00"),
+        "min_amount": int(
+            await get_app_setting("happy_hours_min_amount", "100")
+        ),
+        "percent": int(
+            await get_app_setting("happy_hours_percent", "80")
+        ),
+        "text": await get_app_setting(
+            "happy_hours_text",
+            (
+                "🔥 <b>СЧАСТЛИВЫЕ ЧАСЫ DT TEAM</b>\n\n"
+                "Только с {start} до {end} МСК!\n\n"
+                "💶 От {min_amount} €\n"
+                "🚀 Выплата — {percent}%\n\n"
+                "Получите PayPal во время акции и отправьте оплату "
+                "на проверку до {end} МСК."
+            ),
+        ),
+        "photo": await get_app_setting("happy_hours_photo", ""),
+    }
+
+
+def _valid_happy_time(raw: str) -> str | None:
+    value = raw.strip()
+    try:
+        parsed = datetime.strptime(value, "%H:%M")
+    except ValueError:
+        return None
+    return parsed.strftime("%H:%M")
+
+
+def _happy_hours_window(
+    start_text: str,
+    end_text: str,
+) -> tuple[datetime, datetime, datetime, datetime] | None:
+    """Build effective Moscow window and its UTC-naive DB equivalent.
+
+    Manual activation is never retroactive. If the configured start time has
+    already passed, effective start is the moment the admin presses Launch.
+    """
+    start_clean = _valid_happy_time(start_text)
+    end_clean = _valid_happy_time(end_text)
+    if start_clean is None or end_clean is None or start_clean == end_clean:
+        return None
+
+    now_msk = datetime.now(MOSCOW_TZ)
+    start_clock = datetime.strptime(start_clean, "%H:%M").time()
+    end_clock = datetime.strptime(end_clean, "%H:%M").time()
+
+    start_msk = datetime.combine(
+        now_msk.date(),
+        start_clock,
+        tzinfo=MOSCOW_TZ,
+    )
+
+    # Supports overnight campaigns, for example 23:00 → 01:00.
+    end_day = now_msk.date()
+    if end_clock <= start_clock:
+        end_day = end_day + timedelta(days=1)
+    end_msk = datetime.combine(
+        end_day,
+        end_clock,
+        tzinfo=MOSCOW_TZ,
+    )
+
+    # For a normal same-day window, launching after the configured end is not
+    # allowed. The admin must choose a new time instead of silently moving it.
+    if end_clock > start_clock and now_msk >= end_msk:
+        return None
+
+    effective_start_msk = (
+        start_msk if now_msk < start_msk else now_msk
+    )
+    if effective_start_msk >= end_msk:
+        return None
+
+    start_utc = (
+        effective_start_msk
+        .astimezone(UTC_TZ)
+        .replace(tzinfo=None)
+    )
+    end_utc = end_msk.astimezone(UTC_TZ).replace(tzinfo=None)
+    return effective_start_msk, end_msk, start_utc, end_utc
+
+
+def _render_happy_hours_text(
+    template: str,
+    start_text: str,
+    end_text: str,
+    min_amount: int,
+    percent: int,
+) -> str:
+    return (
+        template
+        .replace("{start}", start_text)
+        .replace("{end}", end_text)
+        .replace("{min_amount}", str(min_amount))
+        .replace("{percent}", str(percent))
+    )
+
+
+def _happy_hours_campaign_text(campaign) -> str:
+    return _render_happy_hours_text(
+        campaign.broadcast_text,
+        format_happy_clock(campaign.start_at),
+        format_happy_clock(campaign.end_at),
+        campaign.min_amount,
+        campaign.percent,
+    )
+
+
+def _happy_hours_range(campaign) -> str:
+    start = as_moscow(campaign.start_at)
+    end = as_moscow(campaign.end_at)
+    if start is None or end is None:
+        return "—"
+    if start.date() == end.date():
+        return (
+            f"{start.strftime('%d.%m')} · "
+            f"{start.strftime('%H:%M')}–{end.strftime('%H:%M')} МСК"
+        )
+    return (
+        f"{start.strftime('%d.%m %H:%M')} → "
+        f"{end.strftime('%d.%m %H:%M')} МСК"
+    )
+
+
+@router.callback_query(F.data == "happy_hours_menu")
+async def happy_hours_panel(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await state.clear()
+    campaign = await get_open_happy_hours_campaign()
+    draft = await _happy_hours_draft()
+    has_photo = bool(draft["photo"])
+
+    if campaign is not None:
+        stats = await get_happy_hours_stats(campaign.id)
+        now_utc = datetime.utcnow()
+        status = (
+            "🟡 <b>Запланированы</b>"
+            if now_utc < campaign.start_at
+            else "🟢 <b>АКТИВНЫ</b>"
+        )
+        text = (
+            "🔥 <b>HAPPY HOURS</b>\n\n"
+            f"Статус: {status}\n\n"
+            f"🕒 Время: <b>{_happy_hours_range(campaign)}</b>\n"
+            f"💶 От: <b>{campaign.min_amount} €</b>\n"
+            f"📈 Процент: <b>{campaign.percent}%</b>\n\n"
+            f"👥 PayPal выдано во время акции: <b>{stats['issued']}</b>\n"
+            f"🔥 Процент зафиксировали: <b>{stats['locked']}</b>\n"
+            f"✅ Уже подтверждено по акции: <b>{stats['applied']}</b>\n"
+            f"💶 Подтверждённый оборот: <b>{stats['turnover']:.2f} €</b>\n\n"
+            "Повышенный процент фиксируется только если PayPal был выдан "
+            "во время акции и пользователь отправил оплату на проверку "
+            "до её окончания."
+        )
+        markup = happy_hours_menu(True, bool(campaign.photo_file_id))
+    else:
+        text = (
+            "🔥 <b>HAPPY HOURS</b>\n\n"
+            "Статус: 🔴 <b>Не запущены</b>\n\n"
+            f"🕐 Начало: <b>{draft['start']} МСК</b>\n"
+            f"🕔 Окончание: <b>{draft['end']} МСК</b>\n"
+            f"💶 Минимальная сумма: <b>{draft['min_amount']} €</b>\n"
+            f"📈 Повышенный процент: <b>{draft['percent']}%</b>\n"
+            f"📝 Текст рассылки: <b>✅</b>\n"
+            f"🖼 Картинка: <b>{'✅' if has_photo else '—'}</b>\n\n"
+            "Обычная таблица процентов не меняется. Happy Hours "
+            "применяются только к подходящим новым PayPal.\n\n"
+            "Все времена в этом разделе — <b>МСК</b>."
+        )
+        markup = happy_hours_menu(False, has_photo)
+
+    await replace_photo_with_text(callback, text, markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "happy_hours_edit_start")
+async def happy_hours_edit_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(HappyHoursForm.start_time)
+    current = await get_app_setting("happy_hours_start_time", "13:00")
+    await replace_photo_with_text(
+        callback,
+        "🕐 <b>Начало Happy Hours</b>\n\n"
+        f"Сейчас: <b>{current} МСК</b>\n\n"
+        "Введите время в формате <code>HH:MM</code>, например "
+        "<code>16:00</code>.",
+        happy_hours_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(HappyHoursForm.start_time)
+async def happy_hours_start_time_save(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    value = _valid_happy_time(message.text or "")
+    if value is None:
+        await message.answer(
+            "Неверный формат. Введите время, например <code>16:00</code>.",
+            reply_markup=happy_hours_cancel_menu(),
+        )
+        return
+    await set_app_setting("happy_hours_start_time", value)
+    await state.clear()
+    draft = await _happy_hours_draft()
+    await message.answer(
+        f"✅ Начало установлено: <b>{value} МСК</b>.",
+        reply_markup=happy_hours_menu(False, bool(draft["photo"])),
+    )
+
+
+@router.callback_query(F.data == "happy_hours_edit_end")
+async def happy_hours_edit_end(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(HappyHoursForm.end_time)
+    current = await get_app_setting("happy_hours_end_time", "17:00")
+    await replace_photo_with_text(
+        callback,
+        "🕔 <b>Окончание Happy Hours</b>\n\n"
+        f"Сейчас: <b>{current} МСК</b>\n\n"
+        "Введите время в формате <code>HH:MM</code>, например "
+        "<code>17:00</code>.",
+        happy_hours_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(HappyHoursForm.end_time)
+async def happy_hours_end_time_save(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    value = _valid_happy_time(message.text or "")
+    if value is None:
+        await message.answer(
+            "Неверный формат. Введите время, например <code>17:00</code>.",
+            reply_markup=happy_hours_cancel_menu(),
+        )
+        return
+    await set_app_setting("happy_hours_end_time", value)
+    await state.clear()
+    draft = await _happy_hours_draft()
+    await message.answer(
+        f"✅ Окончание установлено: <b>{value} МСК</b>.",
+        reply_markup=happy_hours_menu(False, bool(draft["photo"])),
+    )
+
+
+@router.callback_query(F.data == "happy_hours_edit_min")
+async def happy_hours_edit_min(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(HappyHoursForm.min_amount)
+    current = await get_app_setting("happy_hours_min_amount", "100")
+    await replace_photo_with_text(
+        callback,
+        "💶 <b>Минимальная сумма Happy Hours</b>\n\n"
+        f"Сейчас: от <b>{current} €</b>\n\n"
+        "Введите минимальную сумму одним числом.",
+        happy_hours_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(HappyHoursForm.min_amount)
+async def happy_hours_min_save(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    raw = (message.text or "").replace("€", "").strip()
+    if not raw.isdigit() or not 1 <= int(raw) <= 100000:
+        await message.answer(
+            "Введите сумму от 1 до 100000 €.",
+            reply_markup=happy_hours_cancel_menu(),
+        )
+        return
+    await set_app_setting("happy_hours_min_amount", str(int(raw)))
+    await state.clear()
+    draft = await _happy_hours_draft()
+    await message.answer(
+        f"✅ Минимальная сумма: <b>{int(raw)} €</b>.",
+        reply_markup=happy_hours_menu(False, bool(draft["photo"])),
+    )
+
+
+@router.callback_query(F.data == "happy_hours_edit_percent")
+async def happy_hours_edit_percent(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(HappyHoursForm.percent)
+    current = await get_app_setting("happy_hours_percent", "80")
+    await replace_photo_with_text(
+        callback,
+        "📈 <b>Процент Happy Hours</b>\n\n"
+        f"Сейчас: <b>{current}%</b>\n\n"
+        "Введите процент от 1 до 100.",
+        happy_hours_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(HappyHoursForm.percent)
+async def happy_hours_percent_save(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    raw = (message.text or "").replace("%", "").strip()
+    if not raw.isdigit() or not 1 <= int(raw) <= 100:
+        await message.answer(
+            "Введите процент от 1 до 100.",
+            reply_markup=happy_hours_cancel_menu(),
+        )
+        return
+    await set_app_setting("happy_hours_percent", str(int(raw)))
+    await state.clear()
+    draft = await _happy_hours_draft()
+    await message.answer(
+        f"✅ Процент Happy Hours: <b>{int(raw)}%</b>.",
+        reply_markup=happy_hours_menu(False, bool(draft["photo"])),
+    )
+
+
+@router.callback_query(F.data == "happy_hours_edit_text")
+async def happy_hours_edit_text(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(HappyHoursForm.text)
+    current = await get_app_setting("happy_hours_text", "")
+    await replace_photo_with_text(
+        callback,
+        "📝 <b>Текст рассылки Happy Hours</b>\n\n"
+        "Пришлите новый текст одним сообщением.\n"
+        "Поддерживаются переменные:\n"
+        "<code>{start}</code> — начало\n"
+        "<code>{end}</code> — окончание\n"
+        "<code>{min_amount}</code> — минимальная сумма\n"
+        "<code>{percent}</code> — процент\n\n"
+        "Текст ограничен 900 символами, чтобы он помещался в подпись "
+        "к фотографии.\n\n"
+        f"<b>Сейчас:</b>\n{current}",
+        happy_hours_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(HappyHoursForm.text)
+async def happy_hours_text_save(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    value = (message.html_text or message.text or "").strip()
+    if not value or len(value) > 900:
+        await message.answer(
+            "Текст должен быть от 1 до 900 символов.",
+            reply_markup=happy_hours_cancel_menu(),
+        )
+        return
+    await set_app_setting("happy_hours_text", value)
+    await state.clear()
+    draft = await _happy_hours_draft()
+    await message.answer(
+        "✅ Текст Happy Hours сохранён.",
+        reply_markup=happy_hours_menu(False, bool(draft["photo"])),
+    )
+
+
+@router.callback_query(F.data == "happy_hours_edit_photo")
+async def happy_hours_edit_photo(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    current = await get_app_setting("happy_hours_photo", "")
+    await state.set_state(HappyHoursForm.photo)
+    await replace_photo_with_text(
+        callback,
+        "🖼 <b>Картинка Happy Hours</b>\n\n"
+        "Отправьте фотографию, которая будет использоваться "
+        "в автоматической рассылке при запуске акции.",
+        happy_hours_photo_menu(bool(current)),
+    )
+    await callback.answer()
+
+
+@router.message(HappyHoursForm.photo, F.photo)
+async def happy_hours_photo_save(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    await set_app_setting(
+        "happy_hours_photo",
+        message.photo[-1].file_id,
+    )
+    await state.clear()
+    await message.answer(
+        "✅ Картинка Happy Hours сохранена.",
+        reply_markup=happy_hours_menu(False, True),
+    )
+
+
+@router.message(HappyHoursForm.photo)
+async def happy_hours_photo_invalid(message: Message) -> None:
+    current = bool(await get_app_setting("happy_hours_photo", ""))
+    await message.answer(
+        "Пришлите изображение как фотографию.",
+        reply_markup=happy_hours_photo_menu(current),
+    )
+
+
+@router.callback_query(F.data == "happy_hours_photo_delete")
+async def happy_hours_photo_delete(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await set_app_setting("happy_hours_photo", "")
+    await state.clear()
+    await replace_photo_with_text(
+        callback,
+        "✅ Картинка Happy Hours удалена.",
+        happy_hours_menu(False, False),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "happy_hours_preview")
+async def happy_hours_preview_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    draft = await _happy_hours_draft()
+    preview = _render_happy_hours_text(
+        draft["text"],
+        draft["start"],
+        draft["end"],
+        draft["min_amount"],
+        draft["percent"],
+    )
+    if draft["photo"]:
+        try:
+            await callback.message.delete()
+        except TelegramBadRequest:
+            pass
+        await callback.bot.send_photo(
+            callback.message.chat.id,
+            draft["photo"],
+            caption=preview,
+            reply_markup=happy_hours_preview_menu(),
+        )
+    else:
+        await replace_photo_with_text(
+            callback,
+            preview,
+            happy_hours_preview_menu(),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "happy_hours_launch_ask")
+async def happy_hours_launch_ask(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    existing = await get_open_happy_hours_campaign()
+    if existing is not None:
+        await callback.answer(
+            "Happy Hours уже запущены или запланированы",
+            show_alert=True,
+        )
+        return
+
+    draft = await _happy_hours_draft()
+    window = _happy_hours_window(draft["start"], draft["end"])
+    if window is None:
+        await callback.answer(
+            "Проверьте время: окончание уже прошло или диапазон некорректен",
+            show_alert=True,
+        )
+        return
+
+    start_msk, end_msk, _, _ = window
+    await replace_photo_with_text(
+        callback,
+        "🔥 <b>ЗАПУСТИТЬ HAPPY HOURS?</b>\n\n"
+        f"🕒 Фактическое начало: "
+        f"<b>{start_msk.strftime('%d.%m %H:%M')} МСК</b>\n"
+        f"🕔 Окончание: "
+        f"<b>{end_msk.strftime('%d.%m %H:%M')} МСК</b>\n"
+        f"💶 От: <b>{draft['min_amount']} €</b>\n"
+        f"📈 Процент: <b>{draft['percent']}%</b>\n\n"
+        "После запуска подготовленная рассылка сразу уйдёт всем "
+        "одобренным участникам.\n\n"
+        "Важно: акция не действует задним числом. PayPal, выданные "
+        "до фактического начала, останутся на стандартных процентах.",
+        happy_hours_launch_confirm_menu(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "happy_hours_launch_confirm")
+async def happy_hours_launch_confirm(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    draft = await _happy_hours_draft()
+    window = _happy_hours_window(draft["start"], draft["end"])
+    if window is None:
+        await callback.answer(
+            "Время запуска уже недоступно. Измените диапазон.",
+            show_alert=True,
+        )
+        return
+
+    start_msk, end_msk, start_utc, end_utc = window
+    rendered_text = _render_happy_hours_text(
+        draft["text"],
+        start_msk.strftime("%H:%M"),
+        end_msk.strftime("%H:%M"),
+        draft["min_amount"],
+        draft["percent"],
+    )
+
+    campaign, result = await create_happy_hours_campaign(
+        start_at=start_utc,
+        end_at=end_utc,
+        min_amount=draft["min_amount"],
+        percent=draft["percent"],
+        broadcast_text=draft["text"],
+        photo_file_id=draft["photo"] or None,
+        admin_id=callback.from_user.id,
+    )
+    if campaign is None:
+        await callback.answer(
+            "Happy Hours уже запущены или запланированы",
+            show_alert=True,
+        )
+        return
+
+    user_ids = await list_approved_user_ids()
+    sent = 0
+    failed = 0
+    for user_id in user_ids:
+        try:
+            if campaign.photo_file_id:
+                await callback.bot.send_photo(
+                    user_id,
+                    campaign.photo_file_id,
+                    caption=rendered_text,
+                )
+            else:
+                await callback.bot.send_message(
+                    user_id,
+                    rendered_text,
+                )
+            sent += 1
+        except Exception:
+            failed += 1
+
+    status = (
+        "🟡 Запланированы"
+        if datetime.utcnow() < campaign.start_at
+        else "🟢 АКТИВНЫ"
+    )
+    await replace_photo_with_text(
+        callback,
+        "🔥 <b>HAPPY HOURS ЗАПУЩЕНЫ</b>\n\n"
+        f"Статус: <b>{status}</b>\n"
+        f"🕒 {_happy_hours_range(campaign)}\n"
+        f"💶 От: <b>{campaign.min_amount} €</b>\n"
+        f"📈 Процент: <b>{campaign.percent}%</b>\n\n"
+        f"📣 Рассылка доставлена: <b>{sent}</b>\n"
+        f"❌ Не доставлена: <b>{failed}</b>\n\n"
+        "Процент будет фиксироваться в момент, когда пользователь "
+        "нажмёт «Я оплатил» и отправит оплату на проверку.",
+        happy_hours_menu(True, bool(campaign.photo_file_id)),
+    )
+    await callback.answer("🔥 Happy Hours запущены")
+
+
+@router.callback_query(F.data == "happy_hours_stop")
+async def happy_hours_stop_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    campaign = await stop_happy_hours_campaign(callback.from_user.id)
+    if campaign is None:
+        await callback.answer(
+            "Активных Happy Hours нет",
+            show_alert=True,
+        )
+        return
+
+    draft = await _happy_hours_draft()
+    await replace_photo_with_text(
+        callback,
+        "🛑 <b>HAPPY HOURS ЗАВЕРШЕНЫ</b>\n\n"
+        "Новые заявки больше не получают повышенный процент.\n\n"
+        "Проценты, которые пользователи уже успели зафиксировать "
+        "кнопкой «Я оплатил», сохраняются.",
+        happy_hours_menu(False, bool(draft["photo"])),
+    )
+    await callback.answer("Happy Hours завершены")
+
+
+@router.callback_query(F.data == "happy_hours_history")
+async def happy_hours_history_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    campaigns = await list_happy_hours_campaigns(limit=5)
+    if not campaigns:
+        text = "📜 <b>История Happy Hours</b>\n\nАкций пока не было."
+    else:
+        now_utc = datetime.utcnow()
+        blocks = ["📜 <b>История Happy Hours</b>", ""]
+        for campaign in campaigns:
+            if campaign.is_enabled == 1 and campaign.start_at > now_utc:
+                status = "🟡 Запланирована"
+            elif (
+                campaign.is_enabled == 1
+                and campaign.start_at <= now_utc < campaign.end_at
+            ):
+                status = "🔥 Активна"
+            elif campaign.ended_at is not None and campaign.ended_at < campaign.end_at:
+                status = "🛑 Завершена досрочно"
+            else:
+                status = "✅ Завершена"
+
+            stats = await get_happy_hours_stats(campaign.id)
+            blocks.extend([
+                f"<b>Акция #{campaign.id}</b> · {status}",
+                f"🕒 {_happy_hours_range(campaign)}",
+                f"💶 От {campaign.min_amount} € → <b>{campaign.percent}%</b>",
+                f"👥 Выдано: {stats['issued']} · "
+                f"🔥 Зафиксировано: {stats['locked']} · "
+                f"✅ Подтверждено: {stats['applied']}",
+                f"💶 Оборот: {stats['turnover']:.2f} €",
+                "━━━━━━━━━━━━",
+            ])
+        text = "\n".join(blocks)
+
+    draft = await _happy_hours_draft()
+    await replace_photo_with_text(
+        callback,
+        text,
+        happy_hours_menu(
+            bool(await get_open_happy_hours_campaign()),
+            bool(draft["photo"]),
+        ),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "finance_menu")
@@ -3751,7 +4698,7 @@ async def working_export_handler(callback: CallbackQuery) -> None:
             f"@{user.username}" if user and user.username else "",
             req.user_id,
             req.amount,
-            tag.issued_at.strftime("%d.%m.%Y %H:%M") if tag and tag.issued_at else "",
+            format_dt(tag.issued_at) if tag and tag.issued_at else "",
             "Выдан",
         ])
     for column in ws.columns:
@@ -4187,6 +5134,13 @@ async def payout_history_handler(callback: CallbackQuery) -> None:
     rows = await list_manual_payouts(callback.from_user.id, limit=page_size + 1, offset=offset)
     has_next = len(rows) > page_size
     rows = rows[:page_size]
+    for payout in rows:
+        local_created = as_moscow(payout.created_at)
+        payout._display_date = (
+            local_created.strftime("%d.%m.%Y")
+            if local_created
+            else "—"
+        )
     text = "💸 <b>ИСТОРИЯ ВЫПЛАТ</b>\n\n"
     text += "Все отправленные вам выплаты и чеки сохраняются здесь." if rows else "У вас пока нет выплат."
     await render_screen(callback, "profile", text, payout_history_menu(rows, offset, has_next, page_size))
