@@ -2424,6 +2424,29 @@ def _dt_payments_period_bounds(
     return None, None
 
 
+def _dt_payments_success_condition():
+    """Successful payment, including legacy rows created before confirmation timestamp."""
+    return or_(
+        Request.payment_confirmed_at.is_not(None),
+        Request.status.in_(("payout_pending", "paid_out")),
+        Request.payout_at.is_not(None),
+        Request.paypal_withdrawn_at.is_not(None),
+    )
+
+
+def _dt_payments_effective_confirmed_at():
+    """Best available historical timestamp for when a successful payment entered the flow."""
+    return func.coalesce(
+        Request.payment_confirmed_at,
+        Request.paypal_withdrawn_at,
+        Request.payout_at,
+        Request.updated_at,
+        Request.paid_clicked_at,
+        Request.processed_at,
+        Request.created_at,
+    )
+
+
 async def get_dt_payments_feed(limit: int = 12) -> list[dict]:
     safe_limit = max(1, min(int(limit), 50))
     async with SessionLocal() as session:
@@ -2432,15 +2455,15 @@ async def get_dt_payments_feed(limit: int = 12) -> list[dict]:
                 Request.id,
                 Request.user_id,
                 Request.amount,
-                Request.payment_confirmed_at,
+                _dt_payments_effective_confirmed_at().label("dt_confirmed_at"),
                 User.dt_payments_tag,
                 User.username,
                 User.full_name,
             )
             .join(User, User.id == Request.user_id)
-            .where(Request.payment_confirmed_at.is_not(None))
+            .where(_dt_payments_success_condition())
             .order_by(
-                Request.payment_confirmed_at.desc(),
+                _dt_payments_effective_confirmed_at().desc(),
                 Request.id.desc(),
             )
             .limit(safe_limit)
@@ -2477,11 +2500,12 @@ async def get_dt_payments_ranking(
     start, end = _dt_payments_period_bounds(period)
 
     async with SessionLocal() as session:
-        conditions = [Request.payment_confirmed_at.is_not(None)]
+        effective_confirmed_at = _dt_payments_effective_confirmed_at()
+        conditions = [_dt_payments_success_condition()]
         if start is not None:
-            conditions.append(Request.payment_confirmed_at >= start)
+            conditions.append(effective_confirmed_at >= start)
         if end is not None:
-            conditions.append(Request.payment_confirmed_at < end)
+            conditions.append(effective_confirmed_at < end)
 
         rows = (await session.execute(
             select(
