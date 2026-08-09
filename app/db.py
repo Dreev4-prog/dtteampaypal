@@ -1,4 +1,7 @@
 from datetime import date, datetime, timedelta
+import re
+import secrets
+
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -46,6 +49,8 @@ class User(Base):
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     decided_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     payout_method: Mapped[str] = mapped_column(String(20), default="cryptobot", index=True)
+    dt_payments_tag: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    dt_payments_tag_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class PaypalTag(Base):
@@ -203,6 +208,15 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE users ALTER COLUMN payout_method SET DEFAULT 'cryptobot'"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_payout_method ON users (payout_method)"))
 
+        # v2.4.0: DT Payments public anonymous identity.
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS dt_payments_tag VARCHAR(32)"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS dt_payments_tag_changed_at TIMESTAMP"))
+        await conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_users_dt_payments_tag_lower "
+            "ON users (lower(dt_payments_tag)) "
+            "WHERE dt_payments_tag IS NOT NULL"
+        ))
+
         # Все пользователи, которые были в базе до v1.3, сохраняют доступ.
         await conn.execute(text("UPDATE users SET status = 'approved' WHERE status IS NULL"))
         await conn.execute(text("ALTER TABLE users ALTER COLUMN status SET DEFAULT 'pending'"))
@@ -317,16 +331,64 @@ async def init_db() -> None:
               AND NOT EXISTS (SELECT 1 FROM balance_entries b WHERE b.request_id = r.id)
         """))
 
+    # Existing users receive an anonymous DT Payments tag once after migration.
+    await _backfill_dt_payments_tags()
+
+
+DT_PAYMENTS_TAG_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+DT_PAYMENTS_TAG_CHANGE_COOLDOWN = timedelta(days=7)
+DT_PAYMENTS_RESERVED_TAGS = {
+    "ADMIN", "ADMINISTRATOR", "OWNER", "SUPPORT",
+    "DTTEAM", "DT_TEAM", "DTPAYMENTS", "DT_PAYMENTS",
+}
+
+
+async def _generate_unique_dt_payments_tag(session: AsyncSession) -> str:
+    for _ in range(100):
+        core = "".join(
+            secrets.choice(DT_PAYMENTS_TAG_ALPHABET)
+            for _ in range(5)
+        )
+        candidate = f"DT-{core}"
+        exists = await session.scalar(
+            select(User.id)
+            .where(func.lower(User.dt_payments_tag) == candidate.lower())
+            .limit(1)
+        )
+        if exists is None:
+            return candidate
+    raise RuntimeError("Could not generate unique DT Payments tag")
+
+
+async def _backfill_dt_payments_tags() -> None:
+    async with SessionLocal() as session:
+        users = list(await session.scalars(
+            select(User).where(User.dt_payments_tag.is_(None))
+        ))
+        if not users:
+            return
+        for user in users:
+            user.dt_payments_tag = await _generate_unique_dt_payments_tag(session)
+        await session.commit()
+
 
 async def get_or_create_user(user_id: int, username: str | None, full_name: str | None = None) -> User:
     async with SessionLocal() as session:
         user = await session.get(User, user_id)
         if user is None:
-            user = User(id=user_id, username=username, full_name=full_name, status="pending")
+            user = User(
+                id=user_id,
+                username=username,
+                full_name=full_name,
+                status="pending",
+                dt_payments_tag=await _generate_unique_dt_payments_tag(session),
+            )
             session.add(user)
         else:
             user.username = username
             user.full_name = full_name
+            if not user.dt_payments_tag:
+                user.dt_payments_tag = await _generate_unique_dt_payments_tag(session)
         await session.commit()
         await session.refresh(user)
         return user
@@ -2227,6 +2289,269 @@ async def get_period_statistics(period: str) -> dict:
             "payout": sum(float(r.payout_amount or 0) for r in requests if r.status in {"payout_pending", "paid_out"}),
             "active_users": len({r.user_id for r in requests}),
         }
+
+
+
+# ==================== v2.4.0: DT PAYMENTS ====================
+
+def normalize_dt_payments_tag(raw_value: str) -> tuple[str | None, str | None]:
+    """Return normalized public tag and an error code."""
+    value = (raw_value or "").strip().upper()
+    if value.startswith("@"):
+        value = value[1:]
+    if value.startswith("DT-"):
+        value = value[3:]
+
+    if not re.fullmatch(r"[A-Z0-9_-]{3,12}", value):
+        return None, "invalid"
+    if value in DT_PAYMENTS_RESERVED_TAGS:
+        return None, "reserved"
+    return f"DT-{value}", None
+
+
+async def ensure_dt_payments_tag(user_id: int) -> str | None:
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id, with_for_update=True)
+        if user is None:
+            return None
+        if not user.dt_payments_tag:
+            user.dt_payments_tag = await _generate_unique_dt_payments_tag(session)
+            await session.commit()
+            await session.refresh(user)
+        return user.dt_payments_tag
+
+
+async def get_dt_payments_tag_profile(user_id: int) -> dict | None:
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            return None
+
+        if not user.dt_payments_tag:
+            user.dt_payments_tag = await _generate_unique_dt_payments_tag(session)
+            await session.commit()
+            await session.refresh(user)
+
+        now = datetime.utcnow()
+        changed_at = user.dt_payments_tag_changed_at
+        next_change_at = (
+            changed_at + DT_PAYMENTS_TAG_CHANGE_COOLDOWN
+            if changed_at is not None
+            else None
+        )
+        can_change = next_change_at is None or now >= next_change_at
+
+        return {
+            "tag": user.dt_payments_tag,
+            "changed_at": changed_at,
+            "next_change_at": next_change_at,
+            "can_change": can_change,
+        }
+
+
+async def change_dt_payments_tag(user_id: int, raw_value: str) -> dict:
+    normalized, error = normalize_dt_payments_tag(raw_value)
+    if error:
+        return {"ok": False, "reason": error}
+
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id, with_for_update=True)
+        if user is None:
+            return {"ok": False, "reason": "user_not_found"}
+
+        now = datetime.utcnow()
+        if user.dt_payments_tag_changed_at is not None:
+            next_change_at = (
+                user.dt_payments_tag_changed_at
+                + DT_PAYMENTS_TAG_CHANGE_COOLDOWN
+            )
+            if now < next_change_at:
+                return {
+                    "ok": False,
+                    "reason": "cooldown",
+                    "next_change_at": next_change_at,
+                    "tag": user.dt_payments_tag,
+                }
+
+        if (
+            user.dt_payments_tag
+            and user.dt_payments_tag.lower() == normalized.lower()
+        ):
+            return {
+                "ok": True,
+                "reason": "same",
+                "tag": user.dt_payments_tag,
+                "changed_at": user.dt_payments_tag_changed_at,
+            }
+
+        duplicate = await session.scalar(
+            select(User.id)
+            .where(
+                func.lower(User.dt_payments_tag) == normalized.lower(),
+                User.id != user_id,
+            )
+            .limit(1)
+        )
+        if duplicate is not None:
+            return {"ok": False, "reason": "taken"}
+
+        user.dt_payments_tag = normalized
+        user.dt_payments_tag_changed_at = now
+        await session.commit()
+        await session.refresh(user)
+        return {
+            "ok": True,
+            "reason": "changed",
+            "tag": user.dt_payments_tag,
+            "changed_at": user.dt_payments_tag_changed_at,
+        }
+
+
+def _dt_payments_period_bounds(
+    period: str,
+) -> tuple[datetime | None, datetime | None]:
+    today = _moscow_today()
+
+    if period == "day":
+        return _moscow_day_utc_bounds(today)
+
+    if period == "week":
+        monday = today - timedelta(days=today.weekday())
+        start, _ = _moscow_day_utc_bounds(monday)
+        _, end = _moscow_day_utc_bounds(today)
+        return start, end
+
+    return None, None
+
+
+async def get_dt_payments_feed(limit: int = 12) -> list[dict]:
+    safe_limit = max(1, min(int(limit), 50))
+    async with SessionLocal() as session:
+        rows = (await session.execute(
+            select(
+                Request.id,
+                Request.user_id,
+                Request.amount,
+                Request.payment_confirmed_at,
+                User.dt_payments_tag,
+                User.username,
+                User.full_name,
+            )
+            .join(User, User.id == Request.user_id)
+            .where(Request.payment_confirmed_at.is_not(None))
+            .order_by(
+                Request.payment_confirmed_at.desc(),
+                Request.id.desc(),
+            )
+            .limit(safe_limit)
+        )).all()
+
+        return [
+            {
+                "request_id": int(request_id),
+                "user_id": int(user_id),
+                "amount": int(amount or 0),
+                "confirmed_at": confirmed_at,
+                "tag": dt_tag or "DT-?????",
+                "username": username,
+                "full_name": full_name,
+            }
+            for (
+                request_id,
+                user_id,
+                amount,
+                confirmed_at,
+                dt_tag,
+                username,
+                full_name,
+            ) in rows
+        ]
+
+
+async def get_dt_payments_ranking(
+    period: str,
+    user_id: int | None = None,
+    limit: int = 10,
+) -> dict:
+    period = period if period in {"day", "week", "all"} else "day"
+    start, end = _dt_payments_period_bounds(period)
+
+    async with SessionLocal() as session:
+        conditions = [Request.payment_confirmed_at.is_not(None)]
+        if start is not None:
+            conditions.append(Request.payment_confirmed_at >= start)
+        if end is not None:
+            conditions.append(Request.payment_confirmed_at < end)
+
+        rows = (await session.execute(
+            select(
+                Request.user_id,
+                User.dt_payments_tag,
+                User.username,
+                User.full_name,
+                func.sum(Request.amount).label("turnover"),
+                func.count(Request.id).label("payments"),
+            )
+            .join(User, User.id == Request.user_id)
+            .where(*conditions)
+            .group_by(
+                Request.user_id,
+                User.dt_payments_tag,
+                User.username,
+                User.full_name,
+            )
+            .order_by(
+                func.sum(Request.amount).desc(),
+                func.count(Request.id).desc(),
+                Request.user_id.asc(),
+            )
+        )).all()
+
+    ranking = []
+    for index, row in enumerate(rows, start=1):
+        (
+            ranked_user_id,
+            dt_tag,
+            username,
+            full_name,
+            turnover,
+            payments,
+        ) = row
+        ranking.append({
+            "rank": index,
+            "user_id": int(ranked_user_id),
+            "tag": dt_tag or "DT-?????",
+            "username": username,
+            "full_name": full_name,
+            "turnover": float(turnover or 0),
+            "payments": int(payments or 0),
+        })
+
+    me = None
+    next_gap = None
+    if user_id is not None:
+        me = next(
+            (item for item in ranking if item["user_id"] == user_id),
+            None,
+        )
+        if me and me["rank"] > 1:
+            previous = ranking[me["rank"] - 2]
+            next_gap = max(
+                0.0,
+                float(previous["turnover"]) - float(me["turnover"]),
+            )
+
+    return {
+        "period": period,
+        "top": ranking[:max(1, min(int(limit), 50))],
+        "me": me,
+        "next_gap": next_gap,
+        "participants": len(ranking),
+        "turnover": sum(item["turnover"] for item in ranking),
+        "payments": sum(item["payments"] for item in ranking),
+        "start_at": start,
+        "end_at": end,
+    }
 
 
 # ==================== v2.2: БАЛАНС И РУЧНЫЕ ВЫПЛАТЫ ====================

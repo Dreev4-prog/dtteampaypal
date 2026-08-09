@@ -6,8 +6,137 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💳 ПОЛУЧИТЬ PAYPAL", callback_data="paypal_request")],
         [InlineKeyboardButton(text="📂 МОИ PAYPAL", callback_data="my_paypals")],
         [InlineKeyboardButton(text="💰 КОШЕЛЁК", callback_data="wallet")],
+        [InlineKeyboardButton(text="💸 DT Payments", callback_data="dt_payments")],
         [InlineKeyboardButton(text="👤 ЛИЧНЫЙ КАБИНЕТ", callback_data="profile")],
         [InlineKeyboardButton(text="🛟 ПОДДЕРЖКА", callback_data="support")],
+    ])
+
+
+def dt_payments_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🏆 ТОП ДНЯ",
+                callback_data="dt_payments_top:day",
+            ),
+            InlineKeyboardButton(
+                text="📅 ТОП НЕДЕЛИ",
+                callback_data="dt_payments_top:week",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="👑 ТОП ЗА ВСЁ ВРЕМЯ",
+                callback_data="dt_payments_top:all",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🏷 МОЙ DT-ТЕГ",
+                callback_data="dt_payments_tag",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🔄 ОБНОВИТЬ ЛЕНТУ",
+                callback_data="dt_payments",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⬅️ Главное меню",
+                callback_data="home",
+            )
+        ],
+    ])
+
+
+def dt_payments_ranking_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🏆 День",
+                callback_data="dt_payments_top:day",
+            ),
+            InlineKeyboardButton(
+                text="📅 Неделя",
+                callback_data="dt_payments_top:week",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="👑 Всё время",
+                callback_data="dt_payments_top:all",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⬅️ DT Payments",
+                callback_data="dt_payments",
+            )
+        ],
+    ])
+
+
+def dt_payments_tag_menu(can_change: bool = True) -> InlineKeyboardMarkup:
+    rows = []
+    if can_change:
+        rows.append([
+            InlineKeyboardButton(
+                text="✏️ Изменить DT-тег",
+                callback_data="dt_payments_tag_edit",
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(
+            text="⬅️ DT Payments",
+            callback_data="dt_payments",
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def dt_payments_tag_cancel_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data="dt_payments_tag_cancel",
+            )
+        ]
+    ])
+
+
+def dt_payments_admin_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="📡 Живая лента",
+                callback_data="dt_payments_admin",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🏆 День",
+                callback_data="dt_payments_admin_top:day",
+            ),
+            InlineKeyboardButton(
+                text="📅 Неделя",
+                callback_data="dt_payments_admin_top:week",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="👑 Всё время",
+                callback_data="dt_payments_admin_top:all",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⬅️ Пользователи и статистика",
+                callback_data="members_menu",
+            )
+        ],
     ])
 
 
@@ -109,6 +238,7 @@ def paypal_payments_hub_menu(
 def members_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Подробная статистика", callback_data="statistics_menu")],
+        [InlineKeyboardButton(text="💸 DT Payments", callback_data="dt_payments_admin")],
         [InlineKeyboardButton(text=f"📋 Все ({counts.get('all', 0)})", callback_data="members_list:all:0")],
         [
             InlineKeyboardButton(text=f"🟢 Активные ({counts.get('approved', 0)})", callback_data="members_list:approved:0"),

@@ -88,6 +88,8 @@ from app.db import (
     admin_recall_working_request, bulk_delete_working_day, search_working_requests,
     get_app_setting, set_app_setting, is_work_enabled, set_work_enabled, list_approved_user_ids, mark_payment_gs,
     get_dashboard_summary, get_user_crm_stats, global_admin_search, get_period_statistics,
+    ensure_dt_payments_tag, get_dt_payments_tag_profile, change_dt_payments_tag,
+    get_dt_payments_feed, get_dt_payments_ranking,
     get_user_payout_method, set_user_payout_method, get_user_balance,
     list_users_with_available_balance, get_payout_user_details, complete_manual_payout,
     list_manual_payouts, get_manual_payout, get_payout_dashboard_counts,
@@ -142,6 +144,8 @@ from app.keyboards import (
     broadcast_photo_menu, broadcast_confirm_menu, gs_photo_menu,
     global_search_cancel_menu, global_search_results_menu, crm_user_menu, statistics_period_menu, quick_notify_menu,
     content_menu, content_cancel_menu, content_image_menu,
+    dt_payments_menu, dt_payments_ranking_menu, dt_payments_tag_menu,
+    dt_payments_tag_cancel_menu, dt_payments_admin_menu,
     payout_method_menu, wallet_menu, payout_method_wallet_menu, payout_history_menu, payout_history_card_menu, payouts_users_menu, payout_user_menu, manual_payout_cancel_menu,
 )
 
@@ -160,6 +164,10 @@ class PaypalRequestForm(StatesGroup):
     amount = State()
     gender = State()
     screenshot = State()
+
+
+class DTPaymentsTagForm(StatesGroup):
+    new_tag = State()
 
 
 class PaymentAmountForm(StatesGroup):
@@ -1171,6 +1179,314 @@ async def my_requests(callback: CallbackQuery) -> None:
 
     await render_screen(callback, "requests", text, back_home())
     await callback.answer()
+
+
+
+def _dt_payments_feed_time(value: datetime | None) -> str:
+    local = as_moscow(value)
+    return local.strftime("%d.%m · %H:%M") if local else "—"
+
+
+def _dt_payments_period_title(period: str) -> str:
+    return {
+        "day": "🏆 ТОП ЗА СЕГОДНЯ",
+        "week": "📅 ТОП ЗА НЕДЕЛЮ",
+        "all": "👑 ТОП ЗА ВСЁ ВРЕМЯ",
+    }.get(period, "🏆 ТОП")
+
+
+def _dt_payments_medal(rank: int) -> str:
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"{rank}.")
+
+
+async def _show_dt_payments_home(callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    public_tag = await ensure_dt_payments_tag(user_id)
+    ranking = await get_dt_payments_ranking(
+        "day",
+        user_id=user_id,
+        limit=10,
+    )
+    feed = await get_dt_payments_feed(12)
+    me = ranking.get("me")
+
+    if me:
+        my_line = (
+            f"📍 Сегодня: <b>#{me['rank']}</b> · "
+            f"<b>{me['turnover']:.0f} €</b>"
+        )
+    else:
+        my_line = "📍 Сегодня: <b>пока без подтверждённых оплат</b>"
+
+    lines = [
+        "💸 <b>DT Payments</b>",
+        "",
+        "Живая лента подтверждённых оплат DT Team.",
+        "Telegram пользователей скрыт — в ленте видны только DT-теги.",
+        "",
+        f"🏷 Ваш тег: <b>{escape(public_tag or 'DT-?????')}</b>",
+        my_line,
+        "",
+        "📡 <b>ПОСЛЕДНИЕ ПОДТВЕРЖДЁННЫЕ ОПЛАТЫ</b>",
+    ]
+
+    if not feed:
+        lines.append("")
+        lines.append("Пока подтверждённых оплат нет.")
+    else:
+        for item in feed:
+            lines.append(
+                f"🟢 <b>{escape(item['tag'])}</b> · "
+                f"<b>{item['amount']} €</b> · "
+                f"{_dt_payments_feed_time(item['confirmed_at'])}"
+            )
+
+    lines.extend([
+        "",
+        f"🕒 Обновлено: {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')} МСК",
+    ])
+
+    await replace_photo_with_text(
+        callback,
+        "\n".join(lines),
+        dt_payments_menu(),
+    )
+
+
+@router.callback_query(F.data == "dt_payments")
+async def dt_payments_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not await has_access(callback):
+        return
+    await state.clear()
+    await _show_dt_payments_home(callback)
+    await callback.answer("DT Payments обновлён")
+
+
+@router.callback_query(F.data.startswith("dt_payments_top:"))
+async def dt_payments_top_handler(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+
+    period = callback.data.split(":", 1)[1]
+    if period not in {"day", "week", "all"}:
+        period = "day"
+
+    ranking = await get_dt_payments_ranking(
+        period,
+        user_id=callback.from_user.id,
+        limit=10,
+    )
+    public_tag = await ensure_dt_payments_tag(callback.from_user.id)
+
+    lines = [
+        f"💸 <b>DT Payments</b>",
+        "",
+        f"<b>{_dt_payments_period_title(period)}</b>",
+        "",
+    ]
+
+    if not ranking["top"]:
+        lines.append("Пока подтверждённых оплат за этот период нет.")
+    else:
+        for item in ranking["top"]:
+            lines.append(
+                f"{_dt_payments_medal(item['rank'])} "
+                f"<b>{escape(item['tag'])}</b> — "
+                f"<b>{item['turnover']:.0f} €</b>"
+            )
+
+    lines.extend(["", "━━━━━━━━━━━━━━━━━━"])
+    me = ranking.get("me")
+    if me:
+        lines.append(
+            f"👤 Вы: <b>#{me['rank']}</b> · "
+            f"<b>{escape(public_tag or me['tag'])}</b> · "
+            f"<b>{me['turnover']:.0f} €</b>"
+        )
+        if me["rank"] == 1:
+            lines.append("🔥 Вы сейчас занимаете первое место.")
+        elif ranking.get("next_gap") is not None:
+            gap = ranking["next_gap"]
+            lines.append(
+                f"⬆️ До следующего места: <b>{gap:.0f} €</b>"
+            )
+    else:
+        lines.append(
+            f"👤 Вы: <b>{escape(public_tag or 'DT-?????')}</b> · "
+            "<b>0 €</b>"
+        )
+        lines.append("Первая подтверждённая оплата добавит вас в рейтинг.")
+
+    lines.append(
+        f"👥 Участников рейтинга: <b>{ranking['participants']}</b>"
+    )
+
+    await replace_photo_with_text(
+        callback,
+        "\n".join(lines),
+        dt_payments_ranking_menu(),
+    )
+    await callback.answer()
+
+
+async def _show_dt_payments_tag(callback: CallbackQuery) -> None:
+    profile = await get_dt_payments_tag_profile(callback.from_user.id)
+    if profile is None:
+        await callback.answer("Профиль не найден", show_alert=True)
+        return
+
+    lines = [
+        "🏷 <b>МОЙ DT-ТЕГ</b>",
+        "",
+        f"Ваш публичный тег: <b>{escape(profile['tag'])}</b>",
+        "",
+        "Он показывается другим пользователям только внутри "
+        "DT Payments и рейтингов.",
+        "Ваш Telegram, имя и Telegram ID другим пользователям "
+        "в этом разделе не показываются.",
+        "",
+    ]
+
+    if profile["can_change"]:
+        lines.extend([
+            "✏️ Сейчас тег можно изменить.",
+            "После изменения следующая смена будет доступна через 7 дней.",
+        ])
+    else:
+        lines.extend([
+            "⏳ Тег уже менялся недавно.",
+            f"Следующая смена: <b>{format_dt(profile['next_change_at'])}</b>",
+        ])
+
+    await replace_photo_with_text(
+        callback,
+        "\n".join(lines),
+        dt_payments_tag_menu(profile["can_change"]),
+    )
+
+
+@router.callback_query(F.data == "dt_payments_tag")
+async def dt_payments_tag_handler(callback: CallbackQuery) -> None:
+    if not await has_access(callback):
+        return
+    await _show_dt_payments_tag(callback)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "dt_payments_tag_edit")
+async def dt_payments_tag_edit_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not await has_access(callback):
+        return
+
+    profile = await get_dt_payments_tag_profile(callback.from_user.id)
+    if profile is None:
+        await callback.answer("Профиль не найден", show_alert=True)
+        return
+    if not profile["can_change"]:
+        await callback.answer(
+            "Сменить тег пока нельзя",
+            show_alert=True,
+        )
+        return
+
+    await state.set_state(DTPaymentsTagForm.new_tag)
+    await replace_photo_with_text(
+        callback,
+        "✏️ <b>НОВЫЙ DT-ТЕГ</b>\n\n"
+        "Введите желаемый тег.\n\n"
+        "Можно написать, например:\n"
+        "<code>WOLF</code> → получится <b>DT-WOLF</b>\n\n"
+        "Разрешено: 3–12 символов, латинские буквы, цифры, "
+        "«_» и «-».\n\n"
+        "⚠️ После смены тег нельзя будет менять 7 дней.",
+        dt_payments_tag_cancel_menu(),
+    )
+    await callback.answer()
+
+
+@router.message(DTPaymentsTagForm.new_tag)
+async def dt_payments_tag_input_handler(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    user = await get_user(message.from_user.id)
+    if user is None or user.status != "approved":
+        await state.clear()
+        await show_home(message)
+        return
+
+    result = await change_dt_payments_tag(
+        message.from_user.id,
+        message.text or "",
+    )
+
+    if not result.get("ok"):
+        reason = result.get("reason")
+        if reason == "invalid":
+            text = (
+                "❌ Некорректный тег.\n\n"
+                "Используйте 3–12 символов: латинские буквы, "
+                "цифры, «_» или «-».\n"
+                "Например: <code>WOLF</code>"
+            )
+        elif reason == "reserved":
+            text = "❌ Этот тег зарезервирован DT Team. Выберите другой."
+        elif reason == "taken":
+            text = "❌ Такой DT-тег уже занят. Попробуйте другой."
+        elif reason == "cooldown":
+            text = (
+                "⏳ Тег уже менялся недавно.\n\n"
+                f"Следующая смена: "
+                f"<b>{format_dt(result.get('next_change_at'))}</b>"
+            )
+        else:
+            text = "❌ Не удалось изменить тег. Попробуйте ещё раз."
+
+        await message.answer(
+            text,
+            reply_markup=dt_payments_tag_cancel_menu(),
+        )
+        return
+
+    await state.clear()
+    await message.answer(
+        "✅ <b>DT-тег изменён</b>\n\n"
+        f"Теперь ваш публичный тег: "
+        f"<b>{escape(result['tag'])}</b>\n\n"
+        "Он уже используется в DT Payments и рейтингах.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💸 Открыть DT Payments",
+                    callback_data="dt_payments",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Главное меню",
+                    callback_data="home",
+                )
+            ],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "dt_payments_tag_cancel")
+async def dt_payments_tag_cancel_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    if not await has_access(callback):
+        return
+    await _show_dt_payments_tag(callback)
+    await callback.answer("Отменено")
 
 
 @router.callback_query(F.data == "profile")
@@ -5410,6 +5726,102 @@ async def crm_user_paypals_handler(callback: CallbackQuery) -> None:
         lines.append(f"#{req.id} · {req.amount} € · {tag.tag if tag else 'без PayPal'} · {req.status}")
     if len(lines) == 2: lines.append("Записей нет.")
     await callback.message.edit_text("\n".join(lines), reply_markup=crm_user_menu(user_id, (await get_user(user_id)).status))
+    await callback.answer()
+
+
+
+def _dt_admin_identity(item: dict) -> str:
+    if item.get("username"):
+        return f"@{escape(item['username'])}"
+    if item.get("full_name"):
+        return escape(item["full_name"])
+    return f"ID {item['user_id']}"
+
+
+@router.callback_query(F.data == "dt_payments_admin")
+async def dt_payments_admin_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    today = await get_dt_payments_ranking("day", limit=10)
+    feed = await get_dt_payments_feed(12)
+
+    lines = [
+        "💸 <b>DT Payments · АДМИН</b>",
+        "",
+        f"💶 Оборот сегодня: <b>{today['turnover']:.0f} €</b>",
+        f"✅ Подтверждённых оплат: <b>{today['payments']}</b>",
+        f"👥 Участников: <b>{today['participants']}</b>",
+        "",
+        "📡 <b>ПОСЛЕДНИЕ ОПЛАТЫ</b>",
+    ]
+
+    if not feed:
+        lines.append("Подтверждённых оплат пока нет.")
+    else:
+        for item in feed:
+            lines.append(
+                f"🟢 <b>{escape(item['tag'])}</b> · "
+                f"{_dt_admin_identity(item)} · "
+                f"<b>{item['amount']} €</b> · "
+                f"{_dt_payments_feed_time(item['confirmed_at'])} · "
+                f"#{item['request_id']}"
+            )
+
+    lines.extend([
+        "",
+        "В пользовательской версии реальные Telegram-данные скрыты.",
+        f"🕒 Обновлено: {datetime.now(MOSCOW_TZ).strftime('%H:%M:%S')} МСК",
+    ])
+
+    await replace_photo_with_text(
+        callback,
+        "\n".join(lines),
+        dt_payments_admin_menu(),
+    )
+    await callback.answer("DT Payments обновлён")
+
+
+@router.callback_query(F.data.startswith("dt_payments_admin_top:"))
+async def dt_payments_admin_top_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    period = callback.data.split(":", 1)[1]
+    if period not in {"day", "week", "all"}:
+        period = "day"
+
+    ranking = await get_dt_payments_ranking(period, limit=20)
+
+    lines = [
+        "💸 <b>DT Payments · АДМИН</b>",
+        "",
+        f"<b>{_dt_payments_period_title(period)}</b>",
+        f"💶 Оборот: <b>{ranking['turnover']:.0f} €</b>",
+        f"✅ Оплат: <b>{ranking['payments']}</b>",
+        f"👥 Участников: <b>{ranking['participants']}</b>",
+        "",
+    ]
+
+    if not ranking["top"]:
+        lines.append("Данных за этот период нет.")
+    else:
+        for item in ranking["top"]:
+            lines.append(
+                f"{_dt_payments_medal(item['rank'])} "
+                f"<b>{escape(item['tag'])}</b> · "
+                f"{_dt_admin_identity(item)} · "
+                f"<b>{item['turnover']:.0f} €</b> · "
+                f"{item['payments']} оплат"
+            )
+
+    await replace_photo_with_text(
+        callback,
+        "\n".join(lines),
+        dt_payments_admin_menu(),
+    )
     await callback.answer()
 
 
