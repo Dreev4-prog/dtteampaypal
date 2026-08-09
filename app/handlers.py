@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from io import BytesIO
+from html import escape
 
 from openpyxl import Workbook
 
@@ -2342,7 +2343,21 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
         "paid_out": "✅ Выплачено клиенту",
         "not_found": "🔴 Оплата не найдена",
     }
-    username = f"@{user.username}" if user and user.username else "не указан"
+    # User profile fields are user-controlled. Escape them before inserting
+    # into an HTML-formatted Telegram message so one unusual name cannot make
+    # the whole payment card fail to open.
+    safe_full_name = escape(
+        user.full_name if user and user.full_name else "не указано"
+    )
+    safe_username = (
+        "@" + escape(user.username)
+        if user and user.username
+        else "не указан"
+    )
+    safe_paypal_tag = escape(
+        tag.tag if tag and tag.tag else "не найден"
+    )
+
     if req.happy_hours_applied:
         rate_source_line = f"🔥 Happy Hours: <b>{req.payout_percent}%</b>\n"
     elif req.happy_hours_percent is not None:
@@ -2355,10 +2370,10 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
 
     text = (
         f"💰 <b>Платёжная заявка #{req.id}</b>\n\n"
-        f"👤 {user.full_name if user and user.full_name else 'не указано'}\n"
-        f"Username: {username}\n"
+        f"👤 {safe_full_name}\n"
+        f"Username: {safe_username}\n"
         f"🆔 <code>{req.user_id}</code>\n\n"
-        f"💳 PayPal: <code>{tag.tag if tag else 'не найден'}</code>\n"
+        f"💳 PayPal: <code>{safe_paypal_tag}</code>\n"
         f"💶 Сумма: <b>{req.amount} €</b>\n"
         + (f"📊 Процент: <b>{req.payout_percent}%</b>\n💰 Начислено пользователю: <b>{float(req.payout_amount):.2f} USDT</b>\n" if req.payout_percent is not None and req.payout_amount is not None else "")
         + rate_source_line
@@ -2394,9 +2409,26 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
             await callback.message.delete()
         except TelegramBadRequest:
             pass
-        await callback.bot.send_message(callback.message.chat.id, text, reply_markup=markup)
+        await callback.bot.send_message(
+            callback.message.chat.id,
+            text,
+            reply_markup=markup,
+        )
     else:
-        await callback.message.edit_text(text, reply_markup=markup)
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=markup,
+            )
+        except TelegramBadRequest:
+            # Some old/list messages may be impossible to edit. Never leave
+            # the admin with a button that looks dead: open the card as a new
+            # message instead.
+            await callback.bot.send_message(
+                callback.message.chat.id,
+                text,
+                reply_markup=markup,
+            )
     await callback.answer()
 
 
