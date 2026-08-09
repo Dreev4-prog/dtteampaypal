@@ -1788,30 +1788,11 @@ def format_happy_clock(value: datetime | None) -> str:
 
 
 async def _attach_request_display(requests, bot=None) -> None:
-    """Attach current username and PayPal tag for admin list buttons.
+    """Attach display data from local DB only.
 
-    When a bot instance is available, refresh the visible Telegram profile
-    directly by stable Telegram ID before rendering the row.
+    Admin payment lists must not call Telegram API for every row.
     """
     for req in requests:
-        if bot is not None:
-            try:
-                chat = await bot.get_chat(req.user_id)
-                first_name = getattr(chat, "first_name", None)
-                last_name = getattr(chat, "last_name", None)
-                full_name = " ".join(
-                    part for part in (first_name, last_name) if part
-                ) or getattr(chat, "title", None)
-                await sync_user_profile(
-                    req.user_id,
-                    getattr(chat, "username", None),
-                    full_name,
-                )
-            except Exception:
-                # Telegram may refuse a chat lookup in some edge cases.
-                # The stored profile is still safe to use.
-                pass
-
         user = await get_user(req.user_id)
         tag = (
             await get_paypal_tag(req.paypal_tag_id)
@@ -2335,7 +2316,7 @@ async def payments_list_handler(callback: CallbackQuery) -> None:
         offset,
         page_size,
     )
-    await _attach_request_display(requests, callback.bot)
+    await _attach_request_display(requests)
     titles = {
         "check": "🟠 Ожидают проверки оплаты",
         "payout": "💸 Вывести деньги",
@@ -2386,21 +2367,7 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
     if req is None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
-    try:
-        chat = await callback.bot.get_chat(req.user_id)
-        first_name = getattr(chat, "first_name", None)
-        last_name = getattr(chat, "last_name", None)
-        current_full_name = " ".join(
-            part for part in (first_name, last_name) if part
-        ) or getattr(chat, "title", None)
-        await sync_user_profile(
-            req.user_id,
-            getattr(chat, "username", None),
-            current_full_name,
-        )
-    except Exception:
-        pass
-
+    # Fast path: use local DB first.
     user = await get_user(req.user_id)
     tag = await get_paypal_tag(req.paypal_tag_id)
     status_names = {
@@ -2471,16 +2438,41 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
         offset,
         paypal_withdrawn=req.paypal_withdrawn_at is not None,
     )
+    async def _refresh_profile_after_card_failure() -> None:
+        """Refresh only this one Telegram profile after a card render failure."""
+        try:
+            chat = await callback.bot.get_chat(req.user_id)
+            first_name = getattr(chat, "first_name", None)
+            last_name = getattr(chat, "last_name", None)
+            current_full_name = " ".join(
+                part for part in (first_name, last_name) if part
+            ) or getattr(chat, "title", None)
+            await sync_user_profile(
+                req.user_id,
+                getattr(chat, "username", None),
+                current_full_name,
+            )
+        except Exception:
+            pass
+
     if callback.message.photo:
         try:
             await callback.message.delete()
         except TelegramBadRequest:
             pass
-        await callback.bot.send_message(
-            callback.message.chat.id,
-            text,
-            reply_markup=markup,
-        )
+        try:
+            await callback.bot.send_message(
+                callback.message.chat.id,
+                text,
+                reply_markup=markup,
+            )
+        except TelegramBadRequest:
+            await _refresh_profile_after_card_failure()
+            await callback.bot.send_message(
+                callback.message.chat.id,
+                text,
+                reply_markup=markup,
+            )
     else:
         try:
             await callback.message.edit_text(
@@ -2488,14 +2480,19 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
                 reply_markup=markup,
             )
         except TelegramBadRequest:
-            # Some old/list messages may be impossible to edit. Never leave
-            # the admin with a button that looks dead: open the card as a new
-            # message instead.
-            await callback.bot.send_message(
-                callback.message.chat.id,
-                text,
-                reply_markup=markup,
-            )
+            # Slow Telegram profile lookup happens only after this card failed.
+            await _refresh_profile_after_card_failure()
+            try:
+                await callback.message.edit_text(
+                    text,
+                    reply_markup=markup,
+                )
+            except TelegramBadRequest:
+                await callback.bot.send_message(
+                    callback.message.chat.id,
+                    text,
+                    reply_markup=markup,
+                )
     await callback.answer()
 
 
