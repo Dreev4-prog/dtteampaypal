@@ -5,7 +5,7 @@ import secrets
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, select, text, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, select, text, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
