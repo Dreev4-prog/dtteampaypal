@@ -337,6 +337,31 @@ async def get_user(user_id: int) -> User | None:
         return await session.get(User, user_id)
 
 
+async def sync_user_profile(
+    user_id: int,
+    username: str | None,
+    full_name: str | None,
+) -> User | None:
+    """Refresh Telegram profile fields without changing access/status."""
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            return None
+
+        changed = False
+        if user.username != username:
+            user.username = username
+            changed = True
+        if user.full_name != full_name:
+            user.full_name = full_name
+            changed = True
+
+        if changed:
+            await session.commit()
+            await session.refresh(user)
+        return user
+
+
 async def submit_membership_application(user_id: int) -> User | None:
     async with SessionLocal() as session:
         user = await session.get(User, user_id)

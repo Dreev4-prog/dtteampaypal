@@ -38,6 +38,7 @@ from app.db import (
     create_request,
     get_or_create_user,
     get_user,
+    sync_user_profile,
     get_request,
     get_user_requests,
     get_user_requests_by_statuses,
@@ -307,11 +308,19 @@ async def render_custom_photo_screen(
 
 async def show_home(target: Message | CallbackQuery) -> None:
     user_id = target.from_user.id
-    user = await get_user(user_id)
+    user = await sync_user_profile(
+        user_id,
+        target.from_user.username,
+        target.from_user.full_name,
+    )
 
     if user is None:
         username = target.from_user.username
-        user = await get_or_create_user(user_id, username, target.from_user.full_name)
+        user = await get_or_create_user(
+            user_id,
+            username,
+            target.from_user.full_name,
+        )
 
     if user.status == "blocked":
         await render_screen(
@@ -359,11 +368,24 @@ async def show_home(target: Message | CallbackQuery) -> None:
 
 
 async def has_access(callback: CallbackQuery) -> bool:
-    user = await get_user(callback.from_user.id)
+    # Telegram ID is the permanent identity. Username/full name are mutable
+    # and are refreshed on every ordinary user callback.
+    user = await sync_user_profile(
+        callback.from_user.id,
+        callback.from_user.username,
+        callback.from_user.full_name,
+    )
+    if user is None:
+        user = await get_user(callback.from_user.id)
+
     if user is not None and user.status == "approved":
         return True
+
     await show_home(callback)
-    await callback.answer("Сначала дождитесь одобрения", show_alert=True)
+    await callback.answer(
+        "Сначала дождитесь одобрения",
+        show_alert=True,
+    )
     return False
 
 
@@ -1765,11 +1787,37 @@ def format_happy_clock(value: datetime | None) -> str:
     return local.strftime("%H:%M") if local else "—"
 
 
-async def _attach_request_display(requests) -> None:
-    """Attach human-readable username and PayPal tag for admin list buttons."""
+async def _attach_request_display(requests, bot=None) -> None:
+    """Attach current username and PayPal tag for admin list buttons.
+
+    When a bot instance is available, refresh the visible Telegram profile
+    directly by stable Telegram ID before rendering the row.
+    """
     for req in requests:
+        if bot is not None:
+            try:
+                chat = await bot.get_chat(req.user_id)
+                first_name = getattr(chat, "first_name", None)
+                last_name = getattr(chat, "last_name", None)
+                full_name = " ".join(
+                    part for part in (first_name, last_name) if part
+                ) or getattr(chat, "title", None)
+                await sync_user_profile(
+                    req.user_id,
+                    getattr(chat, "username", None),
+                    full_name,
+                )
+            except Exception:
+                # Telegram may refuse a chat lookup in some edge cases.
+                # The stored profile is still safe to use.
+                pass
+
         user = await get_user(req.user_id)
-        tag = await get_paypal_tag(req.paypal_tag_id) if getattr(req, "paypal_tag_id", None) else None
+        tag = (
+            await get_paypal_tag(req.paypal_tag_id)
+            if getattr(req, "paypal_tag_id", None)
+            else None
+        )
         if user and user.username:
             username = f"@{user.username}"
         elif user and user.full_name:
@@ -2282,8 +2330,12 @@ async def payments_list_handler(callback: CallbackQuery) -> None:
     _, filter_name, offset_text = callback.data.split(":", 2)
     offset = max(0, int(offset_text))
     page_size = 10
-    requests, has_next = await list_payment_requests(filter_name, offset, page_size)
-    await _attach_request_display(requests)
+    requests, has_next = await list_payment_requests(
+        filter_name,
+        offset,
+        page_size,
+    )
+    await _attach_request_display(requests, callback.bot)
     titles = {
         "check": "🟠 Ожидают проверки оплаты",
         "payout": "💸 Вывести деньги",
@@ -2334,6 +2386,21 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
     if req is None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
+    try:
+        chat = await callback.bot.get_chat(req.user_id)
+        first_name = getattr(chat, "first_name", None)
+        last_name = getattr(chat, "last_name", None)
+        current_full_name = " ".join(
+            part for part in (first_name, last_name) if part
+        ) or getattr(chat, "title", None)
+        await sync_user_profile(
+            req.user_id,
+            getattr(chat, "username", None),
+            current_full_name,
+        )
+    except Exception:
+        pass
+
     user = await get_user(req.user_id)
     tag = await get_paypal_tag(req.paypal_tag_id)
     status_names = {
