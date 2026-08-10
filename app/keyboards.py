@@ -157,8 +157,17 @@ def membership_admin_menu(user_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeyboardMarkup:
+def admin_main_menu(
+    pending_count: int = 0,
+    queue_count: int = 0,
+    auto_issue_enabled: bool = False,
+) -> InlineKeyboardMarkup:
     queue_label = f"📥 ОЧЕРЕДЬ PAYPAL ({queue_count})"
+    work_label = (
+        "▶️ START / ⏹ STOP · 🤖 AUTO 🟢"
+        if auto_issue_enabled
+        else "▶️ START / ⏹ STOP · 🤖 AUTO 🔴"
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=queue_label, callback_data="paypal_queue:0")],
         [
@@ -169,7 +178,7 @@ def admin_main_menu(pending_count: int = 0, queue_count: int = 0) -> InlineKeybo
         [InlineKeyboardButton(text="📣 КОНТЕНТ И РАССЫЛКИ", callback_data="content_menu")],
         [
             InlineKeyboardButton(text="⚙️ ПРОЦЕНТЫ", callback_data="rates_menu"),
-            InlineKeyboardButton(text="▶️ START / ⏹ STOP", callback_data="work_control"),
+            InlineKeyboardButton(text=work_label, callback_data="work_control"),
         ],
         [InlineKeyboardButton(text="🔥 HAPPY HOURS", callback_data="happy_hours_menu")],
         [InlineKeyboardButton(text="🔍 ОБЩИЙ ПОИСК", callback_data="global_search")],
@@ -1132,16 +1141,31 @@ def working_search_cancel_menu() -> InlineKeyboardMarkup:
     ])
 
 
-def work_control_menu(enabled: bool) -> InlineKeyboardMarkup:
+def work_control_menu(
+    enabled: bool,
+    auto_issue_enabled: bool = False,
+) -> InlineKeyboardMarkup:
     status = "🟢 Работа запущена" if enabled else "🔴 Работа остановлена"
     action = (
         InlineKeyboardButton(text="🛑 STOP WORK", callback_data="work_stop")
         if enabled else
         InlineKeyboardButton(text="🚀 START WORK", callback_data="work_start")
     )
+    auto_action = (
+        InlineKeyboardButton(
+            text="⛔ Выключить автовыдачу",
+            callback_data="auto_issue_off",
+        )
+        if auto_issue_enabled
+        else InlineKeyboardButton(
+            text="🤖 Включить автовыдачу",
+            callback_data="auto_issue_on",
+        )
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=status, callback_data="work_control")],
         [action],
+        [auto_action],
         [InlineKeyboardButton(text="✏️ Текст Start Work", callback_data="work_edit:start")],
         [InlineKeyboardButton(text="🖼 Картинка Start Work", callback_data="work_image:start")],
         [InlineKeyboardButton(text="✏️ Текст Stop Work", callback_data="work_edit:stop")],

@@ -86,7 +86,9 @@ from app.db import (
     get_working_dates, get_working_requests_by_date, mark_collection_notified,
     confirm_paypal_keep, user_return_paypal_after_warning, list_unconfirmed_collection,
     admin_recall_working_request, bulk_delete_working_day, search_working_requests,
-    get_app_setting, set_app_setting, is_work_enabled, set_work_enabled, list_approved_user_ids, mark_payment_gs,
+    get_app_setting, set_app_setting, is_work_enabled, set_work_enabled,
+    is_auto_issue_enabled, set_auto_issue_enabled,
+    list_approved_user_ids, mark_payment_gs,
     get_dashboard_summary, get_user_crm_stats, global_admin_search, get_period_statistics,
     ensure_dt_payments_tag, get_dt_payments_tag_profile, change_dt_payments_tag,
     get_dt_payments_feed, get_dt_payments_ranking,
@@ -760,6 +762,52 @@ async def paypal_gender_choice(callback: CallbackQuery, state: FSMContext) -> No
     await callback.answer()
 
 
+async def _send_auto_issued_paypal(
+    message: Message,
+    req,
+    tag,
+) -> None:
+    campaign = await get_happy_hours_campaign(req.happy_hours_campaign_id)
+    promo_text = ""
+    if (
+        campaign is not None
+        and campaign.is_enabled == 1
+        and datetime.utcnow() < campaign.end_at
+    ):
+        if req.amount >= campaign.min_amount:
+            promo_text = (
+                "\n🔥 <b>HAPPY HOURS</b>\n"
+                f"📈 Повышенный процент: <b>{campaign.percent}%</b>\n"
+                f"💶 Условие: от <b>{campaign.min_amount} €</b>\n"
+                f"⏳ Нажмите «Я оплатил» до "
+                f"<b>{format_happy_clock(campaign.end_at)} МСК</b>, "
+                "чтобы процент зафиксировался.\n"
+            )
+        else:
+            promo_text = (
+                "\n🔥 <b>HAPPY HOURS</b>\n"
+                f"Акция действует от <b>{campaign.min_amount} €</b>. "
+                "Для этой суммы применяется стандартный процент.\n"
+            )
+
+    caption = (
+        "🤖 <b>PayPal выдан автоматически</b>\n\n"
+        f"Заявка: <b>#{req.id}</b>\n"
+        f"Сумма: <b>{req.amount} €</b>\n"
+        f"PayPal: <code>{tag.tag}</code>\n"
+        f"🕒 Выдан: <b>{format_dt(req.processed_at)}</b>\n"
+        f"{promo_text}\n"
+        "После оплаты нажмите кнопку ниже."
+    )
+
+    await message.bot.send_photo(
+        req.user_id,
+        photo=tag.photo_file_id or FSInputFile(BANNERS["issued"]),
+        caption=caption,
+        reply_markup=paid_button(req.id),
+    )
+
+
 @router.message(PaypalRequestForm.screenshot, F.photo)
 async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
     user = await get_user(message.from_user.id)
@@ -801,6 +849,66 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
     )
     await state.clear()
 
+    auto_enabled = await is_auto_issue_enabled()
+    auto_req = None
+    auto_tag = None
+
+    if auto_enabled and await is_work_enabled():
+        # issue_paypal uses row locks + skip_locked and only takes a truly
+        # available PayPal of the selected gender, so concurrent requests
+        # cannot receive the same PayPal.
+        auto_req, auto_tag = await issue_paypal(req.id)
+
+    username = (
+        f"@{message.from_user.username}"
+        if message.from_user.username
+        else "без username"
+    )
+
+    if auto_req is not None and auto_tag is not None:
+        try:
+            await _send_auto_issued_paypal(
+                message,
+                auto_req,
+                auto_tag,
+            )
+        except Exception:
+            # Issuance is already safely stored in DB. A failed Telegram send
+            # is reported to admins instead of rolling back/reissuing.
+            pass
+
+        await message.answer(
+            f"🤖 <b>Заявка #{auto_req.id} обработана автоматически</b>\n\n"
+            f"Сумма: <b>{amount} €</b>\n"
+            f"Тип: {'👨 Мужской' if gender == 'male' else '👩 Женский'}\n"
+            f"PayPal: <code>{auto_tag.tag}</code>",
+            reply_markup=back_home(),
+        )
+
+        admin_caption = (
+            f"🤖 <b>АВТОВЫДАЧА · заявка #{auto_req.id}</b>\n\n"
+            f"👤 {message.from_user.full_name}\n"
+            f"Username: {username}\n"
+            f"🆔 <code>{message.from_user.id}</code>\n"
+            f"💶 Сумма: <b>{amount} €</b>\n"
+            f"🚻 Тип: {'👨 Мужской' if gender == 'male' else '👩 Женский'}\n"
+            f"💳 Выдан: <code>{auto_tag.tag}</code>\n"
+            f"🕒 {format_dt(auto_req.processed_at)}\n\n"
+            "✅ Действий от администратора не требуется."
+        )
+        for admin_id in settings.admin_ids:
+            try:
+                await message.bot.send_photo(
+                    admin_id,
+                    photo=screenshot_file_id,
+                    caption=admin_caption,
+                )
+            except Exception:
+                pass
+        return
+
+    # Manual fallback: AUTO is off, or stock disappeared between the final
+    # stock check and row-locked issuance.
     await message.answer(
         f"✅ <b>Заявка #{req.id} принята</b>\n\n"
         f"Сумма: <b>{amount} €</b>\n"
@@ -809,7 +917,6 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
         reply_markup=back_home(),
     )
 
-    username = f"@{message.from_user.username}" if message.from_user.username else "без username"
     caption = (
         f"📥 <b>Новая заявка PayPal #{req.id}</b>\n\n"
         f"👤 {message.from_user.full_name}\n"
@@ -1542,9 +1649,24 @@ async def replace_photo_with_text(callback: CallbackQuery, text: str, reply_mark
 async def show_admin_home(target: Message | CallbackQuery) -> None:
     data = await get_dashboard_summary()
     work_enabled = await is_work_enabled()
+    auto_issue_enabled = await is_auto_issue_enabled()
     updated_at = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%H:%M:%S")
-    text = admin_dashboard_caption(data, work_enabled, updated_at)
-    await render_screen(target, "admin", text, admin_main_menu(0, data["queue"]))
+    text = admin_dashboard_caption(
+        data,
+        work_enabled,
+        updated_at,
+        auto_issue_enabled,
+    )
+    await render_screen(
+        target,
+        "admin",
+        text,
+        admin_main_menu(
+            0,
+            data["queue"],
+            auto_issue_enabled,
+        ),
+    )
 
 
 @router.message(Command("admin"))
@@ -1749,19 +1871,27 @@ async def work_control_handler(callback: CallbackQuery, state: FSMContext) -> No
         return
     await state.clear()
     enabled = await is_work_enabled()
+    auto_enabled = await is_auto_issue_enabled()
     start_text = await get_app_setting("start_work_message")
     stop_text = await get_app_setting("stop_work_message")
     start_image = await get_app_setting("start_work_image")
     stop_image = await get_app_setting("stop_work_image")
     text = (
         "⚙️ <b>Управление работой</b>\n\n"
-        f"Текущий режим: <b>{'🟢 START WORK' if enabled else '🔴 STOP WORK'}</b>\n\n"
+        f"Текущий режим: <b>{'🟢 START WORK' if enabled else '🔴 STOP WORK'}</b>\n"
+        f"🤖 Автовыдача: <b>{'🟢 ВКЛЮЧЕНА' if auto_enabled else '🔴 ВЫКЛЮЧЕНА'}</b>\n"
+        + (
+            "ℹ️ При STOP WORK автовыдача не принимает новые заявки.\n"
+            if auto_enabled and not enabled
+            else ""
+        )
+        + "\n"
         f"<b>Картинка Start Work:</b> {'✅ установлена' if start_image else '❌ нет'}\n"
         "<b>Сообщение Start Work:</b>\n" + start_text +
         f"\n\n<b>Картинка Stop Work:</b> {'✅ установлена' if stop_image else '❌ нет'}\n"
         "<b>Сообщение Stop Work:</b>\n" + stop_text
     )
-    await replace_photo_with_text(callback, text, work_control_menu(enabled))
+    await replace_photo_with_text(callback, text, work_control_menu(enabled, auto_enabled))
     await callback.answer()
 
 
@@ -1791,7 +1921,10 @@ async def work_start_handler(callback: CallbackQuery) -> None:
     sent, failed = await _broadcast_work_message(callback, text, image_file_id)
     await callback.message.edit_text(
         f"🚀 <b>START WORK включён</b>\n\nУведомлено: <b>{sent}</b>\nНе доставлено: <b>{failed}</b>",
-        reply_markup=work_control_menu(True),
+        reply_markup=work_control_menu(
+            True,
+            await is_auto_issue_enabled(),
+        ),
     )
     await callback.answer("Приём заявок открыт")
 
@@ -1807,9 +1940,58 @@ async def work_stop_handler(callback: CallbackQuery) -> None:
     sent, failed = await _broadcast_work_message(callback, text, image_file_id)
     await callback.message.edit_text(
         f"🛑 <b>STOP WORK включён</b>\n\nНовые заявки отключены. Уже выданные PayPal и текущие оплаты продолжают работать.\n\nУведомлено: <b>{sent}</b>\nНе доставлено: <b>{failed}</b>",
-        reply_markup=work_control_menu(False),
+        reply_markup=work_control_menu(
+            False,
+            await is_auto_issue_enabled(),
+        ),
     )
     await callback.answer("Приём новых заявок остановлен")
+
+
+@router.callback_query(F.data == "auto_issue_on")
+async def auto_issue_on_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await set_auto_issue_enabled(True)
+    work_enabled = await is_work_enabled()
+    stock = await get_requestable_paypal_gender_counts()
+
+    await callback.message.edit_text(
+        "🤖 <b>АВТОВЫДАЧА ВКЛЮЧЕНА</b>\n\n"
+        f"Режим работы: <b>{'🟢 START WORK' if work_enabled else '🔴 STOP WORK'}</b>\n"
+        f"👨 Доступно мужских: <b>{stock['male']}</b>\n"
+        f"👩 Доступно женских: <b>{stock['female']}</b>\n\n"
+        + (
+            "Новые заявки будут автоматически получать следующий "
+            "свободный PayPal нужного типа."
+            if work_enabled
+            else
+            "Автовыдача сохранена включённой, но начнёт выдавать "
+            "только после START WORK."
+        ),
+        reply_markup=work_control_menu(work_enabled, True),
+    )
+    await callback.answer("Автовыдача включена")
+
+
+@router.callback_query(F.data == "auto_issue_off")
+async def auto_issue_off_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    await set_auto_issue_enabled(False)
+    work_enabled = await is_work_enabled()
+
+    await callback.message.edit_text(
+        "⛔ <b>АВТОВЫДАЧА ВЫКЛЮЧЕНА</b>\n\n"
+        "Новые заявки снова будут ждать ручной проверки и выдачи "
+        "администратором.",
+        reply_markup=work_control_menu(work_enabled, False),
+    )
+    await callback.answer("Автовыдача выключена")
 
 
 @router.callback_query(F.data.startswith("work_edit:"))
@@ -1858,7 +2040,7 @@ async def work_edit_save(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         f"✅ Текст {'Start Work' if kind == 'start' else 'Stop Work'} сохранён.",
-        reply_markup=work_control_menu(await is_work_enabled()),
+        reply_markup=work_control_menu(await is_work_enabled(), await is_auto_issue_enabled()),
     )
 
 
@@ -1906,7 +2088,7 @@ async def work_image_save(message: Message, state: FSMContext) -> None:
     await message.answer_photo(
         file_id,
         caption=f"✅ Картинка {'Start Work' if kind == 'start' else 'Stop Work'} сохранена.\n\n{current_text}",
-        reply_markup=work_control_menu(await is_work_enabled()),
+        reply_markup=work_control_menu(await is_work_enabled(), await is_auto_issue_enabled()),
     )
 
 
@@ -1928,7 +2110,7 @@ async def work_image_delete(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.message.edit_text(
         f"✅ Картинка {'Start Work' if kind == 'start' else 'Stop Work'} удалена.",
-        reply_markup=work_control_menu(await is_work_enabled()),
+        reply_markup=work_control_menu(await is_work_enabled(), await is_auto_issue_enabled()),
     )
     await callback.answer()
 

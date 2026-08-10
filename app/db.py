@@ -270,6 +270,7 @@ async def init_db() -> None:
         await conn.execute(text("""
             INSERT INTO app_settings (key, value, updated_at) VALUES
             ('work_enabled', '0', CURRENT_TIMESTAMP),
+            ('auto_issue_enabled', '0', CURRENT_TIMESTAMP),
             ('start_work_message', '🚀 <b>START WORK</b>\n\nПриём заявок на PayPal открыт. Можно создавать новые заявки.', CURRENT_TIMESTAMP),
             ('stop_work_message', '🛑 <b>STOP WORK</b>\n\nПриём новых заявок на PayPal остановлен. Продолжайте работу только с уже выданными PayPal.', CURRENT_TIMESTAMP),
             ('start_work_image', '', CURRENT_TIMESTAMP),
@@ -2177,6 +2178,17 @@ async def set_work_enabled(enabled: bool) -> None:
     await set_app_setting("work_enabled", "1" if enabled else "0")
 
 
+async def is_auto_issue_enabled() -> bool:
+    return (await get_app_setting("auto_issue_enabled", "0")) == "1"
+
+
+async def set_auto_issue_enabled(enabled: bool) -> None:
+    await set_app_setting(
+        "auto_issue_enabled",
+        "1" if enabled else "0",
+    )
+
+
 async def list_approved_user_ids() -> list[int]:
     async with SessionLocal() as session:
         return list(await session.scalars(select(User.id).where(User.status == "approved")))
@@ -2219,6 +2231,7 @@ async def get_dashboard_summary() -> dict:
             "gs": await scalar(select(func.count(PaypalTag.id)).where(PaypalTag.status == "gs")),
             "users": await scalar(select(func.count(User.id)).where(User.status == "approved")),
             "queue": await scalar(select(func.count(Request.id)).where(Request.status == "waiting_issue")),
+            "auto_issue": 1 if await is_auto_issue_enabled() else 0,
         }
 
 async def get_user_crm_stats(user_id: int) -> dict:

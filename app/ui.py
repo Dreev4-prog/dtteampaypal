@@ -21,10 +21,17 @@ def user_home_caption(work_enabled: bool = True) -> str:
     )
 
 
-def admin_dashboard_caption(data: dict, work_enabled: bool, updated_at: str) -> str:
+def admin_dashboard_caption(
+    data: dict,
+    work_enabled: bool,
+    updated_at: str,
+    auto_issue_enabled: bool = False,
+) -> str:
     mode = "🟢 START WORK" if work_enabled else "🔴 STOP WORK"
+    auto_mode = "🟢 ВКЛ" if auto_issue_enabled else "🔴 ВЫКЛ"
     body = (
-        f"Режим: <b>{mode}</b>\n\n"
+        f"Режим: <b>{mode}</b>\n"
+        f"🤖 Автовыдача: <b>{auto_mode}</b>\n\n"
         f"🟢 Свободно: <b>{data['available']}</b>\n"
         f"🔵 В работе: <b>{data['working']}</b>\n"
         f"📥 Новые заявки: <b>{data['queue']}</b>\n"
