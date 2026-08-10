@@ -1,4 +1,5 @@
 from pathlib import Path
+import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from io import BytesIO
@@ -791,7 +792,7 @@ async def _send_auto_issued_paypal(
             )
 
     caption = (
-        "🤖 <b>PayPal выдан автоматически</b>\n\n"
+        "✅ <b>PayPal выдан</b>\n\n"
         f"Заявка: <b>#{req.id}</b>\n"
         f"Сумма: <b>{req.amount} €</b>\n"
         f"PayPal: <code>{tag.tag}</code>\n"
@@ -850,14 +851,34 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
     await state.clear()
 
     auto_enabled = await is_auto_issue_enabled()
+
+    # Recipient always sees the same neutral flow. AUTO is an internal
+    # administrator mode and is never exposed in user-facing messages.
+    await message.answer(
+        f"✅ <b>Заявка #{req.id} принята</b>\n\n"
+        f"Сумма: <b>{amount} €</b>\n"
+        f"Тип: {'👨 Мужской' if gender == 'male' else '👩 Женский'}\n"
+        "Скриншот получен. Ожидайте выдачи PayPal.",
+        reply_markup=back_home(),
+    )
+
     auto_req = None
     auto_tag = None
-
     if auto_enabled and await is_work_enabled():
-        # issue_paypal uses row locks + skip_locked and only takes a truly
-        # available PayPal of the selected gender, so concurrent requests
-        # cannot receive the same PayPal.
-        auto_req, auto_tag = await issue_paypal(req.id)
+        # Intentional delay makes AUTO indistinguishable from ordinary
+        # administrator processing for the recipient.
+        await asyncio.sleep(10)
+
+        # Re-check mode after the delay. If the administrator disabled AUTO
+        # or STOP WORK was enabled during these 10 seconds, leave the request
+        # in the normal queue.
+        if (
+            await is_auto_issue_enabled()
+            and await is_work_enabled()
+        ):
+            # issue_paypal is the authoritative stock check and uses row locks
+            # + skip_locked, preventing double issuance under concurrency.
+            auto_req, auto_tag = await issue_paypal(req.id)
 
     username = (
         f"@{message.from_user.username}"
@@ -873,17 +894,9 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
                 auto_tag,
             )
         except Exception:
-            # Issuance is already safely stored in DB. A failed Telegram send
-            # is reported to admins instead of rolling back/reissuing.
+            # Issuance is already safely stored in DB. Admins still receive
+            # the internal AUTO event below.
             pass
-
-        await message.answer(
-            f"🤖 <b>Заявка #{auto_req.id} обработана автоматически</b>\n\n"
-            f"Сумма: <b>{amount} €</b>\n"
-            f"Тип: {'👨 Мужской' if gender == 'male' else '👩 Женский'}\n"
-            f"PayPal: <code>{auto_tag.tag}</code>",
-            reply_markup=back_home(),
-        )
 
         admin_caption = (
             f"🤖 <b>АВТОВЫДАЧА · заявка #{auto_req.id}</b>\n\n"
@@ -893,7 +906,8 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
             f"💶 Сумма: <b>{amount} €</b>\n"
             f"🚻 Тип: {'👨 Мужской' if gender == 'male' else '👩 Женский'}\n"
             f"💳 Выдан: <code>{auto_tag.tag}</code>\n"
-            f"🕒 {format_dt(auto_req.processed_at)}\n\n"
+            f"🕒 {format_dt(auto_req.processed_at)}\n"
+            "⏱ Автовыдача: задержка 10 секунд\n\n"
             "✅ Действий от администратора не требуется."
         )
         for admin_id in settings.admin_ids:
@@ -907,16 +921,8 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
                 pass
         return
 
-    # Manual fallback: AUTO is off, or stock disappeared between the final
-    # stock check and row-locked issuance.
-    await message.answer(
-        f"✅ <b>Заявка #{req.id} принята</b>\n\n"
-        f"Сумма: <b>{amount} €</b>\n"
-        f"Тип: {'👨 Мужской' if gender == 'male' else '👩 Женский'}\n"
-        "Скриншот получен. Ожидайте выдачи PayPal.",
-        reply_markup=back_home(),
-    )
-
+    # Manual fallback: AUTO is off, was disabled during the delay, STOP WORK
+    # was enabled, or stock disappeared before the row-locked issuance.
     caption = (
         f"📥 <b>Новая заявка PayPal #{req.id}</b>\n\n"
         f"👤 {message.from_user.full_name}\n"
