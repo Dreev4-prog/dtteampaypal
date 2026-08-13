@@ -76,6 +76,7 @@ class Request(Base):
     status: Mapped[str] = mapped_column(String(32), default="waiting_issue", index=True)
     paypal_tag_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("paypal_tags.id"), nullable=True)
     screenshot_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    admin_result_screenshot_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     paypal_gender: Mapped[str] = mapped_column(String(12), default="male", index=True)
     processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     processed_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
@@ -257,6 +258,8 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS gender VARCHAR(12) DEFAULT 'male'"))
         await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS gs_screenshot_file_id VARCHAR(512)"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paypal_gender VARCHAR(12) DEFAULT 'male'"))
+        # v2.5.2: доказательство результата проверки (возврат / PayPal умер).
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS admin_result_screenshot_file_id VARCHAR(512)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_paypal_tags_gender ON paypal_tags (gender)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_requests_paypal_gender ON requests (paypal_gender)"))
 
@@ -1127,6 +1130,58 @@ async def confirm_working_payment(request_id: int, admin_id: int) -> Request | N
                         or remaining_req.created_at
                     )
         await session.commit()
+        await session.refresh(req)
+        return req
+
+
+async def mark_payment_problem(
+    request_id: int,
+    admin_id: int,
+    outcome: str,
+    screenshot_file_id: str,
+) -> Request | None:
+    """Close a payment-check request because the PayPal became unusable.
+
+    outcome:
+      - dead: PayPal died / went into limits and no payout is due
+
+    The PayPal is removed from future issuance by moving the tag into the
+    existing `gestoppt` archive. No balance entry is created because this
+    action is available only while the request is still waiting_check.
+    """
+    if outcome != "dead":
+        return None
+    if not screenshot_file_id:
+        return None
+
+    async with SessionLocal() as session:
+        async with session.begin():
+            req = await session.get(
+                Request,
+                request_id,
+                with_for_update=True,
+            )
+            if req is None or req.status != "waiting_check":
+                return None
+
+            now = datetime.utcnow()
+            req.status = "paypal_limited"
+            req.admin_result_screenshot_file_id = screenshot_file_id
+            req.processed_at = now
+            req.processed_by = admin_id
+            req.updated_at = now
+
+            if req.paypal_tag_id:
+                tag = await session.get(
+                    PaypalTag,
+                    req.paypal_tag_id,
+                    with_for_update=True,
+                )
+                if tag:
+                    # A PayPal closed from this flow is no longer safe for
+                    # automatic or manual re-issue.
+                    tag.status = "gestoppt"
+
         await session.refresh(req)
         return req
 

@@ -361,7 +361,24 @@ def admin_check_menu(request_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"admin_confirm:{request_id}"),
             InlineKeyboardButton(text="❌ Денег нет", callback_data=f"admin_not_found:{request_id}"),
         ],
-        [InlineKeyboardButton(text="🚫 GS (Goods & Services)", callback_data=f"admin_gs:{request_id}") ]
+        [
+            InlineKeyboardButton(
+                text="☠️ PayPal умер / лимит",
+                callback_data=f"payment_problem:dead:{request_id}",
+            ),
+        ],
+        [InlineKeyboardButton(text="🚫 GS (Goods & Services)", callback_data=f"admin_gs:{request_id}")]
+    ])
+
+
+def payment_problem_photo_menu(request_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"payment_problem_cancel:{request_id}",
+            )
+        ]
     ])
 
 
@@ -449,6 +466,12 @@ def payment_card_menu(
         rows.append([
             InlineKeyboardButton(text="✅ Подтвердить оплату", callback_data=f"admin_confirm:{request_id}"),
             InlineKeyboardButton(text="❌ Не найдено", callback_data=f"admin_not_found:{request_id}"),
+        ])
+        rows.append([
+            InlineKeyboardButton(
+                text="☠️ PayPal умер / лимит",
+                callback_data=f"payment_problem:dead:{request_id}",
+            ),
         ])
     elif status == "payout_pending":
         if not paypal_withdrawn:
@@ -592,7 +615,7 @@ def my_paypals_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"🟠 На проверке ({counts.get('check', 0)})", callback_data="my_paypals_list:check")],
         [InlineKeyboardButton(text=f"🟢 Ожидают выплату ({counts.get('payout', 0)})", callback_data="my_paypals_list:payout")],
         [InlineKeyboardButton(text=f"✅ Выплаченные ({counts.get('paid', 0)})", callback_data="my_paypals_list:paid")],
-        [InlineKeyboardButton(text=f"❌ Не оплаченные/отклонённые ({counts.get('closed', 0)})", callback_data="my_paypals_list:closed")],
+        [InlineKeyboardButton(text=f"⚠️ Закрытые / проблемные ({counts.get('closed', 0)})", callback_data="my_paypals_list:closed")],
         [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="home")],
     ])
 

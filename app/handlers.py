@@ -62,6 +62,7 @@ from app.db import (
     confirm_payment,
     confirm_working_payment,
     mark_payment_not_found,
+    mark_payment_problem,
     return_to_payment_check,
     mark_payout_done,
     update_request_amount,
@@ -99,6 +100,7 @@ from app.db import (
 )
 from app.keyboards import (
     admin_check_menu,
+    payment_problem_photo_menu,
     paypal_payments_hub_menu,
     admin_main_menu,
     admin_request_menu,
@@ -214,6 +216,10 @@ class WorkMessageForm(StatesGroup):
 class BroadcastForm(StatesGroup):
     text = State()
     photo = State()
+
+
+class PaymentProblemForm(StatesGroup):
+    screenshot = State()
 
 
 class GSForm(StatesGroup):
@@ -1029,7 +1035,10 @@ MY_PAYPAL_GROUPS = {
     "check": (("waiting_check",), "🟠 На проверке"),
     "payout": (("payout_pending", "paid"), "🟢 Ожидают выплату"),
     "paid": (("paid_out",), "✅ Выплаченные"),
-    "closed": (("not_found", "rejected"), "❌ Не оплаченные/отклонённые"),
+    "closed": (
+        ("not_found", "rejected", "paypal_limited"),
+        "⚠️ Закрытые / проблемные",
+    ),
 }
 
 
@@ -1138,6 +1147,7 @@ async def my_paypals_list(callback: CallbackQuery) -> None:
             "paid_out": "выплачено",
             "not_found": "оплата не найдена",
             "rejected": "отклонено",
+            "paypal_limited": "☠️ PayPal умер / лимит",
             "return_pending": "ожидает проверки возврата",
             "returned": "возвращён",
             "returned_gestoppt": "возвращён как Gestop",
@@ -1149,6 +1159,8 @@ async def my_paypals_list(callback: CallbackQuery) -> None:
             blocks.append(
                 f"📌 Статус: <b>{status_names.get(req.status, req.status)}</b>"
             )
+            if getattr(req, "admin_result_screenshot_file_id", None):
+                blocks.append("📎 Скриншот результата был отправлен вам администратором.")
             if req.happy_hours_applied:
                 blocks.append(
                     f"🔥 Happy Hours применён: <b>{req.payout_percent}%</b>"
@@ -3454,6 +3466,153 @@ async def user_paid_amount_input(message: Message, state: FSMContext) -> None:
         f"{rate_text}",
         reply_markup=back_home(),
     )
+
+
+@router.callback_query(F.data.startswith("payment_problem:"))
+async def payment_problem_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    _, outcome, request_id_raw = callback.data.split(":", 2)
+    if outcome != "dead":
+        await callback.answer("Неизвестный вариант", show_alert=True)
+        return
+
+    request_id = int(request_id_raw)
+    req = await get_request(request_id)
+    if req is None or req.status != "waiting_check":
+        await callback.answer(
+            "Заявка уже обработана или недоступна",
+            show_alert=True,
+        )
+        return
+
+    await state.set_state(PaymentProblemForm.screenshot)
+    await state.update_data(
+        payment_problem_request_id=request_id,
+        payment_problem_outcome=outcome,
+    )
+
+    title = "☠️ <b>PAYPAL УМЕР / ЛИМИТ</b>"
+    await callback.message.answer(
+        f"{title}\n\n"
+        f"Заявка: <b>#{request_id}</b>\n\n"
+        "📎 <b>Прикрепите скриншот.</b>\n"
+        "Скриншот обязателен: после подтверждения бот отправит его "
+        "пользователю вместе с результатом проверки.",
+        reply_markup=payment_problem_photo_menu(request_id),
+    )
+    await callback.answer("Жду скриншот")
+
+
+async def _finish_payment_problem(
+    message: Message,
+    state: FSMContext,
+    screenshot_file_id: str,
+):
+    data = await state.get_data()
+    request_id = int(data["payment_problem_request_id"])
+    outcome = str(data["payment_problem_outcome"])
+
+    req = await mark_payment_problem(
+        request_id=request_id,
+        admin_id=message.from_user.id,
+        outcome=outcome,
+        screenshot_file_id=screenshot_file_id,
+    )
+    await state.clear()
+    if req is None:
+        return None
+
+    user_caption = (
+        f"☠️ <b>PayPal по заявке #{req.id} стал недоступен</b>\n\n"
+        f"Сумма заявки: <b>{req.amount} €</b>\n"
+        "PayPal попал в ограничения / перестал быть доступен "
+        "для обработки платежа.\n\n"
+        "Выплата по этой заявке не производится.\n"
+        "📎 Скриншот результата прикреплён к этому сообщению."
+    )
+    admin_result = "☠️ PayPal умер / лимит"
+
+    try:
+        await message.bot.send_photo(
+            chat_id=req.user_id,
+            photo=screenshot_file_id,
+            caption=user_caption,
+            reply_markup=back_home(),
+        )
+    except Exception as exc:
+        print(
+            "Failed to deliver payment problem screenshot "
+            f"to user {req.user_id}: {exc}"
+        )
+
+    return req, admin_result
+
+
+@router.message(PaymentProblemForm.screenshot, F.photo)
+async def payment_problem_photo(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    result = await _finish_payment_problem(
+        message,
+        state,
+        message.photo[-1].file_id,
+    )
+    if result is None:
+        await message.answer(
+            "Заявка уже обработана или недоступна.",
+            reply_markup=payments_menu(await get_payment_counts()),
+        )
+        return
+
+    req, admin_result = result
+    await message.answer(
+        f"✅ <b>{admin_result}</b>\n\n"
+        f"Заявка #{req.id} закрыта.\n"
+        "Скриншот отправлен пользователю.\n"
+        "PayPal перемещён в Gestop и больше не участвует в выдаче.",
+        reply_markup=payments_menu(await get_payment_counts()),
+    )
+
+
+@router.message(PaymentProblemForm.screenshot)
+async def payment_problem_photo_required(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+    request_id = int(data.get("payment_problem_request_id", 0))
+    await message.answer(
+        "📎 Нужен именно скриншот как фотография/изображение. "
+        "Без него закрыть заявку этим способом нельзя.",
+        reply_markup=(
+            payment_problem_photo_menu(request_id)
+            if request_id
+            else None
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("payment_problem_cancel:"))
+async def payment_problem_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    await state.clear()
+    await callback.message.edit_text(
+        "❌ Действие отменено. Заявка осталась на проверке."
+    )
+    await callback.answer("Отменено")
 
 
 @router.callback_query(F.data.startswith("admin_confirm:"))
