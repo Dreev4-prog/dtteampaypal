@@ -473,6 +473,12 @@ def payment_card_menu(
                 callback_data=f"payment_problem:dead:{request_id}",
             ),
         ])
+        rows.append([
+            InlineKeyboardButton(
+                text="🚫 GS (Goods & Services)",
+                callback_data=f"admin_gs:{request_id}",
+            ),
+        ])
     elif status == "payout_pending":
         if not paypal_withdrawn:
             rows.append([
