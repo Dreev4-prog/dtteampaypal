@@ -954,6 +954,12 @@ def paypal_card_admin_menu(
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     rows = [
+        [
+            InlineKeyboardButton(
+                text="🚻 Изменить пол",
+                callback_data=f"paypal_gender_edit:{tag_id}:{filter_name}",
+            )
+        ],
         [InlineKeyboardButton(text="🚫 Пометить Gestop", callback_data=f"paypal_mark_gestoppt:{tag_id}:{filter_name}")],
         [InlineKeyboardButton(text="🟢 Сделать свободным", callback_data=f"paypal_mark_available:{tag_id}:{filter_name}")],
     ]
@@ -961,6 +967,33 @@ def paypal_card_admin_menu(
         rows.append([InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"paypal_delete_ask:{tag_id}:{filter_name}")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"paypal_db_list:{filter_name}:0")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def paypal_gender_edit_menu(
+    tag_id: int,
+    filter_name: str,
+    current_gender: str,
+) -> InlineKeyboardMarkup:
+    male_label = "✅ 👨 Мужской" if current_gender == "male" else "👨 Мужской"
+    female_label = "✅ 👩 Женский" if current_gender == "female" else "👩 Женский"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=male_label,
+                callback_data=f"paypal_gender_set:{tag_id}:male:{filter_name}",
+            ),
+            InlineKeyboardButton(
+                text=female_label,
+                callback_data=f"paypal_gender_set:{tag_id}:female:{filter_name}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"paypal_card:{tag_id}:{filter_name}",
+            )
+        ],
+    ])
 
 
 def paypal_delete_confirm_menu(tag_id: int, filter_name: str) -> InlineKeyboardMarkup:

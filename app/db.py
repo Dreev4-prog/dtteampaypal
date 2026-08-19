@@ -1791,6 +1791,61 @@ async def restore_deleted_paypal_tag(tag_id: int) -> tuple[PaypalTag | None, str
         return tag, "restored"
 
 
+async def set_paypal_tag_gender(
+    tag_id: int,
+    gender: str,
+) -> tuple[PaypalTag | None, str]:
+    """Change PayPal gender only when it is genuinely free.
+
+    Returns:
+      (tag, "updated")
+      (tag, "not_available")
+      (tag, "active_request")
+      (None, "not_found")
+      (tag, "invalid_gender")
+    """
+    if gender not in {"male", "female"}:
+        tag = await get_paypal_tag(tag_id)
+        return tag, "invalid_gender"
+
+    async with SessionLocal() as session:
+        async with session.begin():
+            tag = await session.get(
+                PaypalTag,
+                tag_id,
+                with_for_update=True,
+            )
+            if tag is None:
+                return None, "not_found"
+
+            if tag.status != "available":
+                return tag, "not_available"
+
+            active_count = int(
+                await session.scalar(
+                    select(func.count(Request.id)).where(
+                        Request.paypal_tag_id == tag_id,
+                        Request.status.in_(
+                            (
+                                "paypal_issued",
+                                "waiting_check",
+                                "payout_pending",
+                                "return_pending",
+                            )
+                        ),
+                    )
+                )
+                or 0
+            )
+            if active_count:
+                return tag, "active_request"
+
+            tag.gender = gender
+
+        await session.refresh(tag)
+        return tag, "updated"
+
+
 async def set_paypal_tag_status(tag_id: int, status: str) -> PaypalTag | None:
     if status not in {"available", "gestoppt"}:
         raise ValueError("Unsupported PayPal status")

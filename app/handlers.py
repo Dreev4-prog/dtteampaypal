@@ -80,7 +80,7 @@ from app.db import (
     get_finance_summary,
     create_paypal_return, list_paypal_returns, get_paypal_return, resolve_paypal_return,
     get_paypal_database_counts, get_paypal_gender_counts,
-    list_paypal_tags, set_paypal_tag_status,
+    list_paypal_tags, set_paypal_tag_status, set_paypal_tag_gender,
     delete_free_paypal_tag, restore_deleted_paypal_tag,
     get_deleted_working_request, list_deleted_working_requests,
     restore_deleted_paypal_to_work, get_active_requests_for_tag,
@@ -136,7 +136,8 @@ from app.keyboards import (
     my_paypal_waiting_card_menu,
     paid_or_return_menu, return_reasons_menu, return_confirm_menu, returns_menu,
     return_card_menu, return_checked_menu, paypal_database_menu, paypal_list_menu,
-    paypal_card_admin_menu, paypal_delete_confirm_menu, paypal_restore_confirm_menu,
+    paypal_card_admin_menu, paypal_gender_edit_menu,
+    paypal_delete_confirm_menu, paypal_restore_confirm_menu,
     paypal_restore_working_confirm_menu, paypal_restore_working_users_menu,
     working_dates_menu, working_day_menu, collection_choice_menu, collect_take_confirm_menu,
     working_card_menu, duplicate_cancel_confirm_menu, working_notify_confirm_menu,
@@ -4905,9 +4906,17 @@ async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
     if tag.status == "deleted":
         deleted_working_requests = await list_deleted_working_requests(tag.id)
 
+    gender_label = (
+        "👨 Мужской"
+        if tag.gender == "male"
+        else "👩 Женский"
+        if tag.gender == "female"
+        else "❓ Не указан"
+    )
     text = (
         f"<b>💳 {tag.tag}</b>\n\n"
         f"Статус: <b>{tag.status}</b>\n"
+        f"🚻 Пол: <b>{gender_label}</b>\n"
         f"Пользователь ID: <code>{tag.issued_to_user_id or '—'}</code>\n"
         f"Выдан: {format_dt(tag.issued_at)}\n"
         f"Добавлен: {format_dt(tag.created_at)}"
@@ -4931,16 +4940,129 @@ async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
                 f"\n   📌 Удалён: {source}"
             )
 
-    await callback.message.edit_caption(
-        caption=text,
-        reply_markup=paypal_card_admin_menu(
-            tag.id,
-            filter_name,
-            tag.status,
-            restore_working_count=len(deleted_working_requests),
-        ),
+    card_markup = paypal_card_admin_menu(
+        tag.id,
+        filter_name,
+        tag.status,
+        restore_working_count=len(deleted_working_requests),
     )
+    if callback.message.photo:
+        await callback.message.edit_caption(
+            caption=text,
+            reply_markup=card_markup,
+        )
+    else:
+        await callback.message.edit_text(
+            text,
+            reply_markup=card_markup,
+        )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("paypal_gender_edit:"))
+async def paypal_gender_edit_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    _, tid, filter_name = callback.data.split(":", 2)
+    tag = await get_paypal_tag(int(tid))
+    if tag is None:
+        await callback.answer("PayPal не найден", show_alert=True)
+        return
+
+    if tag.status != "available":
+        await callback.answer(
+            "Пол можно менять только у свободного PayPal. "
+            "Сначала завершите активную работу с ним.",
+            show_alert=True,
+        )
+        return
+
+    current = (
+        "👨 Мужской"
+        if tag.gender == "male"
+        else "👩 Женский"
+        if tag.gender == "female"
+        else "❓ Не указан"
+    )
+    text = (
+        "🚻 <b>Изменить пол PayPal</b>\n\n"
+        f"PayPal: <code>{tag.tag}</code>\n"
+        f"Сейчас: <b>{current}</b>\n\n"
+        "Выберите правильный тип."
+    )
+    markup = paypal_gender_edit_menu(
+        tag.id,
+        filter_name,
+        tag.gender or "",
+    )
+    if callback.message.photo:
+        await callback.message.edit_caption(
+            caption=text,
+            reply_markup=markup,
+        )
+    else:
+        await callback.message.edit_text(
+            text,
+            reply_markup=markup,
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("paypal_gender_set:"))
+async def paypal_gender_set_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    _, tid, gender, filter_name = callback.data.split(":", 3)
+    tag, reason = await set_paypal_tag_gender(
+        int(tid),
+        gender,
+    )
+
+    if reason != "updated" or tag is None:
+        messages = {
+            "not_found": "PayPal не найден",
+            "invalid_gender": "Некорректный тип PayPal",
+            "not_available": (
+                "Пол можно менять только у свободного PayPal. "
+                "Сейчас он уже не свободен."
+            ),
+            "active_request": (
+                "У этого PayPal есть активная заявка. "
+                "Пол менять нельзя до её завершения."
+            ),
+        }
+        await callback.answer(
+            messages.get(reason, "Не удалось изменить пол"),
+            show_alert=True,
+        )
+        return
+
+    gender_label = "👨 Мужской" if tag.gender == "male" else "👩 Женский"
+    text = (
+        "✅ <b>Пол PayPal изменён</b>\n\n"
+        f"PayPal: <code>{tag.tag}</code>\n"
+        f"Новый тип: <b>{gender_label}</b>"
+    )
+    markup = paypal_card_admin_menu(
+        tag.id,
+        filter_name,
+        tag.status,
+    )
+    if callback.message.photo:
+        await callback.message.edit_caption(
+            caption=text,
+            reply_markup=markup,
+        )
+    else:
+        await callback.message.edit_text(
+            text,
+            reply_markup=markup,
+        )
+    await callback.answer("Пол изменён")
 
 
 @router.callback_query(F.data.startswith("paypal_delete_ask:"))
