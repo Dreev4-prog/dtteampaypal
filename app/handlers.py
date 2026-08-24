@@ -1914,19 +1914,53 @@ async def work_control_handler(callback: CallbackQuery, state: FSMContext) -> No
     await callback.answer()
 
 
-async def _broadcast_work_message(callback: CallbackQuery, text: str, image_file_id: str = "") -> tuple[int, int]:
-    sent = 0
-    failed = 0
-    for user_id in await list_approved_user_ids():
-        try:
-            if image_file_id:
-                await callback.bot.send_photo(user_id, image_file_id, caption=text, reply_markup=main_menu())
-            else:
-                await callback.bot.send_message(user_id, text, reply_markup=main_menu())
-            sent += 1
-        except Exception:
-            failed += 1
-    return sent, failed
+_work_broadcast_lock = asyncio.Lock()
+
+
+async def _broadcast_work_message(
+    callback: CallbackQuery,
+    text: str,
+    image_file_id: str = "",
+) -> tuple[int, int]:
+    """Send START/STOP broadcast concurrently instead of blocking one-by-one."""
+    user_ids = await list_approved_user_ids()
+    if not user_ids:
+        return 0, 0
+
+    semaphore = asyncio.Semaphore(10)
+
+    async def _send_one(user_id: int) -> bool:
+        async with semaphore:
+            try:
+                if image_file_id:
+                    await asyncio.wait_for(
+                        callback.bot.send_photo(
+                            user_id,
+                            image_file_id,
+                            caption=text,
+                            reply_markup=main_menu(),
+                        ),
+                        timeout=10,
+                    )
+                else:
+                    await asyncio.wait_for(
+                        callback.bot.send_message(
+                            user_id,
+                            text,
+                            reply_markup=main_menu(),
+                        ),
+                        timeout=10,
+                    )
+                return True
+            except Exception:
+                return False
+
+    results = await asyncio.gather(
+        *(_send_one(user_id) for user_id in user_ids),
+        return_exceptions=False,
+    )
+    sent = sum(1 for ok in results if ok)
+    return sent, len(results) - sent
 
 
 @router.callback_query(F.data == "work_start")
@@ -1934,18 +1968,73 @@ async def work_start_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    await set_work_enabled(True)
-    text = await get_app_setting("start_work_message")
-    image_file_id = await get_app_setting("start_work_image")
-    sent, failed = await _broadcast_work_message(callback, text, image_file_id)
-    await callback.message.edit_text(
-        f"🚀 <b>START WORK включён</b>\n\nУведомлено: <b>{sent}</b>\nНе доставлено: <b>{failed}</b>",
-        reply_markup=work_control_menu(
-            True,
-            await is_auto_issue_enabled(),
-        ),
-    )
-    await callback.answer("Приём заявок открыт")
+
+    if _work_broadcast_lock.locked():
+        await callback.answer(
+            "START/STOP уже обрабатывается",
+            show_alert=True,
+        )
+        return
+
+    async with _work_broadcast_lock:
+        already_enabled = await is_work_enabled()
+        await set_work_enabled(True)
+
+        # Answer callback immediately so Telegram does not keep the button
+        # spinner alive while the notification broadcast is running.
+        try:
+            await callback.answer("START WORK включён")
+        except Exception:
+            pass
+
+        auto_enabled = await is_auto_issue_enabled()
+
+        if already_enabled:
+            try:
+                await callback.message.edit_text(
+                    "🚀 <b>START WORK уже включён</b>\n\n"
+                    "Повторная рассылка не запускается.",
+                    reply_markup=work_control_menu(
+                        True,
+                        auto_enabled,
+                    ),
+                )
+            except TelegramBadRequest:
+                pass
+            return
+
+        try:
+            await callback.message.edit_text(
+                "🚀 <b>START WORK включён</b>\n\n"
+                "📣 Рассылка уведомлений участникам…",
+                reply_markup=work_control_menu(
+                    True,
+                    auto_enabled,
+                ),
+            )
+        except TelegramBadRequest:
+            pass
+
+        text = await get_app_setting("start_work_message")
+        image_file_id = await get_app_setting("start_work_image")
+        sent, failed = await _broadcast_work_message(
+            callback,
+            text,
+            image_file_id,
+        )
+
+        try:
+            await callback.message.edit_text(
+                f"🚀 <b>START WORK включён</b>\n\n"
+                f"Уведомлено: <b>{sent}</b>\n"
+                f"Не доставлено: <b>{failed}</b>",
+                reply_markup=work_control_menu(
+                    True,
+                    auto_enabled,
+                ),
+            )
+        except TelegramBadRequest:
+            pass
 
 
 @router.callback_query(F.data == "work_stop")
@@ -1953,18 +2042,74 @@ async def work_stop_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    await set_work_enabled(False)
-    text = await get_app_setting("stop_work_message")
-    image_file_id = await get_app_setting("stop_work_image")
-    sent, failed = await _broadcast_work_message(callback, text, image_file_id)
-    await callback.message.edit_text(
-        f"🛑 <b>STOP WORK включён</b>\n\nНовые заявки отключены. Уже выданные PayPal и текущие оплаты продолжают работать.\n\nУведомлено: <b>{sent}</b>\nНе доставлено: <b>{failed}</b>",
-        reply_markup=work_control_menu(
-            False,
-            await is_auto_issue_enabled(),
-        ),
-    )
-    await callback.answer("Приём новых заявок остановлен")
+
+    if _work_broadcast_lock.locked():
+        await callback.answer(
+            "START/STOP уже обрабатывается",
+            show_alert=True,
+        )
+        return
+
+    async with _work_broadcast_lock:
+        already_disabled = not await is_work_enabled()
+        await set_work_enabled(False)
+
+        try:
+            await callback.answer("STOP WORK включён")
+        except Exception:
+            pass
+
+        auto_enabled = await is_auto_issue_enabled()
+
+        if already_disabled:
+            try:
+                await callback.message.edit_text(
+                    "🛑 <b>STOP WORK уже включён</b>\n\n"
+                    "Повторная рассылка не запускается.",
+                    reply_markup=work_control_menu(
+                        False,
+                        auto_enabled,
+                    ),
+                )
+            except TelegramBadRequest:
+                pass
+            return
+
+        try:
+            await callback.message.edit_text(
+                "🛑 <b>STOP WORK включён</b>\n\n"
+                "Новые заявки уже отключены.\n"
+                "📣 Рассылка уведомлений участникам…",
+                reply_markup=work_control_menu(
+                    False,
+                    auto_enabled,
+                ),
+            )
+        except TelegramBadRequest:
+            pass
+
+        text = await get_app_setting("stop_work_message")
+        image_file_id = await get_app_setting("stop_work_image")
+        sent, failed = await _broadcast_work_message(
+            callback,
+            text,
+            image_file_id,
+        )
+
+        try:
+            await callback.message.edit_text(
+                "🛑 <b>STOP WORK включён</b>\n\n"
+                "Новые заявки отключены. Уже выданные PayPal и "
+                "текущие оплаты продолжают работать.\n\n"
+                f"Уведомлено: <b>{sent}</b>\n"
+                f"Не доставлено: <b>{failed}</b>",
+                reply_markup=work_control_menu(
+                    False,
+                    auto_enabled,
+                ),
+            )
+        except TelegramBadRequest:
+            pass
 
 
 @router.callback_query(F.data == "auto_issue_on")
