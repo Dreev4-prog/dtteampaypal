@@ -113,6 +113,22 @@ class PaypalStockWaitlist(Base):
     )
 
 
+class UserPaypalExclusion(Base):
+    """A PayPal that must never be issued to this user again."""
+    __tablename__ = "user_paypal_exclusions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
+    paypal_tag_id: Mapped[int] = mapped_column(Integer, ForeignKey("paypal_tags.id"), index=True)
+    reason_code: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    reason_text: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        server_default=func.now(),
+    )
+
+
 class PaypalReturn(Base):
     __tablename__ = "paypal_returns"
 
@@ -262,6 +278,53 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS admin_result_screenshot_file_id VARCHAR(512)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_paypal_tags_gender ON paypal_tags (gender)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_requests_paypal_gender ON requests (paypal_gender)"))
+
+        # v2.5.7: персональный стоп-лист PayPal для пользователя.
+        # Если пользователь отказался от конкретного PayPal с указанной
+        # причиной, этот PayPal больше никогда не выдаётся именно ему.
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS user_paypal_exclusions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES users(id),
+                paypal_tag_id INTEGER NOT NULL REFERENCES paypal_tags(id),
+                reason_code VARCHAR(32),
+                reason_text VARCHAR(500),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        await conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_user_paypal_exclusions_user_tag
+            ON user_paypal_exclusions (user_id, paypal_tag_id)
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_user_paypal_exclusions_user_id
+            ON user_paypal_exclusions (user_id)
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_user_paypal_exclusions_paypal_tag_id
+            ON user_paypal_exclusions (paypal_tag_id)
+        """))
+
+        # Backfill old explicit returns too. The 30-minute collection return
+        # has no user-selected reason, so it is intentionally excluded.
+        await conn.execute(text("""
+            INSERT INTO user_paypal_exclusions (
+                user_id,
+                paypal_tag_id,
+                reason_code,
+                reason_text,
+                created_at
+            )
+            SELECT
+                pr.user_id,
+                pr.paypal_tag_id,
+                pr.reason_code,
+                pr.reason_text,
+                pr.created_at
+            FROM paypal_returns pr
+            WHERE pr.reason_code <> 'warning_return'
+            ON CONFLICT (user_id, paypal_tag_id) DO NOTHING
+        """))
 
         # v1.6.4: возвраты и массовый сбор PayPal.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS collection_notified_at TIMESTAMP"))
@@ -516,9 +579,21 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
             if req is None or req.status != "waiting_issue":
                 return req, None
 
+            refused_by_user = (
+                select(UserPaypalExclusion.id)
+                .where(
+                    UserPaypalExclusion.user_id == req.user_id,
+                    UserPaypalExclusion.paypal_tag_id == PaypalTag.id,
+                )
+                .exists()
+            )
             tag = await session.scalar(
                 select(PaypalTag)
-                .where(PaypalTag.status == "available", PaypalTag.gender == req.paypal_gender)
+                .where(
+                    PaypalTag.status == "available",
+                    PaypalTag.gender == req.paypal_gender,
+                    ~refused_by_user,
+                )
                 .order_by(PaypalTag.id)
                 .with_for_update(skip_locked=True)
                 .limit(1)
@@ -682,19 +757,38 @@ async def get_user_profit_summary(user_id: int) -> dict[str, float | int | datet
         }
 
 
-async def get_requestable_paypal_gender_counts() -> dict[str, int]:
+async def get_requestable_paypal_gender_counts(
+    user_id: int | None = None,
+) -> dict[str, int]:
     """Stock available for NEW requests.
+
+    When user_id is supplied, PayPals previously refused by that specific
+    user are excluded from their personal stock count.
 
     waiting_issue requests reserve one PayPal of their selected gender.
     This prevents the bot from accepting more requests than the current
     physical stock can satisfy before the admin issues them.
     """
     async with SessionLocal() as session:
+        free_stmt = select(
+            PaypalTag.gender,
+            func.count(PaypalTag.id),
+        ).where(PaypalTag.status == "available")
+
+        if user_id is not None:
+            refused_by_user = (
+                select(UserPaypalExclusion.id)
+                .where(
+                    UserPaypalExclusion.user_id == user_id,
+                    UserPaypalExclusion.paypal_tag_id == PaypalTag.id,
+                )
+                .exists()
+            )
+            free_stmt = free_stmt.where(~refused_by_user)
+
         free_rows = (
             await session.execute(
-                select(PaypalTag.gender, func.count(PaypalTag.id))
-                .where(PaypalTag.status == "available")
-                .group_by(PaypalTag.gender)
+                free_stmt.group_by(PaypalTag.gender)
             )
         ).all()
         pending_rows = (
@@ -1490,11 +1584,39 @@ async def create_paypal_return(request_id: int, user_id: int, reason_code: str, 
         req = await session.get(Request, request_id, with_for_update=True)
         if req is None or req.user_id != user_id or req.status != "paypal_issued" or req.paypal_tag_id is None:
             return None
-        existing = await session.scalar(select(PaypalReturn).where(PaypalReturn.request_id == request_id))
+        existing_exclusion = await session.scalar(
+            select(UserPaypalExclusion).where(
+                UserPaypalExclusion.user_id == user_id,
+                UserPaypalExclusion.paypal_tag_id == req.paypal_tag_id,
+            )
+        )
+        if existing_exclusion is None:
+            session.add(
+                UserPaypalExclusion(
+                    user_id=user_id,
+                    paypal_tag_id=req.paypal_tag_id,
+                    reason_code=reason_code,
+                    reason_text=reason_text,
+                )
+            )
+
+        existing = await session.scalar(
+            select(PaypalReturn).where(
+                PaypalReturn.request_id == request_id
+            )
+        )
         if existing:
+            await session.commit()
             return existing
-        item = PaypalReturn(request_id=request_id, user_id=user_id, paypal_tag_id=req.paypal_tag_id,
-                            reason_code=reason_code, reason_text=reason_text, status="pending")
+
+        item = PaypalReturn(
+            request_id=request_id,
+            user_id=user_id,
+            paypal_tag_id=req.paypal_tag_id,
+            reason_code=reason_code,
+            reason_text=reason_text,
+            status="pending",
+        )
         session.add(item)
         req.status = "return_pending"
         req.updated_at = datetime.utcnow()

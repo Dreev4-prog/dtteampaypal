@@ -639,7 +639,9 @@ async def paypal_request(callback: CallbackQuery, state: FSMContext) -> None:
         )
         return
 
-    stock = await get_requestable_paypal_gender_counts()
+    stock = await get_requestable_paypal_gender_counts(
+        callback.from_user.id
+    )
     if stock["total"] <= 0:
         await state.clear()
         await render_screen(
@@ -689,7 +691,9 @@ async def paypal_amount_input(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer("❌ У вас уже есть 2 активные заявки. Дождитесь обработки одной из них.", reply_markup=back_home())
         return
-    stock = await get_requestable_paypal_gender_counts()
+    stock = await get_requestable_paypal_gender_counts(
+        message.from_user.id
+    )
     if stock["total"] <= 0:
         await state.clear()
         await render_screen(
@@ -730,7 +734,9 @@ async def paypal_gender_choice(callback: CallbackQuery, state: FSMContext) -> No
         await callback.answer("Неизвестный тип PayPal", show_alert=True)
         return
 
-    stock = await get_requestable_paypal_gender_counts()
+    stock = await get_requestable_paypal_gender_counts(
+        callback.from_user.id
+    )
     if stock.get(gender, 0) <= 0:
         if stock["total"] <= 0:
             await state.clear()
@@ -836,7 +842,9 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
     screenshot_file_id = message.photo[-1].file_id
     gender = data.get("paypal_gender", "male")
 
-    stock = await get_requestable_paypal_gender_counts()
+    stock = await get_requestable_paypal_gender_counts(
+        message.from_user.id
+    )
     if stock.get(gender, 0) <= 0:
         await state.clear()
         label = "мужские" if gender == "male" else "женские"
@@ -974,7 +982,9 @@ async def paypal_stock_wait_handler(
 
     # If stock became available between opening the screen and pressing
     # Subscribe, do not create an unnecessary waiting record.
-    stock = await get_requestable_paypal_gender_counts()
+    stock = await get_requestable_paypal_gender_counts(
+        callback.from_user.id
+    )
     if (
         (gender == "any" and stock["total"] > 0)
         or (gender in {"male", "female"} and stock[gender] > 0)
@@ -4844,7 +4854,11 @@ async def return_confirm_handler(callback: CallbackQuery, state: FSMContext) -> 
             f"PayPal: <code>{tag.tag if tag else '—'}</code>\nСумма: <b>{req.amount if req else 0} €</b>\nПричина: {reason_text}",
             reply_markup=return_card_menu(item.id, callback.from_user.id))
     await state.clear()
-    await callback.message.answer("✅ Запрос на возврат отправлен. PayPal будет проверен администратором.", reply_markup=back_home())
+    await callback.message.answer(
+        "✅ Запрос на возврат отправлен. PayPal будет проверен администратором.\n\n"
+        "Этот PayPal больше не будет выдаваться вам повторно.",
+        reply_markup=back_home(),
+    )
     await callback.answer("Запрос отправлен")
 
 
