@@ -4949,14 +4949,18 @@ async def _finish_return(
         "deleted": "🗑 PayPal перемещён в корзину.",
     }
 
-    try:
-        await callback.bot.send_message(
-            item.user_id,
-            messages[action],
-            reply_markup=back_home(),
-        )
-    except Exception:
-        pass
+    # For an admin recall, the first recall notification is final.
+    # What happens to the PayPal afterward is internal and is not sent
+    # to the user.
+    if item.reason_code != "admin_recall":
+        try:
+            await callback.bot.send_message(
+                item.user_id,
+                messages[action],
+                reply_markup=back_home(),
+            )
+        except Exception:
+            pass
 
     remaining_returns = await list_paypal_returns()
     await _attach_return_display(remaining_returns)
@@ -5610,8 +5614,8 @@ async def collect_take_confirm_handler(callback: CallbackQuery) -> None:
         try:
             await callback.bot.send_message(
                 req.user_id,
-                f"ℹ️ Администратор забрал PayPal <code>{tag.tag if tag else '—'}</code> на проверку. "
-                "До решения администратора он находится в разделе возвратов."
+                f"ℹ️ Администратор забрал PayPal <code>{tag.tag if tag else '—'}</code>.\n\n"
+                "Реквизиты больше не актуальны."
             )
         except Exception:
             pass
@@ -5988,15 +5992,23 @@ async def working_recall_confirm_handler(callback: CallbackQuery) -> None:
         if req is None:
             await callback.answer("PayPal уже обработан или изменил статус", show_alert=True)
             return
-    user_messages = {
-        "available": "ℹ️ Администратор забрал выданный вам PayPal.\n\nБольше не используйте его и не переводите на него деньги.",
-        "gestoppt": "ℹ️ Администратор забрал выданный вам PayPal и пометил его как Gestop.",
-        "deleted": "ℹ️ Администратор забрал выданный вам PayPal и переместил его в корзину.",
-    }
+    if action == "gestoppt":
+        user_notice = (
+            f"🚫 <b>Gestop</b>\n\n"
+            f"PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+            "Реквизиты больше не актуальны."
+        )
+    else:
+        user_notice = (
+            f"ℹ️ Администратор забрал PayPal "
+            f"<code>{tag.tag if tag else '—'}</code>.\n\n"
+            "Реквизиты больше не актуальны."
+        )
+
     try:
         await callback.bot.send_message(
             req.user_id,
-            f"{user_messages[action]}\n\n💳 <code>{tag.tag if tag else '—'}</code>",
+            user_notice,
             reply_markup=back_home(),
         )
     except Exception:
@@ -6247,10 +6259,11 @@ async def _finish_gs(message_or_callback, state: FSMContext, screenshot: str | N
     if req is None:
         return None
 
+    tag = await get_paypal_tag(req.paypal_tag_id)
     notification = (
-        "❌ <b>Платёж отправлен через Goods & Services.</b>\n\n"
-        "Этот PayPal заблокирован и больше не используется. "
-        "Не переводите на него деньги."
+        "🚫 <b>GS (Goods & Services)</b>\n\n"
+        f"PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+        "Реквизиты больше не актуальны."
     )
 
     try:
@@ -6259,11 +6272,13 @@ async def _finish_gs(message_or_callback, state: FSMContext, screenshot: str | N
                 chat_id=req.user_id,
                 photo=screenshot,
                 caption=notification,
+                reply_markup=back_home(),
             )
         else:
             await message_or_callback.bot.send_message(
                 chat_id=req.user_id,
                 text=notification,
+                reply_markup=back_home(),
             )
     except Exception as exc:
         # Не прерываем обработку GS, если пользователь заблокировал бота

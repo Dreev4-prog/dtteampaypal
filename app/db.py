@@ -322,8 +322,15 @@ async def init_db() -> None:
                 pr.reason_text,
                 pr.created_at
             FROM paypal_returns pr
-            WHERE pr.reason_code <> 'warning_return'
+            WHERE pr.reason_code NOT IN ('warning_return', 'admin_recall')
             ON CONFLICT (user_id, paypal_tag_id) DO NOTHING
+        """))
+
+        # v2.5.8: remove exclusions accidentally created by admin recalls.
+        # Admin taking a PayPal is not a user refusal.
+        await conn.execute(text("""
+            DELETE FROM user_paypal_exclusions
+            WHERE reason_code = 'admin_recall'
         """))
 
         # v1.6.4: возвраты и массовый сбор PayPal.
@@ -1584,21 +1591,26 @@ async def create_paypal_return(request_id: int, user_id: int, reason_code: str, 
         req = await session.get(Request, request_id, with_for_update=True)
         if req is None or req.user_id != user_id or req.status != "paypal_issued" or req.paypal_tag_id is None:
             return None
-        existing_exclusion = await session.scalar(
-            select(UserPaypalExclusion).where(
-                UserPaypalExclusion.user_id == user_id,
-                UserPaypalExclusion.paypal_tag_id == req.paypal_tag_id,
-            )
-        )
-        if existing_exclusion is None:
-            session.add(
-                UserPaypalExclusion(
-                    user_id=user_id,
-                    paypal_tag_id=req.paypal_tag_id,
-                    reason_code=reason_code,
-                    reason_text=reason_text,
+        # Permanent personal exclusion is created only when the user
+        # explicitly refused this PayPal and selected/entered a reason.
+        # Internal admin recalls must never blacklist it for the user.
+        user_refusal_reason_codes = {"changed_mind", "gestop", "other"}
+        if reason_code in user_refusal_reason_codes:
+            existing_exclusion = await session.scalar(
+                select(UserPaypalExclusion).where(
+                    UserPaypalExclusion.user_id == user_id,
+                    UserPaypalExclusion.paypal_tag_id == req.paypal_tag_id,
                 )
             )
+            if existing_exclusion is None:
+                session.add(
+                    UserPaypalExclusion(
+                        user_id=user_id,
+                        paypal_tag_id=req.paypal_tag_id,
+                        reason_code=reason_code,
+                        reason_text=reason_text,
+                    )
+                )
 
         existing = await session.scalar(
             select(PaypalReturn).where(
