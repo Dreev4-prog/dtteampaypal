@@ -3914,12 +3914,17 @@ async def admin_not_found(callback: CallbackQuery) -> None:
     if req is None:
         await callback.answer("Заявка уже обработана или не найдена", show_alert=True)
         return
+
+    tag = await get_paypal_tag(req.paypal_tag_id)
+    paypal_label = tag.tag if tag else "PayPal не найден"
+
     try:
         await callback.bot.send_photo(
             req.user_id,
             photo=FSInputFile(BANNERS["issued"]),
             caption=(
                 f"⚠️ <b>Оплата по заявке #{req.id} пока не найдена</b>\n\n"
+                f"💳 PayPal: <code>{paypal_label}</code>\n\n"
                 "PayPal остаётся у вас. Проверьте перевод и после этого снова "
                 "нажмите кнопку «✅ Я оплатил», чтобы повторно отправить заявку на проверку."
             ),
@@ -3931,14 +3936,16 @@ async def admin_not_found(callback: CallbackQuery) -> None:
         if callback.message.photo:
             await callback.message.edit_caption(
                 caption=(
-                    f"🔴 По заявке #{req.id} оплата не найдена.\n\n"
+                    f"🔴 По заявке #{req.id} оплата не найдена.\n"
+                    f"💳 PayPal: <code>{paypal_label}</code>\n\n"
                     "Заявка возвращена пользователю для повторной отправки на проверку."
                 ),
                 reply_markup=payments_menu(await get_payment_counts()),
             )
         else:
             await callback.message.edit_text(
-                f"🔴 По заявке #{req.id} оплата не найдена.\n\n"
+                f"🔴 По заявке #{req.id} оплата не найдена.\n"
+                f"💳 PayPal: <code>{paypal_label}</code>\n\n"
                 "Заявка возвращена пользователю для повторной отправки на проверку.",
                 reply_markup=payments_menu(await get_payment_counts()),
             )
