@@ -51,6 +51,7 @@ class User(Base):
     payout_method: Mapped[str] = mapped_column(String(20), default="cryptobot", index=True)
     dt_payments_tag: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     dt_payments_tag_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    paypal_work_limit: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
 
 class PaypalTag(Base):
@@ -239,6 +240,11 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE users ALTER COLUMN status SET DEFAULT 'pending'"))
         await conn.execute(text("ALTER TABLE users ALTER COLUMN status SET NOT NULL"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_status ON users (status)"))
+        # v2.5.11: выборочный индивидуальный лимит PayPal в работе.
+        # NULL = без индивидуального лимита, применяются обычные правила.
+        await conn.execute(text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS paypal_work_limit INTEGER"
+        ))
 
         # v1.4: произвольная сумма, скриншот и история обработки заявок.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS screenshot_file_id VARCHAR(512)"))
@@ -565,6 +571,134 @@ async def count_active_requests(user_id: int) -> int:
         ) or 0)
 
 
+PAYPAL_WORK_LIMIT_STATUSES = (
+    "waiting_issue",
+    "paypal_issued",
+    "waiting_check",
+)
+
+
+async def get_user_paypal_work_limit_status(user_id: int) -> dict:
+    """Return personal limit and currently occupied PayPal work slots.
+
+    A slot is occupied while the request:
+    - waits for PayPal issuance;
+    - has an issued PayPal and waits for payment;
+    - waits for payment verification.
+
+    payout_pending/paid_out do not occupy a slot because work with that
+    PayPal is already finished from the user's side.
+    """
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id)
+        if user is None:
+            return {
+                "exists": False,
+                "limit": None,
+                "used": 0,
+                "remaining": None,
+                "reached": False,
+            }
+
+        used = int(
+            await session.scalar(
+                select(func.count(Request.id)).where(
+                    Request.user_id == user_id,
+                    Request.status.in_(PAYPAL_WORK_LIMIT_STATUSES),
+                )
+            )
+            or 0
+        )
+        limit = (
+            int(user.paypal_work_limit)
+            if user.paypal_work_limit is not None
+            else None
+        )
+        return {
+            "exists": True,
+            "limit": limit,
+            "used": used,
+            "remaining": (
+                max(0, limit - used)
+                if limit is not None
+                else None
+            ),
+            "reached": bool(limit is not None and used >= limit),
+        }
+
+
+async def set_user_paypal_work_limit(
+    user_id: int,
+    limit: int | None,
+) -> User | None:
+    if limit is not None and not (1 <= int(limit) <= 999):
+        raise ValueError("PayPal work limit must be between 1 and 999")
+
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id, with_for_update=True)
+        if user is None:
+            return None
+        user.paypal_work_limit = int(limit) if limit is not None else None
+        await session.commit()
+        await session.refresh(user)
+        return user
+
+
+async def create_request_with_work_limit(
+    user_id: int,
+    amount: int,
+    screenshot_file_id: str | None = None,
+    paypal_gender: str = "male",
+) -> tuple[Request | None, dict]:
+    """Atomically create a request while respecting a personal work limit."""
+    async with SessionLocal() as session:
+        async with session.begin():
+            user = await session.get(User, user_id, with_for_update=True)
+            if user is None:
+                return None, {
+                    "reason": "user_not_found",
+                    "limit": None,
+                    "used": 0,
+                }
+
+            limit = (
+                int(user.paypal_work_limit)
+                if user.paypal_work_limit is not None
+                else None
+            )
+            used = int(
+                await session.scalar(
+                    select(func.count(Request.id)).where(
+                        Request.user_id == user_id,
+                        Request.status.in_(PAYPAL_WORK_LIMIT_STATUSES),
+                    )
+                )
+                or 0
+            )
+
+            if limit is not None and used >= limit:
+                return None, {
+                    "reason": "work_limit",
+                    "limit": limit,
+                    "used": used,
+                }
+
+            req = Request(
+                user_id=user_id,
+                amount=amount,
+                screenshot_file_id=screenshot_file_id,
+                paypal_gender=paypal_gender,
+            )
+            session.add(req)
+
+        await session.refresh(req)
+        return req, {
+            "reason": "created",
+            "limit": limit,
+            "used": used + 1,
+        }
+
+
 async def create_request(user_id: int, amount: int, screenshot_file_id: str | None = None, paypal_gender: str = "male") -> Request:
     async with SessionLocal() as session:
         req = Request(user_id=user_id, amount=amount, screenshot_file_id=screenshot_file_id, paypal_gender=paypal_gender)
@@ -585,6 +719,26 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
             req = await session.get(Request, request_id, with_for_update=True)
             if req is None or req.status != "waiting_issue":
                 return req, None
+
+            # Lock the user row too, so two manual/auto issuances for the
+            # same user cannot race past the individual limit.
+            user = await session.get(User, req.user_id, with_for_update=True)
+            if user is not None and user.paypal_work_limit is not None:
+                limit = int(user.paypal_work_limit)
+                used = int(
+                    await session.scalar(
+                        select(func.count(Request.id)).where(
+                            Request.user_id == req.user_id,
+                            Request.status.in_(PAYPAL_WORK_LIMIT_STATUSES),
+                        )
+                    )
+                    or 0
+                )
+                # The current waiting_issue request already occupies one slot.
+                # Conversion waiting_issue -> paypal_issued does not increase
+                # used, so equality is allowed; only overflow is blocked.
+                if used > limit:
+                    return req, None
 
             refused_by_user = (
                 select(UserPaypalExclusion.id)

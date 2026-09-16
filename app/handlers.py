@@ -37,6 +37,9 @@ from app.db import (
     count_waiting_requests,
     count_user_paypals,
     create_request,
+    create_request_with_work_limit,
+    get_user_paypal_work_limit_status,
+    set_user_paypal_work_limit,
     get_or_create_user,
     get_user,
     sync_user_profile,
@@ -148,7 +151,7 @@ from app.keyboards import (
     request_gender_choice_menu, paypal_stock_empty_menu, paypal_stock_missing_menu,
     paypal_stock_available_menu,
     broadcast_photo_menu, broadcast_confirm_menu, gs_photo_menu,
-    global_search_cancel_menu, global_search_results_menu, crm_user_menu, statistics_period_menu, quick_notify_menu,
+    global_search_cancel_menu, global_search_results_menu, crm_user_menu, user_paypal_limit_menu, statistics_period_menu, quick_notify_menu,
     content_menu, content_cancel_menu, content_image_menu,
     dt_payments_menu, dt_payments_ranking_menu, dt_payments_tag_menu,
     dt_payments_tag_cancel_menu, dt_payments_admin_menu,
@@ -164,6 +167,10 @@ class MemberSearch(StatesGroup):
 
 class MemberTagSearch(StatesGroup):
     query = State()
+
+
+class UserPaypalLimitForm(StatesGroup):
+    value = State()
 
 
 class PaypalRequestForm(StatesGroup):
@@ -624,6 +631,24 @@ async def _notify_stock_after_replenishment(
     )
 
 
+def _paypal_work_limit_user_text(info: dict) -> str:
+    limit = int(info["limit"])
+    used = int(info["used"])
+    return (
+        "⛔ <b>Достигнут лимит PayPal в работе</b>\n\n"
+        f"Ваш индивидуальный лимит: <b>{limit}</b>\n"
+        f"Сейчас занято: <b>{used}/{limit}</b>\n\n"
+        "Завершите одну из текущих заявок и попробуйте снова."
+    )
+
+
+async def _get_reached_paypal_work_limit(user_id: int) -> dict | None:
+    info = await get_user_paypal_work_limit_status(user_id)
+    if info.get("limit") is not None and info.get("reached"):
+        return info
+    return None
+
+
 @router.callback_query(F.data == "paypal_request")
 async def paypal_request(callback: CallbackQuery, state: FSMContext) -> None:
     if not await has_access(callback):
@@ -631,6 +656,15 @@ async def paypal_request(callback: CallbackQuery, state: FSMContext) -> None:
     if not await is_work_enabled():
         await callback.answer("Сейчас STOP WORK. Новые заявки временно отключены.", show_alert=True)
         return
+
+    work_limit = await _get_reached_paypal_work_limit(callback.from_user.id)
+    if work_limit is not None:
+        await callback.answer(
+            f"Лимит PayPal в работе: {work_limit['used']}/{work_limit['limit']}",
+            show_alert=True,
+        )
+        return
+
     active = await count_active_requests(callback.from_user.id)
     if active >= 2:
         await callback.answer(
@@ -686,6 +720,16 @@ async def paypal_amount_input(message: Message, state: FSMContext) -> None:
     if amount < 1 or amount > 100000:
         await message.answer("Введите сумму от 1 до 100000 €.", reply_markup=request_cancel_menu())
         return
+
+    work_limit = await _get_reached_paypal_work_limit(message.from_user.id)
+    if work_limit is not None:
+        await state.clear()
+        await message.answer(
+            _paypal_work_limit_user_text(work_limit),
+            reply_markup=back_home(),
+        )
+        return
+
     active = await count_active_requests(message.from_user.id)
     if active >= 2:
         await state.clear()
@@ -732,6 +776,16 @@ async def paypal_gender_choice(callback: CallbackQuery, state: FSMContext) -> No
     gender = callback.data.split(":", 1)[1]
     if gender not in {"male", "female"}:
         await callback.answer("Неизвестный тип PayPal", show_alert=True)
+        return
+
+    work_limit = await _get_reached_paypal_work_limit(callback.from_user.id)
+    if work_limit is not None:
+        await state.clear()
+        await callback.message.answer(
+            _paypal_work_limit_user_text(work_limit),
+            reply_markup=back_home(),
+        )
+        await callback.answer("Достигнут индивидуальный лимит", show_alert=True)
         return
 
     stock = await get_requestable_paypal_gender_counts(
@@ -832,6 +886,16 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer("🛑 Сейчас STOP WORK. Создание новых заявок остановлено.", reply_markup=back_home())
         return
+
+    work_limit = await _get_reached_paypal_work_limit(message.from_user.id)
+    if work_limit is not None:
+        await state.clear()
+        await message.answer(
+            _paypal_work_limit_user_text(work_limit),
+            reply_markup=back_home(),
+        )
+        return
+
     active = await count_active_requests(message.from_user.id)
     if active >= 2:
         await state.clear()
@@ -857,13 +921,26 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
         )
         return
 
-    req = await create_request(
+    req, create_info = await create_request_with_work_limit(
         message.from_user.id,
         amount,
         screenshot_file_id,
         gender,
     )
     await state.clear()
+
+    if req is None:
+        if create_info.get("reason") == "work_limit":
+            await message.answer(
+                _paypal_work_limit_user_text(create_info),
+                reply_markup=back_home(),
+            )
+        else:
+            await message.answer(
+                "Не удалось создать заявку. Попробуйте ещё раз.",
+                reply_markup=back_home(),
+            )
+        return
 
     auto_enabled = await is_auto_issue_enabled()
 
@@ -2504,6 +2581,7 @@ async def show_member_card(callback: CallbackQuery, user_id: int) -> None:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
     issued_count = await count_user_paypals(user_id)
+    limit_info = await get_user_paypal_work_limit_status(user_id)
     status_names = {
         "pending": "🟡 Ожидает",
         "approved": "🟢 Активен",
@@ -2523,7 +2601,15 @@ async def show_member_card(callback: CallbackQuery, user_id: int) -> None:
         f"Заявка подана: {format_dt(user.applied_at)}\n"
         f"Решение принято: {format_dt(user.decided_at)}\n"
         f"Администратор: {approver}\n\n"
-        f"Выдано PayPal: <b>{issued_count}</b>"
+        f"Выдано PayPal: <b>{issued_count}</b>\n"
+        + (
+            f"🎚 Индивидуальный лимит: <b>{limit_info['limit']}</b>\n"
+            f"📦 Сейчас занято слотов: <b>{limit_info['used']}/{limit_info['limit']}</b>"
+            if limit_info["limit"] is not None
+            else
+            f"🎚 Индивидуальный лимит: <b>не установлен</b>\n"
+            f"📦 Сейчас занято слотов: <b>{limit_info['used']}</b>"
+        )
     )
     await callback.message.edit_text(text, reply_markup=member_card_menu(user.id, user.status))
 
@@ -2536,6 +2622,195 @@ async def member_card_handler(callback: CallbackQuery) -> None:
     user_id = int(callback.data.split(":", 1)[1])
     await show_member_card(callback, user_id)
     await callback.answer()
+
+
+async def _user_paypal_limit_screen_data(user_id: int) -> tuple[object | None, dict]:
+    user = await get_user(user_id)
+    info = await get_user_paypal_work_limit_status(user_id)
+    return user, info
+
+
+def _user_paypal_limit_screen_text(user, info: dict) -> str:
+    username = (
+        f"@{user.username}"
+        if user and user.username
+        else f"ID {user.id}" if user else "—"
+    )
+    if info.get("limit") is None:
+        limit_line = "🎚 Индивидуальный лимит: <b>не установлен</b>"
+        load_line = f"📦 Сейчас занято: <b>{info.get('used', 0)}</b>"
+    else:
+        limit_line = f"🎚 Индивидуальный лимит: <b>{info['limit']}</b>"
+        load_line = (
+            f"📦 Сейчас занято: <b>{info['used']}/{info['limit']}</b>"
+        )
+
+    warning = ""
+    if (
+        info.get("limit") is not None
+        and info.get("used", 0) > info.get("limit", 0)
+    ):
+        warning = (
+            "\n\n⚠️ Сейчас занято больше установленного лимита. "
+            "Уже выданные PayPal не забираются, но новые будут недоступны, "
+            "пока количество не станет ниже лимита."
+        )
+
+    return (
+        "🎚 <b>Индивидуальный лимит PayPal в работе</b>\n\n"
+        f"Пользователь: <b>{username}</b>\n"
+        f"{limit_line}\n"
+        f"{load_line}\n\n"
+        "В лимит входят:\n"
+        "• заявки, ожидающие выдачи;\n"
+        "• выданные PayPal, ожидающие оплаты;\n"
+        "• заявки на проверке оплаты.\n\n"
+        "После подтверждения оплаты слот освобождается.\n"
+        "У остальных пользователей этот лимит не применяется."
+        f"{warning}"
+    )
+
+
+@router.callback_query(F.data.startswith("user_paypal_limit:"))
+async def user_paypal_limit_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, user_id_raw, origin = callback.data.split(":", 2)
+    user_id = int(user_id_raw)
+    await state.clear()
+    user, info = await _user_paypal_limit_screen_data(user_id)
+    if user is None:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    await callback.message.edit_text(
+        _user_paypal_limit_screen_text(user, info),
+        reply_markup=user_paypal_limit_menu(
+            user_id,
+            info.get("limit"),
+            origin,
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("user_paypal_limit_set:"))
+async def user_paypal_limit_set_handler(
+    callback: CallbackQuery,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, user_id_raw, limit_raw, origin = callback.data.split(":", 3)
+    user_id = int(user_id_raw)
+    limit = int(limit_raw)
+    user = await set_user_paypal_work_limit(user_id, limit)
+    if user is None:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    info = await get_user_paypal_work_limit_status(user_id)
+    await callback.message.edit_text(
+        _user_paypal_limit_screen_text(user, info),
+        reply_markup=user_paypal_limit_menu(
+            user_id,
+            info.get("limit"),
+            origin,
+        ),
+    )
+    await callback.answer(f"Лимит установлен: {limit}")
+
+
+@router.callback_query(F.data.startswith("user_paypal_limit_clear:"))
+async def user_paypal_limit_clear_handler(
+    callback: CallbackQuery,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, user_id_raw, origin = callback.data.split(":", 2)
+    user_id = int(user_id_raw)
+    user = await set_user_paypal_work_limit(user_id, None)
+    if user is None:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    info = await get_user_paypal_work_limit_status(user_id)
+    await callback.message.edit_text(
+        _user_paypal_limit_screen_text(user, info),
+        reply_markup=user_paypal_limit_menu(
+            user_id,
+            info.get("limit"),
+            origin,
+        ),
+    )
+    await callback.answer("Индивидуальный лимит убран")
+
+
+@router.callback_query(F.data.startswith("user_paypal_limit_custom:"))
+async def user_paypal_limit_custom_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    _, user_id_raw, origin = callback.data.split(":", 2)
+    user_id = int(user_id_raw)
+    user = await get_user(user_id)
+    if user is None:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    await state.set_state(UserPaypalLimitForm.value)
+    await state.update_data(
+        paypal_limit_user_id=user_id,
+        paypal_limit_origin=origin,
+    )
+    await callback.message.answer(
+        "✏️ Введите максимальное количество PayPal в работе "
+        "для этого пользователя числом от <b>1</b> до <b>999</b>."
+    )
+    await callback.answer()
+
+
+@router.message(UserPaypalLimitForm.value)
+async def user_paypal_limit_custom_value(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    raw = (message.text or "").strip()
+    if not raw.isdigit():
+        await message.answer("Введите целое число от 1 до 999.")
+        return
+    limit = int(raw)
+    if limit < 1 or limit > 999:
+        await message.answer("Лимит должен быть от 1 до 999.")
+        return
+
+    data = await state.get_data()
+    user_id = int(data["paypal_limit_user_id"])
+    origin = str(data.get("paypal_limit_origin", "member"))
+    user = await set_user_paypal_work_limit(user_id, limit)
+    await state.clear()
+
+    if user is None:
+        await message.answer("Пользователь не найден.")
+        return
+
+    info = await get_user_paypal_work_limit_status(user_id)
+    await message.answer(
+        _user_paypal_limit_screen_text(user, info),
+        reply_markup=user_paypal_limit_menu(
+            user_id,
+            info.get("limit"),
+            origin,
+        ),
+    )
 
 
 @router.callback_query(F.data.startswith("member_set:"))
@@ -3372,7 +3647,22 @@ async def admin_issue(callback: CallbackQuery) -> None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
     if tag is None:
-        await callback.answer("Нет свободных PayPal или заявка уже обработана", show_alert=True)
+        limit_info = await get_user_paypal_work_limit_status(req.user_id)
+        if (
+            req.status == "waiting_issue"
+            and limit_info.get("limit") is not None
+            and limit_info.get("used", 0) > limit_info.get("limit", 0)
+        ):
+            await callback.answer(
+                "Индивидуальный лимит пользователя превышен: "
+                f"{limit_info['used']}/{limit_info['limit']}",
+                show_alert=True,
+            )
+        else:
+            await callback.answer(
+                "Нет свободных PayPal или заявка уже обработана",
+                show_alert=True,
+            )
         return
     await set_request_status(request_id, "paypal_issued", callback.from_user.id)
 
@@ -6343,6 +6633,7 @@ async def crm_user_card_handler(callback: CallbackQuery) -> None:
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True); return
     stats = await get_user_crm_stats(user_id)
+    limit_info = await get_user_paypal_work_limit_status(user_id)
     username = f"@{user.username}" if user.username else "—"
     text = (
         "━━━━━━━━━━━━━━\n"
@@ -6357,8 +6648,16 @@ async def crm_user_card_handler(callback: CallbackQuery) -> None:
         f"Возвратов: <b>{stats['returned']}</b>\n"
         f"GS: <b>{stats['gs']}</b>\n"
         f"Активных заявок: <b>{stats['active']}</b>\n"
-        f"Общая сумма: <b>{stats['total_amount']:.2f} €</b>\n"
-        "━━━━━━━━━━━━━━"
+        f"Общая сумма: <b>{stats['total_amount']:.2f} €</b>\n\n"
+        + (
+            f"🎚 Лимит PayPal в работе: <b>{limit_info['limit']}</b>\n"
+            f"📦 Занято слотов: <b>{limit_info['used']}/{limit_info['limit']}</b>\n"
+            if limit_info["limit"] is not None
+            else
+            f"🎚 Лимит PayPal в работе: <b>не установлен</b>\n"
+            f"📦 Занято слотов: <b>{limit_info['used']}</b>\n"
+        )
+        + "━━━━━━━━━━━━━━"
     )
     await callback.message.edit_text(text, reply_markup=crm_user_menu(user.id, user.status))
     await callback.answer()

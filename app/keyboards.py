@@ -293,6 +293,12 @@ def member_card_menu(user_id: int, status: str) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"member_set:approved:{user_id}")])
     if status == "approved":
         rows.append([InlineKeyboardButton(text="↩️ Отозвать доступ", callback_data=f"member_set:pending:{user_id}")])
+    rows.append([
+        InlineKeyboardButton(
+            text="🎚 Лимит PayPal в работе",
+            callback_data=f"user_paypal_limit:{user_id}:member",
+        )
+    ])
     rows.append([InlineKeyboardButton(text="💬 Написать пользователю", url=f"tg://user?id={user_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ К участникам", callback_data="members_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1272,12 +1278,81 @@ def crm_user_menu(user_id: int, status: str) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="💬 Написать", url=f"tg://user?id={user_id}")],
         [InlineKeyboardButton(text="💳 PayPal пользователя", callback_data=f"crm_user_paypals:{user_id}")],
+        [
+            InlineKeyboardButton(
+                text="🎚 Лимит PayPal в работе",
+                callback_data=f"user_paypal_limit:{user_id}:crm",
+            )
+        ],
     ]
     if status == "blocked":
         rows.append([InlineKeyboardButton(text="🔓 Разблокировать", callback_data=f"member_set:approved:{user_id}")])
     else:
         rows.append([InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"member_set:blocked:{user_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def user_paypal_limit_menu(
+    user_id: int,
+    current_limit: int | None,
+    origin: str = "member",
+) -> InlineKeyboardMarkup:
+    origin = "crm" if origin == "crm" else "member"
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="1",
+                callback_data=f"user_paypal_limit_set:{user_id}:1:{origin}",
+            ),
+            InlineKeyboardButton(
+                text="2",
+                callback_data=f"user_paypal_limit_set:{user_id}:2:{origin}",
+            ),
+            InlineKeyboardButton(
+                text="3",
+                callback_data=f"user_paypal_limit_set:{user_id}:3:{origin}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="5",
+                callback_data=f"user_paypal_limit_set:{user_id}:5:{origin}",
+            ),
+            InlineKeyboardButton(
+                text="10",
+                callback_data=f"user_paypal_limit_set:{user_id}:10:{origin}",
+            ),
+            InlineKeyboardButton(
+                text="20",
+                callback_data=f"user_paypal_limit_set:{user_id}:20:{origin}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="✏️ Ввести своё число",
+                callback_data=f"user_paypal_limit_custom:{user_id}:{origin}",
+            )
+        ],
+    ]
+    if current_limit is not None:
+        rows.append([
+            InlineKeyboardButton(
+                text="♻️ Убрать индивидуальный лимит",
+                callback_data=f"user_paypal_limit_clear:{user_id}:{origin}",
+            )
+        ])
+    back_callback = (
+        f"crm_user:{user_id}"
+        if origin == "crm"
+        else f"member_card:{user_id}"
+    )
+    rows.append([
+        InlineKeyboardButton(
+            text="⬅️ К профилю",
+            callback_data=back_callback,
+        )
+    ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
