@@ -635,10 +635,8 @@ def _paypal_work_limit_user_text(info: dict) -> str:
     limit = int(info["limit"])
     used = int(info["used"])
     return (
-        "⛔ <b>Достигнут лимит PayPal в работе</b>\n\n"
-        f"Ваш индивидуальный лимит: <b>{limit}</b>\n"
-        f"Сейчас занято: <b>{used}/{limit}</b>\n\n"
-        "Завершите одну из текущих заявок и попробуйте снова."
+        f"⛔ <b>Вы уже взяли максимум PayPal ({used}/{limit})</b>\n\n"
+        "Завершите оплату одного из них — после проверки сможете взять новый."
     )
 
 
@@ -660,7 +658,8 @@ async def paypal_request(callback: CallbackQuery, state: FSMContext) -> None:
     work_limit = await _get_reached_paypal_work_limit(callback.from_user.id)
     if work_limit is not None:
         await callback.answer(
-            f"Лимит PayPal в работе: {work_limit['used']}/{work_limit['limit']}",
+            "Вы уже взяли максимум PayPal. "
+            "Завершите оплату одного из них — после проверки сможете взять новый.",
             show_alert=True,
         )
         return
@@ -785,7 +784,11 @@ async def paypal_gender_choice(callback: CallbackQuery, state: FSMContext) -> No
             _paypal_work_limit_user_text(work_limit),
             reply_markup=back_home(),
         )
-        await callback.answer("Достигнут индивидуальный лимит", show_alert=True)
+        await callback.answer(
+            "Вы уже взяли максимум PayPal. "
+            "После проверки одной из оплат сможете взять новый.",
+            show_alert=True,
+        )
         return
 
     stock = await get_requestable_paypal_gender_counts(
