@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 import re
 import secrets
 
@@ -3142,12 +3143,31 @@ async def get_manual_payout(payout_id: int) -> ManualPayout | None:
 
 async def get_payout_dashboard_counts() -> dict:
     async with SessionLocal() as session:
-        users_count = int(await session.scalar(
-            select(func.count(func.distinct(BalanceEntry.user_id))).where(BalanceEntry.status == "available")
-        ) or 0)
-        total = float(await session.scalar(
-            select(func.coalesce(func.sum(BalanceEntry.amount), 0)).where(BalanceEntry.status == "available")
-        ) or 0)
+        # Use the current payout preference, just like complete_manual_payout.
+        # All available entries count, independently of the user-list page.
+        provider = func.coalesce(func.nullif(User.payout_method, ""), "cryptobot")
+        provider_rows = (await session.execute(
+            select(
+                provider.label("provider"),
+                func.sum(BalanceEntry.amount).label("total"),
+                func.count(func.distinct(BalanceEntry.user_id)).label("users"),
+            )
+            .select_from(BalanceEntry)
+            .join(User, User.id == BalanceEntry.user_id)
+            .where(BalanceEntry.status == "available")
+            .group_by(provider)
+        )).all()
+        provider_totals = {row.provider: row.total for row in provider_rows}
+        zero = Decimal("0.00")
+        users_count = sum(row.users for row in provider_rows)
+        total = sum(provider_totals.values(), zero)
         paid_total = float(await session.scalar(select(func.coalesce(func.sum(ManualPayout.total_amount), 0))) or 0)
         paid_count = int(await session.scalar(select(func.count(ManualPayout.id))) or 0)
-        return {"users": users_count, "total": total, "paid_total": paid_total, "paid_count": paid_count}
+        return {
+            "users": users_count,
+            "total": total,
+            "cryptobot_total": provider_totals.get("cryptobot", zero),
+            "xrocket_total": provider_totals.get("xrocket", zero),
+            "paid_total": paid_total,
+            "paid_count": paid_count,
+        }

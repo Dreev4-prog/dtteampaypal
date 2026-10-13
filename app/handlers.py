@@ -7050,7 +7050,9 @@ async def payouts_v22_handler(callback: CallbackQuery) -> None:
     text = (
         "💼 <b>ЦЕНТР ВЫПЛАТ</b>\n\n"
         f"👥 Нужно выплатить: <b>{totals['users']}</b> пользователям\n"
-        f"💰 Общий баланс: <b>{totals['total']:.2f} USDT</b>\n"
+        f"💰 Общий баланс: <b>{totals['total']:.2f} USDT</b>\n\n"
+        f"🤖 К выплате через CryptoBot: <b>{totals['cryptobot_total']:.2f} USDT</b>\n"
+        f"🚀 К выплате через xRocket: <b>{totals['xrocket_total']:.2f} USDT</b>\n\n"
         f"✅ Выплат создано: <b>{totals['paid_count']}</b>\n"
         f"💵 Выплачено всего: <b>{totals['paid_total']:.2f} USDT</b>\n\n"
         "Выберите пользователя. Все его доступные начисления будут объединены в один чек."
