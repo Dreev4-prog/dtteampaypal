@@ -46,6 +46,7 @@ from app.db import (
     get_request,
     get_user_requests,
     get_user_requests_by_statuses,
+    count_user_requests_by_statuses,
     get_user_profit_summary,
     get_user_counts,
     list_users,
@@ -135,6 +136,7 @@ from app.keyboards import (
     rate_cancel_menu,
     my_paypals_menu,
     my_paypals_back_menu,
+    my_paypals_history_menu,
     my_paypals_waiting_list_menu,
     my_paypal_waiting_card_menu,
     paid_or_return_menu, return_reasons_menu, return_confirm_menu, returns_menu,
@@ -280,31 +282,53 @@ async def render_screen(
     caption: str,
     reply_markup=None,
 ) -> Message:
-    """Показывает экран с баннером. При переходах заменяет текущее сообщение."""
+    """Показывает экран; длинные подписи отправляет обычным текстом."""
+    # Count the HTML source conservatively, including UTF-16 emoji pairs.
+    # Telegram allows only 1024 characters in a photo caption.
+    text_screen = len(caption.encode("utf-16-le")) // 2 > 1024
     photo = FSInputFile(BANNERS[banner])
 
     if isinstance(target, Message):
+        if text_screen:
+            return await target.answer(caption, reply_markup=reply_markup)
         return await target.answer_photo(photo=photo, caption=caption, reply_markup=reply_markup)
 
     message = target.message
-    if message.photo:
+    if text_screen and not message.photo:
+        try:
+            return await message.edit_text(caption, reply_markup=reply_markup)
+        except TelegramBadRequest as exc:
+            if "message is not modified" in exc.message.lower():
+                return message
+    elif not text_screen and message.photo:
         media = InputMediaPhoto(media=photo, caption=caption)
         try:
             return await message.edit_media(media=media, reply_markup=reply_markup)
-        except TelegramBadRequest:
-            pass
+        except TelegramBadRequest as exc:
+            if "message is not modified" in exc.message.lower():
+                return message
+
+    # Keep the current menu usable if Telegram rejects the replacement.
+    if text_screen:
+        replacement = await target.bot.send_message(
+            chat_id=message.chat.id,
+            text=caption,
+            reply_markup=reply_markup,
+        )
+    else:
+        replacement = await target.bot.send_photo(
+            chat_id=message.chat.id,
+            photo=photo,
+            caption=caption,
+            reply_markup=reply_markup,
+        )
 
     try:
         await message.delete()
     except TelegramBadRequest:
         pass
 
-    return await target.bot.send_photo(
-        chat_id=message.chat.id,
-        photo=photo,
-        caption=caption,
-        reply_markup=reply_markup,
-    )
+    return replacement
 
 
 async def render_custom_photo_screen(
@@ -1132,9 +1156,11 @@ MY_PAYPAL_GROUPS = {
     ),
 }
 
+MY_PAYPAL_HISTORY_PAGE_SIZE = 4
+
 
 def _user_request_line(req, paypal_tag: str | None = None) -> str:
-    tag_line = f"\n💳 PayPal: <code>{paypal_tag}</code>" if paypal_tag else ""
+    tag_line = f"\n💳 PayPal: <code>{escape(paypal_tag)}</code>" if paypal_tag else ""
     payout_line = ""
     if req.payout_amount is not None:
         payout_line = f"\n💸 К выплате: <b>{float(req.payout_amount):.2f} €</b>"
@@ -1153,7 +1179,7 @@ async def my_paypals(callback: CallbackQuery) -> None:
 
     counts: dict[str, int] = {}
     for key, (statuses, _) in MY_PAYPAL_GROUPS.items():
-        counts[key] = len(await get_user_requests_by_statuses(callback.from_user.id, statuses, limit=1000))
+        counts[key] = await count_user_requests_by_statuses(callback.from_user.id, statuses)
 
     summary = await get_user_profit_summary(callback.from_user.id)
     text = (
@@ -1171,18 +1197,32 @@ async def my_paypals(callback: CallbackQuery) -> None:
 async def my_paypals_list(callback: CallbackQuery) -> None:
     if not await has_access(callback):
         return
-    group = callback.data.split(":", 1)[1]
+    parts = callback.data.split(":")
+    group = parts[1]
     config = MY_PAYPAL_GROUPS.get(group)
     if config is None:
         await callback.answer("Раздел не найден", show_alert=True)
         return
 
+    try:
+        offset = max(0, int(parts[2])) if len(parts) == 3 else 0
+        if len(parts) > 3:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Страница не найдена", show_alert=True)
+        return
+
+    await callback.answer()
     statuses, title = config
-    limit = 50 if group == "waiting" else 8
+    limit = 50 if group == "waiting" else MY_PAYPAL_HISTORY_PAGE_SIZE
+    total = await count_user_requests_by_statuses(callback.from_user.id, statuses)
+    last_offset = max(0, (total - 1) // limit) * limit
+    offset = 0 if group == "waiting" else min((offset // limit) * limit, last_offset)
     requests = await get_user_requests_by_statuses(
         callback.from_user.id,
         statuses,
         limit=limit,
+        offset=offset,
     )
 
     if group == "waiting":
@@ -1223,7 +1263,6 @@ async def my_paypals_list(callback: CallbackQuery) -> None:
             text,
             reply_markup,
         )
-        await callback.answer()
         return
 
     if not requests:
@@ -1248,7 +1287,7 @@ async def my_paypals_list(callback: CallbackQuery) -> None:
             tag = await get_paypal_tag(req.paypal_tag_id)
             blocks.append(_user_request_line(req, tag.tag if tag else None))
             blocks.append(
-                f"📌 Статус: <b>{status_names.get(req.status, req.status)}</b>"
+                f"📌 Статус: <b>{escape(status_names.get(req.status, req.status))}</b>"
             )
             if getattr(req, "admin_result_screenshot_file_id", None):
                 blocks.append("📎 Скриншот результата был отправлен вам администратором.")
@@ -1264,8 +1303,17 @@ async def my_paypals_list(callback: CallbackQuery) -> None:
             blocks.append("━━━━━━━━━━━━")
         text = "\n".join(blocks)
 
-    await render_screen(callback, "requests", text, my_paypals_back_menu())
-    await callback.answer()
+    if requests:
+        text += (
+            f"\n\nПоказаны {offset + 1}–{offset + len(requests)} из {total}"
+            f"\nСтраница {offset // limit + 1} из {last_offset // limit + 1}"
+        )
+    await render_screen(
+        callback,
+        "requests",
+        text,
+        my_paypals_history_menu(group, offset, limit, total),
+    )
 
 
 @router.callback_query(F.data.startswith("my_paypal_card:"))

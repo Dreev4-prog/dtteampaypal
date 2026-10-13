@@ -639,6 +639,30 @@ def my_paypals_back_menu() -> InlineKeyboardMarkup:
     ])
 
 
+def my_paypals_history_menu(
+    group: str,
+    offset: int,
+    page_size: int,
+    total: int,
+) -> InlineKeyboardMarkup:
+    rows = []
+    navigation = []
+    if offset > 0:
+        navigation.append(InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=f"my_paypals_list:{group}:{max(0, offset - page_size)}",
+        ))
+    if offset + page_size < total:
+        navigation.append(InlineKeyboardButton(
+            text="Далее ➡️",
+            callback_data=f"my_paypals_list:{group}:{offset + page_size}",
+        ))
+    if navigation:
+        rows.append(navigation)
+    rows.extend(my_paypals_back_menu().inline_keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def my_paypals_waiting_list_menu(requests: list) -> InlineKeyboardMarkup:
     rows = []
     for req in requests:

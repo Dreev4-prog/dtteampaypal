@@ -882,12 +882,28 @@ async def get_user_requests(user_id: int) -> list[Request]:
         return list(rows)
 
 
-async def get_user_requests_by_statuses(user_id: int, statuses: tuple[str, ...], limit: int = 50) -> list[Request]:
+async def count_user_requests_by_statuses(user_id: int, statuses: tuple[str, ...]) -> int:
+    async with SessionLocal() as session:
+        return int(await session.scalar(
+            select(func.count(Request.id)).where(
+                Request.user_id == user_id,
+                Request.status.in_(statuses),
+            )
+        ) or 0)
+
+
+async def get_user_requests_by_statuses(
+    user_id: int,
+    statuses: tuple[str, ...],
+    limit: int = 50,
+    offset: int = 0,
+) -> list[Request]:
     async with SessionLocal() as session:
         rows = await session.scalars(
             select(Request)
             .where(Request.user_id == user_id, Request.status.in_(statuses))
             .order_by(Request.updated_at.desc(), Request.id.desc())
+            .offset(offset)
             .limit(limit)
         )
         return list(rows)
