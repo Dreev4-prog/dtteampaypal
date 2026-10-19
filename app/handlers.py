@@ -86,7 +86,7 @@ from app.db import (
     get_paypal_database_counts, get_paypal_gender_counts,
     list_paypal_tags, set_paypal_tag_status, set_paypal_tag_gender,
     get_gestop_date_groups, list_gestop_tags,
-    delete_free_paypal_tag, restore_deleted_paypal_tag,
+    delete_free_paypal_tag, delete_gestop_paypal_tag, restore_deleted_paypal_tag,
     get_deleted_working_request, list_deleted_working_requests,
     restore_deleted_paypal_to_work, get_active_requests_for_tag,
     cancel_duplicate_working_request,
@@ -142,7 +142,7 @@ from app.keyboards import (
     my_paypal_waiting_card_menu,
     paid_or_return_menu, return_reasons_menu, return_confirm_menu, returns_menu,
     return_card_menu, return_checked_menu, paypal_database_menu, paypal_list_menu,
-    gestop_dates_menu, gestop_tags_menu, gestop_card_menu,
+    gestop_dates_menu, gestop_tags_menu, gestop_card_menu, gestop_delete_confirm_menu,
     paypal_card_admin_menu, paypal_gender_edit_menu,
     paypal_delete_confirm_menu, paypal_restore_confirm_menu,
     paypal_restore_working_confirm_menu, paypal_restore_working_users_menu,
@@ -2589,6 +2589,13 @@ def format_happy_clock(value: datetime | None) -> str:
     return local.strftime("%H:%M") if local else "—"
 
 
+def _admin_ges_line(req) -> str:
+    """Use only in admin views, never in shared or member payment text."""
+    if getattr(req, "paypal_was_gestop", 0):
+        return "♻️ <b>GeS</b> · PayPal ранее был в Gestop\n"
+    return ""
+
+
 async def _attach_request_display(requests, bot=None) -> None:
     """Attach display data from local DB only.
 
@@ -3408,6 +3415,7 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
         f"Username: {safe_username}\n"
         f"🆔 <code>{req.user_id}</code>\n\n"
         f"💳 PayPal: <code>{safe_paypal_tag}</code>\n"
+        f"{_admin_ges_line(req)}"
         f"💶 Сумма: <b>{req.amount} €</b>\n"
         + (f"📊 Процент: <b>{req.payout_percent}%</b>\n💰 Начислено пользователю: <b>{float(req.payout_amount):.2f} USDT</b>\n" if req.payout_percent is not None and req.payout_amount is not None else "")
         + rate_source_line
@@ -3533,6 +3541,7 @@ async def paypal_withdraw_done_handler(callback: CallbackQuery) -> None:
         f"Username: {username}\n"
         f"🆔 <code>{req.user_id}</code>\n\n"
         f"💳 PayPal: <code>{tag.tag if tag else 'не найден'}</code>\n"
+        f"{_admin_ges_line(req)}"
         f"💶 Сумма: <b>{req.amount} €</b>\n"
         + (
             f"📊 Процент: <b>{req.payout_percent}%</b>\n"
@@ -3850,7 +3859,8 @@ async def finish_user_paid(callback_or_message, request_id: int, user_id: int):
             f"👤 Пользователь: {username}\n"
             f"🔗 {profile}\n"
             f"🆔 ID: <code>{user_id}</code>\n\n"
-            f"💳 PayPal: <code>{tag.tag if tag else 'не найден'}</code>\n"
+            f"💳 PayPal: <code>{escape(tag.tag) if tag else 'не найден'}</code>\n"
+            f"{_admin_ges_line(req)}"
             f"🚻 Тип: {'👨 Мужской' if getattr(req, 'paypal_gender', 'male') == 'male' else '👩 Женский'}\n"
             f"💶 Сумма: <b>{req.amount} €</b>"
             f"{happy_line}",
@@ -4136,6 +4146,7 @@ async def admin_confirm(callback: CallbackQuery) -> None:
 
     await callback.message.edit_text(
         "💶 <b>Подтвердите полученную сумму</b>\n\n"
+        f"{_admin_ges_line(req)}"
         f"Сумма в заявке: <b>{req.amount} €</b>\n"
         f"{source}\n"
         f"📈 Процент: <b>{percent}%</b>\n"
@@ -4185,6 +4196,7 @@ async def admin_confirm_same(callback: CallbackQuery) -> None:
         return
     await callback.message.edit_text(
         f"✅ Оплата по заявке #{req.id} подтверждена.\n"
+        f"{_admin_ges_line(req)}"
         f"Сумма: <b>{req.amount} €</b>\n"
         + ("🔥 Happy Hours\n" if req.happy_hours_applied else "📊 Стандартный тариф\n")
         + f"Процент: <b>{req.payout_percent}%</b>\n"
@@ -4238,6 +4250,7 @@ async def admin_paid_amount_input(message: Message, state: FSMContext) -> None:
         return
     await message.answer(
         f"✅ Оплата по заявке #{req.id} подтверждена.\n"
+        f"{_admin_ges_line(req)}"
         f"Сумма: <b>{amount} €</b>\n"
         + ("🔥 Happy Hours\n" if req.happy_hours_applied else "📊 Стандартный тариф\n")
         + f"Процент: <b>{req.payout_percent}%</b>\n"
@@ -5534,6 +5547,44 @@ async def gestop_card_handler(callback: CallbackQuery) -> None:
     await render_screen(callback, "paypal", text, gestop_card_menu(tag.id, day, offset, dates_offset))
 
 
+@router.callback_query(F.data.startswith("ges_del_ask:"))
+@router.callback_query(F.data.startswith("ges_del_yes:"))
+async def gestop_delete_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    try:
+        action, raw_id, day, raw_offset, raw_dates_offset = callback.data.split(":")
+        _validate_gestop_day(day)
+        tag_id = int(raw_id)
+        offset, dates_offset = max(0, int(raw_offset)), max(0, int(raw_dates_offset))
+    except ValueError:
+        await callback.answer("PayPal не найден", show_alert=True)
+        return
+    if action == "ges_del_yes":
+        ok, _ = await delete_gestop_paypal_tag(tag_id)
+        await callback.answer(
+            "PayPal перемещён в корзину" if ok else "Этот PayPal уже не в Gestop",
+            show_alert=not ok,
+        )
+        await _show_gestop_list(callback, day, offset, dates_offset)
+        return
+    tag = await get_paypal_tag(tag_id)
+    if tag is None or tag.status != "gestoppt":
+        await callback.answer("Этот PayPal уже не в Gestop", show_alert=True)
+        await _show_gestop_list(callback, day, offset, dates_offset)
+        return
+    await callback.answer()
+    await render_screen(
+        callback, "paypal",
+        "<b>🗑 Удалить PayPal из Gestop?</b>\n\n"
+        f"<code>{escape(tag.tag)}</code>\n\n"
+        "PayPal будет перемещён в корзину. Его можно восстановить позже.\n"
+        "История Gestop и связанных оплат сохранится.",
+        gestop_delete_confirm_menu(tag.id, day, offset, dates_offset),
+    )
+
+
 @router.callback_query(F.data.startswith("paypal_card:"))
 async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
@@ -5565,6 +5616,8 @@ async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
         f"Выдан: {format_dt(tag.issued_at)}\n"
         f"Добавлен: {format_dt(tag.created_at)}"
     )
+    if tag.had_gestop:
+        text += "\n♻️ <b>GeS</b> · PayPal ранее был в Gestop"
     if tag.status == "gestoppt":
         text += f"\nДата Gestop: {_gestop_date_label(tag)}"
 
@@ -6141,6 +6194,7 @@ async def working_card_handler(callback: CallbackQuery) -> None:
         f"👤 Пользователь: <b>{username}</b>\n"
         f"🆔 Telegram ID: <code>{req.user_id}</code>\n"
         f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+        f"{_admin_ges_line(req)}"
         f"💶 Сумма: <b>{req.amount} €</b>\n"
         f"🕒 Выдан: <b>{format_dt(req.processed_at or req.updated_at)}</b>\n"
         f"📌 Статус: <b>выдан</b>"
@@ -6299,6 +6353,7 @@ async def working_money_received_handler(callback: CallbackQuery) -> None:
         "✅ <b>Деньги подтверждены и начислены</b>\n\n"
         f"👤 Пользователь: <b>{username}</b>\n"
         f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n"
+        f"{_admin_ges_line(req)}"
         f"💶 Получено: <b>{req.amount} €</b>\n"
         f"📊 Процент: <b>{req.payout_percent}%</b>\n"
         f"💰 Начислено: <b>{float(req.payout_amount or 0):.2f} USDT</b>\n"

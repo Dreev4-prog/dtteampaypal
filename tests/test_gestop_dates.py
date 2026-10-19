@@ -200,6 +200,7 @@ class GestopTests(unittest.IsolatedAsyncioTestCase):
             for tag_id in range(1, 5):
                 tag = await db.get_paypal_tag(tag_id)
                 self.assertEqual((tag.status, tag.gestop_at, tag.gestop_date_source), ("gestoppt", now, "exact"))
+                self.assertEqual(tag.had_gestop, 1)
             clock.utcnow.return_value = now + timedelta(days=1)
             await db.set_paypal_tag_status(1, "gestoppt")
             self.assertEqual((await db.get_paypal_tag(1)).gestop_at, now)

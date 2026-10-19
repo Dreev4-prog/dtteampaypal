@@ -430,6 +430,8 @@ def payments_list_menu(requests: list, filter_name: str, offset: int, page_size:
                 f"{icon} 👤 {username} · 💳 {paypal_tag} · 💶 {req.amount} €"
             )
 
+        if getattr(req, "paypal_was_gestop", 0):
+            button_text = "♻️ GeS · " + button_text
         rows.append([InlineKeyboardButton(
             text=button_text,
             callback_data=f"payment_card:{req.id}:{filter_name}:{offset}",
@@ -1010,7 +1012,15 @@ def gestop_tags_menu(data: dict, day: str, dates_offset: int) -> InlineKeyboardM
 def gestop_card_menu(tag_id: int, day: str, offset: int, dates_offset: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🟢 Сделать свободным", callback_data=f"paypal_mark_available:{tag_id}:gestoppt")],
+        [InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"ges_del_ask:{tag_id}:{day}:{offset}:{dates_offset}")],
         [InlineKeyboardButton(text="⬅️ К списку Gestop", callback_data=f"gestop_list:{day}:{offset}:{dates_offset}")],
+    ])
+
+
+def gestop_delete_confirm_menu(tag_id: int, day: str, offset: int, dates_offset: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, в корзину", callback_data=f"ges_del_yes:{tag_id}:{day}:{offset}:{dates_offset}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"gestop_card:{tag_id}:{day}:{offset}:{dates_offset}")],
     ])
 
 

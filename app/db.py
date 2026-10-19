@@ -69,6 +69,7 @@ class PaypalTag(Base):
     gs_screenshot_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     gestop_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
     gestop_date_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    had_gestop: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class Request(Base):
@@ -79,6 +80,8 @@ class Request(Base):
     amount: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), default="waiting_issue", index=True)
     paypal_tag_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("paypal_tags.id"), nullable=True)
+    # Snapshot at issuance: later Gestop must not relabel an earlier payment.
+    paypal_was_gestop: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     screenshot_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     admin_result_screenshot_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     paypal_gender: Mapped[str] = mapped_column(String(12), default="male", index=True)
@@ -286,6 +289,10 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS gestop_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS gestop_date_source VARCHAR(16)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_paypal_tags_gestop_at ON paypal_tags (gestop_at)"))
+        # v2.5.16: permanent tag history and an admin-only request snapshot.
+        await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS had_gestop INTEGER NOT NULL DEFAULT 0"))
+        # NULL distinguishes existing requests during the one-time backfill.
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paypal_was_gestop INTEGER"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paypal_gender VARCHAR(12) DEFAULT 'male'"))
         # v2.5.2: доказательство результата проверки (возврат / PayPal умер).
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS admin_result_screenshot_file_id VARCHAR(512)"))
@@ -421,6 +428,10 @@ async def init_db() -> None:
     # Existing users receive an anonymous DT Payments tag once after migration.
     await _backfill_dt_payments_tags()
     await _backfill_gestop_dates()
+    await _backfill_gestop_history()
+    async with engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE requests ALTER COLUMN paypal_was_gestop SET DEFAULT 0"))
+        await conn.execute(text("ALTER TABLE requests ALTER COLUMN paypal_was_gestop SET NOT NULL"))
 
 
 async def _backfill_gestop_dates() -> None:
@@ -461,12 +472,44 @@ async def _backfill_gestop_dates() -> None:
         await session.commit()
 
 
+async def _backfill_gestop_history() -> None:
+    """Keep evidence even for old Gestops whose exact date is unknown.
+
+    Only open, already reissued requests inherit the marker on upgrade.
+    Closed payments cannot reliably be dated relative to old manual Gestops.
+    NULL request snapshots are migrated once, never reinterpreted on restart.
+    """
+    async with SessionLocal() as session:
+        await session.execute(text("""
+            UPDATE paypal_tags SET had_gestop = 1
+            WHERE status = 'gestoppt' OR gestop_at IS NOT NULL
+               OR id IN (SELECT paypal_tag_id FROM paypal_returns WHERE status = 'gestoppt')
+               OR id IN (
+                   SELECT paypal_tag_id FROM requests
+                   WHERE status IN ('returned_gestoppt', 'admin_recalled_gestoppt',
+                                    'paypal_limited', 'payment_returned')
+               )
+        """))
+        await session.execute(text("""
+            UPDATE requests SET paypal_was_gestop = 1
+            WHERE paypal_was_gestop IS NULL
+              AND status IN ('paypal_issued', 'waiting_check', 'not_found')
+              AND paypal_tag_id IN (
+                  SELECT id FROM paypal_tags
+                  WHERE had_gestop = 1 AND status != 'gestoppt'
+              )
+        """))
+        await session.execute(text("UPDATE requests SET paypal_was_gestop = 0 WHERE paypal_was_gestop IS NULL"))
+        await session.commit()
+
+
 def _mark_tag_gestop(tag: PaypalTag, now: datetime) -> None:
     # Clicking Gestop again must not reset its age or invent a missing date.
     if tag.status != "gestoppt":
         tag.gestop_at = now
         tag.gestop_date_source = "exact"
     tag.status = "gestoppt"
+    tag.had_gestop = 1
 
 
 DT_PAYMENTS_TAG_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -822,6 +865,7 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
             tag.issued_at = now
 
             req.paypal_tag_id = tag.id
+            req.paypal_was_gestop = int(bool(tag.had_gestop))
             req.status = "paypal_issued"
             req.processed_at = now
             req.updated_at = now
@@ -2088,6 +2132,20 @@ async def delete_free_paypal_tag(tag_id: int) -> tuple[bool, str]:
         return True, "deleted"
 
 
+async def delete_gestop_paypal_tag(tag_id: int) -> tuple[bool, str]:
+    """Soft-delete only a current Gestop; stale buttons cannot delete live tags."""
+    async with SessionLocal() as session:
+        tag = await session.get(PaypalTag, tag_id, with_for_update=True)
+        if tag is None or tag.status != "gestoppt":
+            return False, "not_gestop"
+        tag.had_gestop = 1
+        tag.status = "deleted"
+        tag.issued_to_user_id = None
+        tag.issued_at = None
+        await session.commit()
+        return True, "deleted"
+
+
 async def get_deleted_working_request(tag_id: int) -> Request | None:
     """Return the latest user request linked to a deleted working PayPal.
 
@@ -2176,6 +2234,7 @@ async def restore_deleted_paypal_to_work(
             req.keep_confirmed_at = None
             req.updated_at = now
 
+        req.paypal_was_gestop = int(bool(tag.had_gestop))
         tag.status = "issued"
         tag.issued_to_user_id = req.user_id
         tag.issued_at = now
@@ -2268,6 +2327,8 @@ async def set_paypal_tag_status(
         tag = await session.get(PaypalTag, tag_id, with_for_update=True)
         if tag is None or (expected_status is not None and tag.status != expected_status):
             return None
+        if tag.status == "gestoppt":
+            tag.had_gestop = 1
         if status == "gestoppt":
             _mark_tag_gestop(tag, datetime.utcnow())
         else:
