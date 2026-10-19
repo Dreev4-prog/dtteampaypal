@@ -67,6 +67,8 @@ class PaypalTag(Base):
     photo_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     gender: Mapped[str] = mapped_column(String(12), default="male", index=True)
     gs_screenshot_file_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    gestop_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    gestop_date_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
 
 
 class Request(Base):
@@ -280,6 +282,10 @@ async def init_db() -> None:
         # v1.6.9: пол PayPal и GS-архив.
         await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS gender VARCHAR(12) DEFAULT 'male'"))
         await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS gs_screenshot_file_id VARCHAR(512)"))
+        # v2.5.15: date of the current Gestop period; old dates may be unknown.
+        await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS gestop_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS gestop_date_source VARCHAR(16)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_paypal_tags_gestop_at ON paypal_tags (gestop_at)"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paypal_gender VARCHAR(12) DEFAULT 'male'"))
         # v2.5.2: доказательство результата проверки (возврат / PayPal умер).
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS admin_result_screenshot_file_id VARCHAR(512)"))
@@ -414,6 +420,53 @@ async def init_db() -> None:
 
     # Existing users receive an anonymous DT Payments tag once after migration.
     await _backfill_dt_payments_tags()
+    await _backfill_gestop_dates()
+
+
+async def _backfill_gestop_dates() -> None:
+    """Recover only evidenced dates, without changing statuses or existing dates.
+
+    Old manual marks did not save timestamps. A historical event may precede
+    the latest manual mark, so recovered dates are explicitly approximate.
+    """
+    async with SessionLocal() as session:
+        await session.execute(text("""
+            UPDATE paypal_tags AS tag
+            SET gestop_at = history.gestop_at, gestop_date_source = 'history'
+            FROM (
+                SELECT paypal_tag_id, MAX(occurred_at) AS gestop_at
+                FROM (
+                    SELECT paypal_tag_id, resolved_at AS occurred_at
+                    FROM paypal_returns
+                    WHERE status = 'gestoppt'
+                    UNION ALL
+                    SELECT r.paypal_tag_id,
+                        CASE WHEN r.status = 'returned_gestoppt' THEN COALESCE(pr.resolved_at, r.updated_at)
+                             ELSE COALESCE(r.processed_at, r.updated_at) END AS occurred_at
+                    FROM requests r
+                    LEFT JOIN paypal_returns pr
+                      ON pr.request_id = r.id AND pr.status = 'gestoppt'
+                    WHERE r.status IN (
+                        'returned_gestoppt', 'admin_recalled_gestoppt',
+                        'paypal_limited', 'payment_returned'
+                    )
+                ) AS events
+                WHERE occurred_at IS NOT NULL
+                GROUP BY paypal_tag_id
+            ) AS history
+            WHERE tag.id = history.paypal_tag_id
+              AND tag.status = 'gestoppt'
+              AND tag.gestop_at IS NULL
+        """))
+        await session.commit()
+
+
+def _mark_tag_gestop(tag: PaypalTag, now: datetime) -> None:
+    # Clicking Gestop again must not reset its age or invent a missing date.
+    if tag.status != "gestoppt":
+        tag.gestop_at = now
+        tag.gestop_date_source = "exact"
+    tag.status = "gestoppt"
 
 
 DT_PAYMENTS_TAG_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -1452,7 +1505,7 @@ async def mark_payment_problem(
                 if tag:
                     # A PayPal closed from this flow is no longer safe for
                     # automatic or manual re-issue.
-                    tag.status = "gestoppt"
+                    _mark_tag_gestop(tag, now)
 
         await session.refresh(req)
         return req
@@ -1856,7 +1909,7 @@ async def resolve_paypal_return(return_id: int, action: str, admin_id: int, admi
             tag.issued_at = None
             req.status = "returned"
         elif action == "gestoppt":
-            tag.status = "gestoppt"
+            _mark_tag_gestop(tag, now)
             tag.issued_to_user_id = None
             req.status = "returned_gestoppt"
         elif action == "deleted":
@@ -1961,6 +2014,61 @@ async def list_paypal_tags(filter_name: str = "all", limit: int = 50) -> list[Pa
                 PaypalTag.status != "deleted",
             )
         return list(await session.scalars(query.limit(limit)))
+
+
+async def get_gestop_date_groups(offset: int = 0, limit: int = 15) -> dict:
+    """Current Gestop only, grouped by Moscow day, oldest first; no 50-tag cap."""
+    async with SessionLocal() as session:
+        if session.get_bind().dialect.name == "sqlite":
+            day = func.strftime("%Y-%m-%d", PaypalTag.gestop_at, "+3 hours")
+        else:
+            day = func.to_char(PaypalTag.gestop_at + text("INTERVAL '3 hours'"), "YYYY-MM-DD")
+        rows = (await session.execute(
+            select(day.label("day"), func.count(PaypalTag.id).label("tag_count"))
+            .where(PaypalTag.status == "gestoppt")
+            .group_by(day)
+            .order_by(day.asc().nulls_last())
+        )).all()
+        page_size = max(1, min(int(limit), 20))
+        last_offset = max(0, (len(rows) - 1) // page_size) * page_size
+        offset = min(max(0, int(offset)) // page_size * page_size, last_offset)
+        return {
+            "rows": [(row.day or "unknown", int(row.tag_count)) for row in rows[offset:offset + page_size]],
+            "total": sum(row.tag_count for row in rows),
+            "unknown": sum(row.tag_count for row in rows if row.day is None),
+            "groups": len(rows),
+            "offset": offset,
+            "page_size": page_size,
+            "has_next": offset + page_size < len(rows),
+        }
+
+
+async def list_gestop_tags(day: str = "all", offset: int = 0, limit: int = 15) -> dict:
+    conditions = [PaypalTag.status == "gestoppt"]
+    if day == "unknown":
+        conditions.append(PaypalTag.gestop_at.is_(None))
+    elif day != "all":
+        start, end = _moscow_day_utc_bounds(date.fromisoformat(day))
+        conditions.extend([PaypalTag.gestop_at >= start, PaypalTag.gestop_at < end])
+    page_size = max(1, min(int(limit), 20))
+    async with SessionLocal() as session:
+        total = int(await session.scalar(
+            select(func.count(PaypalTag.id)).where(*conditions)
+        ) or 0)
+        last_offset = max(0, (total - 1) // page_size) * page_size
+        offset = min(max(0, int(offset)) // page_size * page_size, last_offset)
+        rows = list(await session.scalars(
+            select(PaypalTag).where(*conditions)
+            .order_by(PaypalTag.gestop_at.asc().nulls_last(), PaypalTag.id.asc())
+            .offset(offset).limit(page_size)
+        ))
+        return {
+            "rows": rows,
+            "total": total,
+            "offset": offset,
+            "page_size": page_size,
+            "has_next": offset + page_size < total,
+        }
 
 
 async def delete_free_paypal_tag(tag_id: int) -> tuple[bool, str]:
@@ -2151,14 +2259,19 @@ async def set_paypal_tag_gender(
         return tag, "updated"
 
 
-async def set_paypal_tag_status(tag_id: int, status: str) -> PaypalTag | None:
+async def set_paypal_tag_status(
+    tag_id: int, status: str, expected_status: str | None = None,
+) -> PaypalTag | None:
     if status not in {"available", "gestoppt"}:
         raise ValueError("Unsupported PayPal status")
     async with SessionLocal() as session:
-        tag = await session.get(PaypalTag, tag_id)
-        if tag is None:
+        tag = await session.get(PaypalTag, tag_id, with_for_update=True)
+        if tag is None or (expected_status is not None and tag.status != expected_status):
             return None
-        tag.status = status
+        if status == "gestoppt":
+            _mark_tag_gestop(tag, datetime.utcnow())
+        else:
+            tag.status = status
         if status in {"available", "gestoppt"}:
             tag.issued_to_user_id = None
             if status == "available":
@@ -2478,7 +2591,10 @@ async def admin_recall_working_request(request_id: int, action: str, admin_id: i
         if tag is None or tag.status != "issued":
             return None, None
         now = datetime.utcnow()
-        tag.status = action
+        if action == "gestoppt":
+            _mark_tag_gestop(tag, now)
+        else:
+            tag.status = action
         tag.issued_to_user_id = None
         if action in {"available", "deleted"}:
             tag.issued_at = None

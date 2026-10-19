@@ -85,6 +85,7 @@ from app.db import (
     create_paypal_return, list_paypal_returns, get_paypal_return, resolve_paypal_return,
     get_paypal_database_counts, get_paypal_gender_counts,
     list_paypal_tags, set_paypal_tag_status, set_paypal_tag_gender,
+    get_gestop_date_groups, list_gestop_tags,
     delete_free_paypal_tag, restore_deleted_paypal_tag,
     get_deleted_working_request, list_deleted_working_requests,
     restore_deleted_paypal_to_work, get_active_requests_for_tag,
@@ -141,6 +142,7 @@ from app.keyboards import (
     my_paypal_waiting_card_menu,
     paid_or_return_menu, return_reasons_menu, return_confirm_menu, returns_menu,
     return_card_menu, return_checked_menu, paypal_database_menu, paypal_list_menu,
+    gestop_dates_menu, gestop_tags_menu, gestop_card_menu,
     paypal_card_admin_menu, paypal_gender_edit_menu,
     paypal_delete_confirm_menu, paypal_restore_confirm_menu,
     paypal_restore_working_confirm_menu, paypal_restore_working_users_menu,
@@ -5356,6 +5358,10 @@ async def paypal_database_handler(callback: CallbackQuery) -> None:
 async def paypal_db_list_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id): return
     filter_name = callback.data.split(":")[1]
+    if filter_name == "gestoppt":
+        await callback.answer()
+        await _show_gestop_dates(callback)
+        return
     tags = await list_paypal_tags(filter_name)
     titles = {
         "available": "🟢 Свободные PayPal",
@@ -5401,6 +5407,133 @@ async def paypal_db_list_handler(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+def _gestop_date_label(tag) -> str:
+    if tag.gestop_at is None:
+        return "Дата неизвестна"
+    prefix = "≈ " if tag.gestop_date_source == "history" else ""
+    return f"{prefix}{format_dt(tag.gestop_at)}"
+
+
+def _validate_gestop_day(day: str) -> None:
+    if day not in {"all", "unknown"}:
+        parsed = datetime.strptime(day, "%Y-%m-%d")
+        if parsed.strftime("%Y-%m-%d") != day:
+            raise ValueError("Invalid Gestop date")
+
+
+async def _show_gestop_dates(callback: CallbackQuery, offset: int = 0) -> None:
+    data = await get_gestop_date_groups(offset)
+    text = (
+        "<b>🚫 Gestop по датам</b>\n\n"
+        f"Всего текущих Gestop: <b>{data['total']}</b>\n"
+        "Сначала самые старые, затем новые.\n"
+        "Дата попадания в Gestop · МСК.\n\n"
+        "≈ — дата восстановлена по истории и может быть неточной."
+    )
+    if data["unknown"]:
+        text += f"\nБез сохранённой даты: <b>{data['unknown']}</b> — папка «Дата неизвестна»."
+    if data["groups"]:
+        text += (
+            f"\n\nГруппы {data['offset'] + 1}–{data['offset'] + len(data['rows'])}"
+            f" из {data['groups']}. Выберите дату или откройте весь список."
+        )
+    else:
+        text += "\n\nСейчас в Gestop нет PayPal."
+    await render_screen(callback, "paypal", text, gestop_dates_menu(data))
+
+
+async def _show_gestop_list(
+    callback: CallbackQuery, day: str, offset: int, dates_offset: int,
+) -> None:
+    data = await list_gestop_tags(day, offset)
+    for tag in data["rows"]:
+        tag._gestop_display_date = _gestop_date_label(tag).replace(" МСК", "")
+    title = (
+        "Все текущие Gestop" if day == "all"
+        else "Gestop · дата неизвестна" if day == "unknown"
+        else f"Gestop за {datetime.strptime(day, '%Y-%m-%d').strftime('%d.%m.%Y')}"
+    )
+    text = (
+        f"<b>🚫 {title}</b>\n\n"
+        f"Всего: <b>{data['total']}</b>\n"
+        "От самых старых к самым новым · МСК.\n"
+        "≈ — приблизительная дата по истории."
+    )
+    if day == "all":
+        text += "\nЗаписи без даты находятся в конце списка."
+    if data["rows"]:
+        text += (
+            f"\n\nПоказаны {data['offset'] + 1}–{data['offset'] + len(data['rows'])}"
+            f" из {data['total']}.\nНажмите на PayPal, чтобы открыть карточку."
+        )
+    else:
+        text += "\n\nВ этом разделе сейчас нет Gestop."
+    await render_screen(callback, "paypal", text, gestop_tags_menu(data, day, dates_offset))
+
+
+@router.callback_query(F.data.startswith("gestop_dates:"))
+async def gestop_dates_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    try:
+        offset = max(0, int(callback.data.split(":", 1)[1]))
+    except ValueError:
+        await callback.answer("Страница не найдена", show_alert=True)
+        return
+    await callback.answer()
+    await _show_gestop_dates(callback, offset)
+
+
+@router.callback_query(F.data.startswith("gestop_list:"))
+async def gestop_list_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    try:
+        _, day, raw_offset, raw_dates_offset = callback.data.split(":")
+        _validate_gestop_day(day)
+        offset, dates_offset = max(0, int(raw_offset)), max(0, int(raw_dates_offset))
+    except ValueError:
+        await callback.answer("Страница не найдена", show_alert=True)
+        return
+    await callback.answer()
+    await _show_gestop_list(callback, day, offset, dates_offset)
+
+
+@router.callback_query(F.data.startswith("gestop_card:"))
+async def gestop_card_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    try:
+        _, raw_id, day, raw_offset, raw_dates_offset = callback.data.split(":")
+        _validate_gestop_day(day)
+        tag_id = int(raw_id)
+        offset, dates_offset = max(0, int(raw_offset)), max(0, int(raw_dates_offset))
+    except ValueError:
+        await callback.answer("PayPal не найден", show_alert=True)
+        return
+    tag = await get_paypal_tag(tag_id)
+    if tag is None or tag.status != "gestoppt":
+        await callback.answer("Этот PayPal уже не в Gestop", show_alert=True)
+        await _show_gestop_list(callback, day, offset, dates_offset)
+        return
+    await callback.answer()
+    gender = "👨 Мужской" if tag.gender == "male" else "👩 Женский" if tag.gender == "female" else "Не указан"
+    text = (
+        f"<b>🚫 Gestop · {escape(tag.tag)}</b>\n\n"
+        f"Дата Gestop: <b>{_gestop_date_label(tag)}</b>\n"
+        f"Пол: {gender}\n"
+        f"Добавлен в базу: {format_dt(tag.created_at)}"
+    )
+    if tag.gestop_at is None:
+        text += "\n\nДата попадания в Gestop в старой версии не сохранилась."
+    elif tag.gestop_date_source == "history":
+        text += "\n\n≈ Дата восстановлена по сохранившейся истории; точное время последнего Gestop могло не сохраниться."
+    await render_screen(callback, "paypal", text, gestop_card_menu(tag.id, day, offset, dates_offset))
+
+
 @router.callback_query(F.data.startswith("paypal_card:"))
 async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
@@ -5432,6 +5565,8 @@ async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
         f"Выдан: {format_dt(tag.issued_at)}\n"
         f"Добавлен: {format_dt(tag.created_at)}"
     )
+    if tag.status == "gestoppt":
+        text += f"\nДата Gestop: {_gestop_date_label(tag)}"
 
     if deleted_working_requests:
         text += (
@@ -5810,7 +5945,14 @@ async def paypal_mark_status_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id): return
     parts=callback.data.split(":"); action=parts[0]; tid=int(parts[1]); filter_name=parts[2]
     status="gestoppt" if action=="paypal_mark_gestoppt" else "available"
-    await set_paypal_tag_status(tid,status)
+    tag = await set_paypal_tag_status(
+        tid, status,
+        expected_status="gestoppt" if filter_name == "gestoppt" and status == "available" else None,
+    )
+    if filter_name == "gestoppt":
+        await callback.answer("Статус обновлён" if tag else "Статус PayPal уже изменился")
+        await _show_gestop_dates(callback)
+        return
     tags = await list_paypal_tags(filter_name)
     await callback.message.edit_caption(caption=f"<b>💳 PayPal: {filter_name}</b>\n\nНайдено: <b>{len(tags)}</b>", reply_markup=paypal_list_menu(tags, filter_name))
     await callback.answer("Статус обновлён")

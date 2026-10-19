@@ -947,6 +947,73 @@ def paypal_list_menu(tags: list, filter_name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def gestop_dates_menu(data: dict) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(
+        text="📋 Все Gestop: от старых к новым",
+        callback_data=f"gestop_list:all:0:{data['offset']}",
+    )]]
+    for day, count in data["rows"]:
+        label = "❓ Дата неизвестна" if day == "unknown" else f"📅 {'.'.join(reversed(day.split('-')))}"
+        rows.append([InlineKeyboardButton(
+            text=f"{label} · {count}",
+            callback_data=f"gestop_list:{day}:0:{data['offset']}",
+        )])
+    navigation = []
+    if data["offset"] > 0:
+        navigation.append(InlineKeyboardButton(
+            text="⬅️ Раньше",
+            callback_data=f"gestop_dates:{max(0, data['offset'] - data['page_size'])}",
+        ))
+    if data["has_next"]:
+        navigation.append(InlineKeyboardButton(
+            text="Позже ➡️",
+            callback_data=f"gestop_dates:{data['offset'] + data['page_size']}",
+        ))
+    if navigation:
+        rows.append(navigation)
+    rows.extend([
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"gestop_dates:{data['offset']}")],
+        [InlineKeyboardButton(text="⬅️ Работа с PayPal", callback_data="paypal_payments_hub")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def gestop_tags_menu(data: dict, day: str, dates_offset: int) -> InlineKeyboardMarkup:
+    rows = []
+    for tag in data["rows"]:
+        label = tag.tag if len(tag.tag) <= 45 else tag.tag[:44] + "…"
+        rows.append([InlineKeyboardButton(
+            text=f"{tag._gestop_display_date} · {label}",
+            callback_data=f"gestop_card:{tag.id}:{day}:{data['offset']}:{dates_offset}",
+        )])
+    navigation = []
+    if data["offset"] > 0:
+        navigation.append(InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=f"gestop_list:{day}:{max(0, data['offset'] - data['page_size'])}:{dates_offset}",
+        ))
+    if data["has_next"]:
+        navigation.append(InlineKeyboardButton(
+            text="Далее ➡️",
+            callback_data=f"gestop_list:{day}:{data['offset'] + data['page_size']}:{dates_offset}",
+        ))
+    if navigation:
+        rows.append(navigation)
+    rows.extend([
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"gestop_list:{day}:{data['offset']}:{dates_offset}")],
+        [InlineKeyboardButton(text="⬅️ Gestop по датам", callback_data=f"gestop_dates:{dates_offset}")],
+        [InlineKeyboardButton(text="⬅️ Работа с PayPal", callback_data="paypal_payments_hub")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def gestop_card_menu(tag_id: int, day: str, offset: int, dates_offset: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Сделать свободным", callback_data=f"paypal_mark_available:{tag_id}:gestoppt")],
+        [InlineKeyboardButton(text="⬅️ К списку Gestop", callback_data=f"gestop_list:{day}:{offset}:{dates_offset}")],
+    ])
+
+
 def paypal_card_admin_menu(
     tag_id: int,
     filter_name: str,
