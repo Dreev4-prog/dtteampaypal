@@ -401,6 +401,7 @@ def payments_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"✅ Выплаченные ({counts.get('paidout', 0)})", callback_data="payments_list:paidout:0")],
         [InlineKeyboardButton(text=f"🕓 Ожидают оплаты ({counts.get('waiting', 0)})", callback_data="payments_list:waiting:0")],
         [InlineKeyboardButton(text=f"🔴 Оплата не найдена ({counts.get('notfound', 0)})", callback_data="payments_list:notfound:0")],
+        [InlineKeyboardButton(text=f"↩️ Возвращённые оплаты ({counts.get('refunded', 0)})", callback_data="payments_list:refunded:0")],
         [InlineKeyboardButton(text=f"📋 Все ({counts.get('all', 0)})", callback_data="payments_list:all:0")],
         [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="payments_menu")],
         [InlineKeyboardButton(text="⬅️ Работа с PayPal", callback_data="paypal_payments_hub")],
@@ -410,7 +411,7 @@ def payments_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
 def payments_list_menu(requests: list, filter_name: str, offset: int, page_size: int, has_next: bool) -> InlineKeyboardMarkup:
     status_icons = {
         "paypal_issued": "🕓", "waiting_check": "🟠", "payout_pending": "🟢",
-        "paid_out": "✅", "not_found": "🔴",
+        "paid_out": "✅", "not_found": "🔴", "payment_refunded": "↩️",
     }
     rows = []
     for req in requests:
@@ -508,11 +509,22 @@ def payment_card_menu(
                 callback_data=f"payout_user:{user_id}",
             )
         ])
+        rows.append([InlineKeyboardButton(
+            text="↩️ Оплата возвращена — отменить начисление",
+            callback_data=f"payment_refund_ask:{request_id}:{filter_name}:{offset}",
+        )])
     elif status == "not_found":
         rows.append([InlineKeyboardButton(text="↩️ Вернуть на проверку", callback_data=f"payment_recheck:{request_id}")])
     rows.append([InlineKeyboardButton(text="💬 Написать клиенту", url=f"tg://user?id={user_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ К списку", callback_data=f"payments_list:{filter_name}:{offset}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def payment_refund_confirmation_menu(request_id: int, filter_name: str, offset: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, отменить начисление", callback_data=f"payment_refund_yes:{request_id}:{filter_name}:{offset}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"payment_card:{request_id}:{filter_name}:{offset}")],
+    ])
 
 
 def payout_confirmation_menu(request_id: int) -> InlineKeyboardMarkup:

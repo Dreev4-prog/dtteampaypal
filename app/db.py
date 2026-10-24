@@ -3,10 +3,10 @@ from decimal import Decimal
 import re
 import secrets
 
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, select, text, func, or_
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, select, text, func, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -90,6 +90,8 @@ class Request(Base):
     paid_clicked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     payment_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     payment_confirmed_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    payment_refunded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    payment_refunded_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     payout_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     payout_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     payout_percent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -261,6 +263,9 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paid_clicked_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payment_confirmed_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payment_confirmed_by BIGINT"))
+        # v2.5.17: audit of a returned payment and cancelled unpaid accrual.
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payment_refunded_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payment_refunded_by BIGINT"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS payout_by BIGINT"))
         # Старые подтверждённые оплаты становятся ожидающими выплаты.
@@ -1294,9 +1299,10 @@ PAYMENT_FILTERS = {
     "payout": ("payout_pending",),
     "paidout": ("paid_out",),
     "notfound": ("not_found",),
+    "refunded": ("payment_refunded",),
     "gs": ("gs",),
     "waiting": ("paypal_issued",),
-    "all": ("paypal_issued", "waiting_check", "payout_pending", "paid_out", "not_found", "gs"),
+    "all": ("paypal_issued", "waiting_check", "payout_pending", "paid_out", "not_found", "gs", "payment_refunded"),
 }
 
 
@@ -1306,7 +1312,7 @@ async def get_payment_counts() -> dict[str, int]:
     В активной категории «Выплаченные» показываются только выплаты за последние
     24 часа. Старые записи остаются в БД и продолжают участвовать в статистике.
     """
-    counts = {"check": 0, "payout": 0, "paidout": 0, "notfound": 0, "waiting": 0, "all": 0}
+    counts = {"check": 0, "payout": 0, "paidout": 0, "notfound": 0, "refunded": 0, "waiting": 0, "all": 0}
     paid_cutoff = datetime.utcnow() - timedelta(hours=24)
     async with SessionLocal() as session:
         rows = await session.execute(
@@ -1326,6 +1332,7 @@ async def get_payment_counts() -> dict[str, int]:
     counts["payout"] = raw.get("payout_pending", 0)
     counts["paidout"] = recent_paid
     counts["notfound"] = raw.get("not_found", 0)
+    counts["refunded"] = raw.get("payment_refunded", 0)
     counts["waiting"] = raw.get("paypal_issued", 0)
     # «Все» остаётся полной историей платёжных заявок, включая старые выплаты.
     counts["all"] = sum(raw.values())
@@ -1501,6 +1508,52 @@ async def confirm_working_payment(request_id: int, admin_id: int) -> Request | N
         await session.commit()
         await session.refresh(req)
         return req
+
+
+async def get_payment_balance_entry(request_id: int) -> BalanceEntry | None:
+    async with SessionLocal() as session:
+        return await session.scalar(select(BalanceEntry).where(BalanceEntry.request_id == request_id))
+
+
+async def refund_confirmed_payment(request_id: int, admin_id: int) -> tuple[Request | None, str]:
+    """Record a full external refund and cancel exactly one unpaid accrual.
+
+    Lock user -> balance entry -> request, the same order as manual payout.
+    Keep the original payment and accrual amounts for audit; only active
+    balances exclude the cancelled entry. No PayPal transfer is performed.
+    """
+    async with SessionLocal() as session:
+        async with session.begin():
+            user_id = await session.scalar(select(Request.user_id).where(Request.id == request_id))
+            if user_id is None:
+                return None, "not_found"
+            user = await session.get(User, user_id, with_for_update=True)
+            if user is None:
+                return None, "not_found"
+            entry = await session.scalar(
+                select(BalanceEntry).where(BalanceEntry.request_id == request_id).with_for_update()
+            )
+            req = await session.get(Request, request_id, with_for_update=True)
+            if req is None:
+                return None, "not_found"
+            if req.status == "payment_refunded":
+                return req, "already_refunded"
+            if req.status == "paid_out" or req.payout_at is not None or (
+                entry is not None and (entry.status == "paid" or entry.payout_id is not None or entry.paid_at is not None)
+            ):
+                return req, "already_paid"
+            if req.status != "payout_pending":
+                return req, "not_pending"
+            if entry is None or entry.status != "available" or entry.user_id != user_id:
+                return req, "no_available_entry"
+            now = datetime.utcnow()
+            entry.status = "cancelled"
+            req.status = "payment_refunded"
+            req.payment_refunded_at = now
+            req.payment_refunded_by = admin_id
+            req.updated_at = now
+        await session.refresh(req)
+        return req, "refunded"
 
 
 async def mark_payment_problem(
@@ -1821,12 +1874,14 @@ async def get_happy_hours_stats(campaign_id: int) -> dict[str, float | int]:
             select(func.count(Request.id)).where(
                 Request.happy_hours_campaign_id == campaign_id,
                 Request.happy_hours_applied == 1,
+                Request.status != "payment_refunded",
             )
         ) or 0)
         turnover = float(await session.scalar(
             select(func.coalesce(func.sum(Request.amount), 0)).where(
                 Request.happy_hours_campaign_id == campaign_id,
                 Request.happy_hours_applied == 1,
+                Request.status != "payment_refunded",
             )
         ) or 0)
         return {
@@ -3031,11 +3086,14 @@ def _dt_payments_period_bounds(
 
 def _dt_payments_success_condition():
     """Successful payment, including legacy rows created before confirmation timestamp."""
-    return or_(
-        Request.payment_confirmed_at.is_not(None),
-        Request.status.in_(("payout_pending", "paid_out")),
-        Request.payout_at.is_not(None),
-        Request.paypal_withdrawn_at.is_not(None),
+    return and_(
+        Request.status != "payment_refunded",
+        or_(
+            Request.payment_confirmed_at.is_not(None),
+            Request.status.in_(("payout_pending", "paid_out")),
+            Request.payout_at.is_not(None),
+            Request.paypal_withdrawn_at.is_not(None),
+        ),
     )
 
 
@@ -3265,7 +3323,16 @@ async def get_payout_user_details(user_id: int) -> dict | None:
         }
 
 
-async def complete_manual_payout(user_id: int, admin_id: int, source_message_id: int | None = None) -> ManualPayout | None:
+def payout_entries_snapshot(entries) -> list[tuple[int, str]]:
+    """Serializable exact list of accruals shown when preparing a check."""
+    return sorted((entry.id, f"{Decimal(str(entry.amount)):.2f}") for entry in entries)
+
+
+async def complete_manual_payout(
+    user_id: int, admin_id: int, source_message_id: int | None = None,
+    *, expected_entries: list | None = None, expected_provider: str | None = None,
+    deliver_check: Callable[[], Awaitable] | None = None,
+) -> ManualPayout | None:
     async with SessionLocal() as session:
         async with session.begin():
             user = await session.get(User, user_id, with_for_update=True)
@@ -3278,6 +3345,14 @@ async def complete_manual_payout(user_id: int, admin_id: int, source_message_id:
             ))
             if not entries:
                 return None
+            if expected_entries is not None and payout_entries_snapshot(entries) != sorted(tuple(item) for item in expected_entries):
+                return None
+            if expected_provider is not None and (user.payout_method or "cryptobot") != expected_provider:
+                return None
+            request_ids = [entry.request_id for entry in entries]
+            requests = list(await session.scalars(
+                select(Request).where(Request.id.in_(request_ids)).order_by(Request.id).with_for_update()
+            ))
             total = round(sum(float(e.amount) for e in entries), 2)
             payout = ManualPayout(
                 user_id=user_id, total_amount=total, provider=user.payout_method or "cryptobot",
@@ -3285,14 +3360,15 @@ async def complete_manual_payout(user_id: int, admin_id: int, source_message_id:
             )
             session.add(payout)
             await session.flush()
+            # Refunds acquire the same user lock: a check cannot be delivered
+            # between cancellation and its balance update. Failure rolls back.
+            if deliver_check is not None:
+                await deliver_check()
             now = datetime.utcnow()
-            request_ids = []
             for entry in entries:
                 entry.status = "paid"
                 entry.payout_id = payout.id
                 entry.paid_at = now
-                request_ids.append(entry.request_id)
-            requests = list(await session.scalars(select(Request).where(Request.id.in_(request_ids)).with_for_update()))
             for req in requests:
                 req.status = "paid_out"
                 req.payout_at = now

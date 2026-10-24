@@ -65,6 +65,7 @@ from app.db import (
     mark_paypal_withdrawn,
     confirm_payment,
     confirm_working_payment,
+    refund_confirmed_payment, get_payment_balance_entry, payout_entries_snapshot,
     mark_payment_not_found,
     mark_payment_problem,
     return_to_payment_check,
@@ -124,6 +125,7 @@ from app.keyboards import (
     payments_menu,
     payments_list_menu,
     payment_card_menu,
+    payment_refund_confirmation_menu,
     payout_confirmation_menu,
     user_amount_confirmation_menu,
     admin_amount_confirmation_menu,
@@ -1153,7 +1155,7 @@ MY_PAYPAL_GROUPS = {
     "payout": (("payout_pending", "paid"), "🟢 Ожидают выплату"),
     "paid": (("paid_out",), "✅ Выплаченные"),
     "closed": (
-        ("not_found", "rejected", "paypal_limited"),
+        ("not_found", "rejected", "paypal_limited", "payment_refunded"),
         "⚠️ Закрытые / проблемные",
     ),
 }
@@ -1165,7 +1167,10 @@ def _user_request_line(req, paypal_tag: str | None = None) -> str:
     tag_line = f"\n💳 PayPal: <code>{escape(paypal_tag)}</code>" if paypal_tag else ""
     payout_line = ""
     if req.payout_amount is not None:
-        payout_line = f"\n💸 К выплате: <b>{float(req.payout_amount):.2f} €</b>"
+        if req.status == "payment_refunded":
+            payout_line = "\n↩️ Начисление отменено: оплата возвращена. Выплата не требуется."
+        else:
+            payout_line = f"\n💸 К выплате: <b>{float(req.payout_amount):.2f} €</b>"
     return (
         f"<b>Заявка #{req.id}</b>\n"
         f"💶 Сумма: <b>{req.amount} €</b>"
@@ -1280,6 +1285,7 @@ async def my_paypals_list(callback: CallbackQuery) -> None:
             "not_found": "оплата не найдена",
             "rejected": "отклонено",
             "paypal_limited": "☠️ PayPal умер / лимит",
+            "payment_refunded": "↩️ Оплата возвращена, начисление отменено",
             "return_pending": "ожидает проверки возврата",
             "returned": "возвращён",
             "returned_gestoppt": "возвращён как Gestop",
@@ -3330,6 +3336,7 @@ async def payments_list_handler(callback: CallbackQuery) -> None:
         "paidout": "✅ Выплаченные за последние 24 часа",
         "waiting": "🕓 Ожидают оплаты",
         "notfound": "🔴 Оплата не найдена",
+        "refunded": "↩️ Возвращённые оплаты — начисления отменены",
         "all": "📋 Все платежные заявки",
     }
     text = f"{titles.get(filter_name, titles['all'])}\nСтраница: <b>{offset // page_size + 1}</b>\n\n"
@@ -3383,6 +3390,7 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
         "payout_pending": "💸 Деньги подтверждены — нужно вывести с PayPal",
         "paid_out": "✅ Выплачено клиенту",
         "not_found": "🔴 Оплата не найдена",
+        "payment_refunded": "↩️ Оплата возвращена — начисление отменено",
     }
     # User profile fields are user-controlled. Escape them before inserting
     # into an HTML-formatted Telegram message so one unusual name cannot make
@@ -3409,6 +3417,14 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
     else:
         rate_source_line = ""
 
+    accrual_line = (
+        f"📊 Процент: <b>{req.payout_percent}%</b>\n💰 Начислено пользователю: <b>{float(req.payout_amount):.2f} USDT</b>\n"
+        if req.payout_percent is not None and req.payout_amount is not None else ""
+    )
+    if req.status == "payment_refunded":
+        entry = await get_payment_balance_entry(req.id)
+        accrual_line = f"↩️ Отменено начисление: <b>{float(entry.amount if entry else req.payout_amount or 0):.2f} USDT</b>\n"
+
     text = (
         f"💰 <b>Платёжная заявка #{req.id}</b>\n\n"
         f"👤 {safe_full_name}\n"
@@ -3417,7 +3433,7 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
         f"💳 PayPal: <code>{safe_paypal_tag}</code>\n"
         f"{_admin_ges_line(req)}"
         f"💶 Сумма: <b>{req.amount} €</b>\n"
-        + (f"📊 Процент: <b>{req.payout_percent}%</b>\n💰 Начислено пользователю: <b>{float(req.payout_amount):.2f} USDT</b>\n" if req.payout_percent is not None and req.payout_amount is not None else "")
+        + accrual_line
         + rate_source_line
         + f"\nСтатус: <b>{status_names.get(req.status, req.status)}</b>\n\n"
         f"📅 Создана: {format_dt(req.created_at)}\n"
@@ -3438,6 +3454,11 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
         )
         + f"💸 Выплата клиенту: {format_dt(req.payout_at)}"
     )
+    if req.status == "payment_refunded":
+        text += (
+            f"\n↩️ Возврат отмечен: {format_dt(req.payment_refunded_at)}"
+            f"\nАдминистратор: <code>{req.payment_refunded_by}</code>"
+        )
     markup = payment_card_menu(
         req.id,
         req.user_id,
@@ -3502,6 +3523,74 @@ async def payment_card_handler(callback: CallbackQuery) -> None:
                     reply_markup=markup,
                 )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("payment_refund_ask:"))
+@router.callback_query(F.data.startswith("payment_refund_yes:"))
+async def payment_refund_handler(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    try:
+        action, raw_id, filter_name, raw_offset = callback.data.split(":")
+        request_id, offset = int(raw_id), max(0, int(raw_offset))
+        if filter_name not in {"check", "payout", "paidout", "waiting", "notfound", "refunded", "gs", "all"}:
+            raise ValueError
+    except ValueError:
+        await callback.answer("Заявка не найдена", show_alert=True)
+        return
+    if action == "payment_refund_yes":
+        req, result = await refund_confirmed_payment(request_id, callback.from_user.id)
+        if result != "refunded":
+            errors = {
+                "already_paid": "Начисление уже выплачено. Отменить его этой кнопкой нельзя.",
+                "already_refunded": "Возврат уже отмечен, начисление уже отменено.",
+                "not_pending": "Заявка больше не ожидает выплаты.",
+                "no_available_entry": "Доступное начисление не найдено. Баланс не изменён.",
+            }
+            await callback.answer(errors.get(result, "Заявка не найдена"), show_alert=True)
+            return
+        entry = await get_payment_balance_entry(req.id)
+        balance = await get_user_balance(req.user_id)
+        await callback.answer("Начисление отменено")
+        await render_screen(
+            callback, "payments",
+            f"↩️ <b>Оплата по заявке #{req.id} возвращена</b>\n\n"
+            f"{_admin_ges_line(req)}"
+            f"Отменено начисление: <b>{float(entry.amount):.2f} USDT</b>\n"
+            f"Осталось к выплате пользователю: <b>{balance['available']:.2f} USDT</b>\n\n"
+            "Заявка убрана из ожидающих выплат. Запись сохранена в «Возвращённых оплатах».",
+            InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💼 Выплаты пользователя", callback_data=f"payout_user:{req.user_id}")],
+                [InlineKeyboardButton(text="📋 Карточка возврата", callback_data=f"payment_card:{req.id}:refunded:0")],
+                [InlineKeyboardButton(text="⬅️ К списку", callback_data=f"payments_list:{filter_name}:{offset}")],
+            ]),
+        )
+        return
+    req = await get_request(request_id)
+    entry = await get_payment_balance_entry(request_id)
+    if (
+        req is None or req.status != "payout_pending" or req.payout_at is not None
+        or entry is None or entry.status != "available" or entry.payout_id is not None
+        or entry.paid_at is not None or entry.user_id != req.user_id
+    ):
+        await callback.answer("Заявка недоступна для отмены начисления", show_alert=True)
+        return
+    tag = await get_paypal_tag(req.paypal_tag_id) if req.paypal_tag_id else None
+    await callback.answer()
+    await render_screen(
+        callback, "payments",
+        "↩️ <b>Отметить возврат оплаты?</b>\n\n"
+        f"Заявка: <b>#{req.id}</b>\n"
+        f"PayPal: <code>{escape(tag.tag) if tag else '—'}</code>\n"
+        f"Пользователь: <code>{req.user_id}</code>\n"
+        f"Полученная оплата: <b>{req.amount} €</b>\n"
+        f"Отменить начисление: <b>{float(entry.amount):.2f} USDT</b>\n\n"
+        "Подтвердите, если оплата уже полностью возвращена отправителю. "
+        "Бот уберёт это начисление из баланса и ожидающих выплат.\n\n"
+        "Эта кнопка записывает факт возврата; деньги через PayPal она не переводит.",
+        payment_refund_confirmation_menu(req.id, filter_name, offset),
+    )
 
 
 @router.callback_query(F.data.startswith("paypal_withdraw_done:"))
@@ -7295,7 +7384,11 @@ async def manual_payout_start_handler(callback: CallbackQuery, state: FSMContext
         await callback.answer("У пользователя нет доступного баланса", show_alert=True); return
     provider = "CryptoBot" if data["method"] == "cryptobot" else "xRocket"
     await state.set_state(ManualPayoutForm.check)
-    await state.update_data(payout_user_id=user_id)
+    await state.update_data(
+        payout_user_id=user_id,
+        payout_entries=payout_entries_snapshot(data["entries"]),
+        payout_provider=data["method"],
+    )
     await replace_photo_with_text(
         callback,
         "💸 <b>РУЧНАЯ ВЫПЛАТА</b>\n\n"
@@ -7303,7 +7396,7 @@ async def manual_payout_start_handler(callback: CallbackQuery, state: FSMContext
         f"Способ: <b>{provider}</b>\n\n"
         f"Создайте общий чек на всю сумму в {provider} и пришлите его следующим сообщением. "
         "Можно отправить ссылку, текст, пересланное сообщение или изображение.\n\n"
-        "После успешной отправки чека баланс станет нулевым, а все начисления перейдут в «Выплачено».",
+        "После успешной отправки чека включённые в него начисления перейдут в «Выплачено».",
         manual_payout_cancel_menu(user_id),
     )
     await callback.answer()
@@ -7315,17 +7408,28 @@ async def manual_payout_check_handler(message: Message, state: FSMContext) -> No
         return
     state_data = await state.get_data()
     user_id = int(state_data.get("payout_user_id", 0))
-    details = await get_payout_user_details(user_id)
-    if details is None or details["total"] <= 0:
-        await state.clear(); await message.answer("❌ Баланс уже выплачен или пользователь не найден."); return
-    try:
-        await message.send_copy(chat_id=user_id)
-    except Exception as exc:
-        await message.answer(f"❌ Не удалось отправить чек пользователю: {exc}\nБаланс не списан.")
+    if "payout_entries" not in state_data or "payout_provider" not in state_data:
+        await state.clear()
+        await message.answer("Откройте выплату заново, чтобы проверить актуальные начисления.")
         return
-    payout = await complete_manual_payout(user_id, message.from_user.id, message.message_id)
+    try:
+        payout = await complete_manual_payout(
+            user_id, message.from_user.id, message.message_id,
+            expected_entries=state_data["payout_entries"],
+            expected_provider=state_data["payout_provider"],
+            deliver_check=lambda: message.send_copy(chat_id=user_id),
+        )
+    except Exception:
+        await state.clear()
+        await message.answer("❌ Не удалось завершить выплату. Проверьте доставку чека и баланс перед повторной отправкой.")
+        return
     if payout is None:
-        await message.answer("❌ Не удалось завершить выплату. Баланс не списан.")
+        await state.clear()
+        await message.answer(
+            "❌ Начисления или способ выплаты изменились. Чек не отправлен. "
+            "Откройте выплату заново и подготовьте чек на актуальную сумму.",
+            reply_markup=manual_payout_cancel_menu(user_id),
+        )
         return
     provider = "CryptoBot" if payout.provider == "cryptobot" else "xRocket"
     try:
@@ -7334,7 +7438,7 @@ async def manual_payout_check_handler(message: Message, state: FSMContext) -> No
             "✅ <b>ВЫПЛАТА ВЫПОЛНЕНА</b>\n\n"
             f"Сумма: <b>{float(payout.total_amount):.2f} USDT</b>\n"
             f"Способ: <b>{provider}</b>\n\n"
-            "Чек отправлен сообщением выше. Все начисления включены в эту общую выплату.",
+            "Чек отправлен сообщением выше. В него включены начисления, выбранные при подготовке выплаты.",
             reply_markup=back_home(),
         )
     except Exception:
@@ -7345,5 +7449,5 @@ async def manual_payout_check_handler(message: Message, state: FSMContext) -> No
         f"Пользователь ID: <code>{user_id}</code>\n"
         f"Сумма: <b>{float(payout.total_amount):.2f} USDT</b>\n"
         f"Способ: <b>{provider}</b>\n\n"
-        "Баланс обнулён. Все связанные заявки перенесены в категорию «Выплачено»."
+        "Начисления из чека списаны. Связанные заявки перенесены в категорию «Выплачено»."
     )
