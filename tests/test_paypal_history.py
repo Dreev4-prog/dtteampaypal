@@ -182,6 +182,22 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Happy Hours применён", text)
         self.assertEqual(screen.events, ["send_message", "delete"])
 
+    async def test_long_withdrawal_history_with_deadlines_fits_text_page(self):
+        self.tag = "😀" * 250 + "<&>ab"
+        self.rows = [request(
+            i, status="withdrawal_pending", amount=2147483647,
+            payout_amount=Decimal("9999999999.99"),
+            admin_result_screenshot_file_id="test", happy_hours_applied=1,
+            withdrawal_retry_at=datetime(2099, 1, 1), withdrawal_wait_count=1,
+        ) for i in range(2147483647, 2147483642, -1)]
+        screen = TelegramScreen()
+        await handlers.my_paypals_list(screen.callback("my_paypals_list:withdrawal:0"))
+        text, markup = screen.delivered[-1]
+        self.assertLessEqual(rendered_length(text), 4096)
+        self.assertIn("МСК", text)
+        self.assertEqual(len(re.findall(r"Заявка #", text)), 4)
+        self.assertTrue(any(b.text == "🔄 Обновить ожидание" for row in markup.inline_keyboard for b in row))
+
     async def test_empty_history_and_stale_page_remain_navigable(self):
         self.rows = []
         screen = TelegramScreen()

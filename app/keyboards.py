@@ -1,4 +1,6 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from datetime import datetime
+from app.ui import withdrawal_wait_text
 
 
 def main_menu() -> InlineKeyboardMarkup:
@@ -205,10 +207,12 @@ def paypal_payments_hub_menu(
         ],
         [
             InlineKeyboardButton(
-                text=f"💸 Вывести деньги ({payment_counts.get('payout', 0)})",
+                text=f"💸 Вывести с PayPal ({payment_counts.get('payout', 0)})",
                 callback_data="payments_list:payout:0",
             ),
         ],
+        [InlineKeyboardButton(text=f"⏳ Ждём 24 часа ({payment_counts.get('withdraw_wait', 0)}) · 🔄 {payment_counts.get('retry_ready', 0)}", callback_data="payments_list:withdraw_wait:0")],
+        [InlineKeyboardButton(text=f"💰 Готовы к выплате ({payment_counts.get('ready', 0)})", callback_data="payments_list:ready:0")],
         [
             InlineKeyboardButton(
                 text=f"🟢 Свободные ({database_counts.get('available', 0)})",
@@ -397,7 +401,9 @@ def back_home() -> InlineKeyboardMarkup:
 def payments_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🟠 Проверить оплату ({counts.get('check', 0)})", callback_data="payments_list:check:0")],
-        [InlineKeyboardButton(text=f"💸 Вывести деньги ({counts.get('payout', 0)})", callback_data="payments_list:payout:0")],
+        [InlineKeyboardButton(text=f"💸 Вывести с PayPal ({counts.get('payout', 0)})", callback_data="payments_list:payout:0")],
+        [InlineKeyboardButton(text=f"⏳ Ждём 24 часа ({counts.get('withdraw_wait', 0)}) · 🔄 {counts.get('retry_ready', 0)}", callback_data="payments_list:withdraw_wait:0")],
+        [InlineKeyboardButton(text=f"💰 Готовы к выплате ({counts.get('ready', 0)})", callback_data="payments_list:ready:0")],
         [InlineKeyboardButton(text=f"✅ Выплаченные ({counts.get('paidout', 0)})", callback_data="payments_list:paidout:0")],
         [InlineKeyboardButton(text=f"🕓 Ожидают оплаты ({counts.get('waiting', 0)})", callback_data="payments_list:waiting:0")],
         [InlineKeyboardButton(text=f"🔴 Оплата не найдена ({counts.get('notfound', 0)})", callback_data="payments_list:notfound:0")],
@@ -410,7 +416,7 @@ def payments_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
 
 def payments_list_menu(requests: list, filter_name: str, offset: int, page_size: int, has_next: bool) -> InlineKeyboardMarkup:
     status_icons = {
-        "paypal_issued": "🕓", "waiting_check": "🟠", "payout_pending": "🟢",
+        "paypal_issued": "🕓", "waiting_check": "🟠", "payout_pending": "🟢", "withdrawal_pending": "⏳",
         "paid_out": "✅", "not_found": "🔴", "payment_refunded": "↩️",
     }
     rows = []
@@ -431,6 +437,8 @@ def payments_list_menu(requests: list, filter_name: str, offset: int, page_size:
                 f"{icon} 👤 {username} · 💳 {paypal_tag} · 💶 {req.amount} €"
             )
 
+        if filter_name == "withdraw_wait":
+            button_text = withdrawal_wait_text(req) + " · " + button_text
         if getattr(req, "paypal_was_gestop", 0):
             button_text = "♻️ GeS · " + button_text
         rows.append([InlineKeyboardButton(
@@ -445,7 +453,7 @@ def payments_list_menu(requests: list, filter_name: str, offset: int, page_size:
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data=f"payments_list:{filter_name}:{offset}")])
-    if filter_name in {"check", "payout"}:
+    if filter_name in {"check", "payout", "withdraw_wait", "ready"}:
         rows.append([
             InlineKeyboardButton(
                 text="⬅️ Работа с PayPal",
@@ -469,6 +477,8 @@ def payment_card_menu(
     filter_name: str = "all",
     offset: int = 0,
     paypal_withdrawn: bool = False,
+    withdrawal_retry_at=None,
+    withdrawal_wait_count: int = 0,
 ) -> InlineKeyboardMarkup:
     rows = []
     if status == "waiting_check":
@@ -488,7 +498,7 @@ def payment_card_menu(
                 callback_data=f"admin_gs:{request_id}",
             ),
         ])
-    elif status == "payout_pending":
+    elif status in {"withdrawal_pending", "payout_pending"}:
         if not paypal_withdrawn:
             rows.append([
                 InlineKeyboardButton(
@@ -503,6 +513,11 @@ def payment_card_menu(
                     callback_data=f"paypal_withdraw_info:{request_id}",
                 )
             ])
+        if status == "withdrawal_pending" and (withdrawal_retry_at is None or withdrawal_retry_at <= datetime.utcnow()):
+            rows.append([InlineKeyboardButton(
+                text="⏳ Ещё 24 часа" if withdrawal_retry_at else "⏳ Ждём 24 часа",
+                callback_data=f"wd_wait:{request_id}:{withdrawal_wait_count}:{filter_name}:{offset}",
+            )])
         rows.append([
             InlineKeyboardButton(
                 text="💼 Открыть выплаты пользователя",
@@ -516,6 +531,7 @@ def payment_card_menu(
     elif status == "not_found":
         rows.append([InlineKeyboardButton(text="↩️ Вернуть на проверку", callback_data=f"payment_recheck:{request_id}")])
     rows.append([InlineKeyboardButton(text="💬 Написать клиенту", url=f"tg://user?id={user_id}")])
+    rows.append([InlineKeyboardButton(text="🔄 Обновить карточку", callback_data=f"payment_card:{request_id}:{filter_name}:{offset}")])
     rows.append([InlineKeyboardButton(text="⬅️ К списку", callback_data=f"payments_list:{filter_name}:{offset}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -639,6 +655,7 @@ def my_paypals_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"📨 Запросы на PayPal ({counts.get('requests', 0)})", callback_data="my_paypals_list:requests")],
         [InlineKeyboardButton(text=f"💳 Ожидают оплаты ({counts.get('waiting', 0)})", callback_data="my_paypals_list:waiting")],
         [InlineKeyboardButton(text=f"🟠 На проверке ({counts.get('check', 0)})", callback_data="my_paypals_list:check")],
+        [InlineKeyboardButton(text=f"⏳ Ожидают вывода ({counts.get('withdrawal', 0)})", callback_data="my_paypals_list:withdrawal")],
         [InlineKeyboardButton(text=f"🟢 Ожидают выплату ({counts.get('payout', 0)})", callback_data="my_paypals_list:payout")],
         [InlineKeyboardButton(text=f"✅ Выплаченные ({counts.get('paid', 0)})", callback_data="my_paypals_list:paid")],
         [InlineKeyboardButton(text=f"⚠️ Закрытые / проблемные ({counts.get('closed', 0)})", callback_data="my_paypals_list:closed")],
@@ -673,6 +690,8 @@ def my_paypals_history_menu(
         ))
     if navigation:
         rows.append(navigation)
+    if group == "withdrawal":
+        rows.append([InlineKeyboardButton(text="🔄 Обновить ожидание", callback_data=f"my_paypals_list:{group}:{offset}")])
     rows.extend(my_paypals_back_menu().inline_keyboard)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1531,6 +1550,8 @@ def payout_method_menu(current: str) -> InlineKeyboardMarkup:
 
 def wallet_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏳ ОЖИДАЮТ ВЫВОДА С PAYPAL", callback_data="my_paypals_list:withdrawal:0")],
+        [InlineKeyboardButton(text="🔄 ОБНОВИТЬ БАЛАНС", callback_data="wallet")],
         [InlineKeyboardButton(text="💸 ИЗМЕНИТЬ СПОСОБ ВЫПЛАТЫ", callback_data="payout_method")],
         [InlineKeyboardButton(text="📜 ИСТОРИЯ ВЫПЛАТ", callback_data="payout_history:0")],
         [InlineKeyboardButton(text="⬅️ ГЛАВНОЕ МЕНЮ", callback_data="home")],

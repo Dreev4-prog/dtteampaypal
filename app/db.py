@@ -98,6 +98,8 @@ class Request(Base):
     payout_amount: Mapped[Optional[float]] = mapped_column(Numeric(12, 2), nullable=True)
     paypal_withdrawn_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     paypal_withdrawn_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    withdrawal_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    withdrawal_wait_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     happy_hours_campaign_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     happy_hours_percent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     happy_hours_locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -278,6 +280,9 @@ async def init_db() -> None:
         # v2.2.24: внутренний статус вывода денег с конкретного PayPal.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paypal_withdrawn_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS paypal_withdrawn_by BIGINT"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS withdrawal_retry_at TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS withdrawal_wait_count INTEGER NOT NULL DEFAULT 0"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_requests_withdrawal_retry_at ON requests (withdrawal_retry_at)"))
         # v2.3.0: Happy Hours snapshot fields on requests.
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS happy_hours_campaign_id INTEGER"))
         await conn.execute(text("ALTER TABLE requests ADD COLUMN IF NOT EXISTS happy_hours_percent INTEGER"))
@@ -406,7 +411,7 @@ async def init_db() -> None:
                     ORDER BY rr.min_amount DESC
                     LIMIT 1
                 ) AS rule ON TRUE
-                WHERE req.status IN ('payout_pending', 'paid_out')
+                WHERE req.status IN ('withdrawal_pending', 'payout_pending', 'paid_out')
                   AND (req.payout_percent IS NULL OR req.payout_amount IS NULL)
             )
             UPDATE requests AS req
@@ -421,15 +426,17 @@ async def init_db() -> None:
         await conn.execute(text("""
             INSERT INTO balance_entries (user_id, request_id, amount, status, created_at, paid_at)
             SELECT r.user_id, r.id, r.payout_amount,
-                   CASE WHEN r.status = 'paid_out' THEN 'paid' ELSE 'available' END,
+                   CASE WHEN r.status = 'paid_out' THEN 'paid'
+                        WHEN r.status = 'withdrawal_pending' THEN 'held' ELSE 'available' END,
                    COALESCE(r.payment_confirmed_at, r.updated_at, CURRENT_TIMESTAMP),
                    CASE WHEN r.status = 'paid_out' THEN COALESCE(r.payout_at, r.updated_at, CURRENT_TIMESTAMP) ELSE NULL END
             FROM requests r
-            WHERE r.status IN ('payout_pending', 'paid_out')
+            WHERE r.status IN ('withdrawal_pending', 'payout_pending', 'paid_out')
               AND r.payout_amount IS NOT NULL
               AND NOT EXISTS (SELECT 1 FROM balance_entries b WHERE b.request_id = r.id)
         """))
 
+    await _backfill_withdrawal_holds()
     # Existing users receive an anonymous DT Payments tag once after migration.
     await _backfill_dt_payments_tags()
     await _backfill_gestop_dates()
@@ -437,6 +444,30 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("ALTER TABLE requests ALTER COLUMN paypal_was_gestop SET DEFAULT 0"))
         await conn.execute(text("ALTER TABLE requests ALTER COLUMN paypal_was_gestop SET NOT NULL"))
+
+
+async def _backfill_withdrawal_holds() -> None:
+    """Hold only unpaid legacy accruals without evidence of PayPal withdrawal.
+
+    Idempotent; paid, cancelled and already withdrawn rows are untouched.
+    No retry deadline is invented for old requests.
+    """
+    async with SessionLocal() as session:
+        await session.execute(text("""
+            UPDATE balance_entries SET status = 'held'
+            WHERE status = 'available' AND payout_id IS NULL AND paid_at IS NULL
+              AND request_id IN (
+                  SELECT id FROM requests WHERE status = 'payout_pending'
+                    AND paypal_withdrawn_at IS NULL AND payout_at IS NULL
+              )
+        """))
+        await session.execute(text("""
+            UPDATE requests SET status = 'withdrawal_pending'
+            WHERE status = 'payout_pending' AND paypal_withdrawn_at IS NULL AND payout_at IS NULL
+              AND id IN (SELECT request_id FROM balance_entries WHERE status = 'held'
+                         AND payout_id IS NULL AND paid_at IS NULL)
+        """))
+        await session.commit()
 
 
 async def _backfill_gestop_dates() -> None:
@@ -688,7 +719,7 @@ async def get_user_paypal_work_limit_status(user_id: int) -> dict:
     - has an issued PayPal and waits for payment;
     - waits for payment verification.
 
-    payout_pending/paid_out do not occupy a slot because work with that
+    withdrawal_pending/payout_pending/paid_out do not occupy a slot because work with that
     PayPal is already finished from the user's side.
     """
     async with SessionLocal() as session:
@@ -904,6 +935,7 @@ async def update_request_amount(request_id: int, amount: int, user_id: int | Non
 
     When user_id is supplied, only the request owner may change it and only
     while PayPal has been issued. Admin flows call it without user_id.
+    Confirmed amounts are frozen to match the balance ledger.
     """
     async with SessionLocal() as session:
         req = await session.get(Request, request_id, with_for_update=True)
@@ -911,12 +943,9 @@ async def update_request_amount(request_id: int, amount: int, user_id: int | Non
             return None
         if user_id is not None and (req.user_id != user_id or req.status != "paypal_issued"):
             return None
+        if req.status not in {"waiting_issue", "paypal_issued", "waiting_check"}:
+            return None
         req.amount = amount
-        if req.status in {"payout_pending", "paid_out"}:
-            percent, is_happy = await _get_effective_request_rate(session, req)
-            req.payout_percent = percent
-            req.payout_amount = round(amount * percent / 100, 2) if percent is not None else None
-            req.happy_hours_applied = 1 if is_happy else 0
         req.updated_at = datetime.utcnow()
         await session.commit()
         await session.refresh(req)
@@ -1026,6 +1055,11 @@ async def get_user_profit_summary(user_id: int) -> dict[str, float | int | datet
                 Request.user_id == user_id, Request.status == "payout_pending"
             )
         )
+        held = await session.scalar(
+            select(func.coalesce(func.sum(BalanceEntry.amount), 0)).where(
+                BalanceEntry.user_id == user_id, BalanceEntry.status == "held"
+            )
+        )
         count_int = int(count or 0)
         total_float = float(total or 0)
         return {
@@ -1033,7 +1067,7 @@ async def get_user_profit_summary(user_id: int) -> dict[str, float | int | datet
             "count": count_int,
             "average": total_float / count_int if count_int else 0.0,
             "last_at": last_at,
-            "pending": float(pending or 0),
+            "pending": float(pending or 0), "held": float(held or 0),
         }
 
 
@@ -1296,13 +1330,15 @@ async def get_paypal_tag(tag_id: int | None) -> PaypalTag | None:
 
 PAYMENT_FILTERS = {
     "check": ("waiting_check",),
-    "payout": ("payout_pending",),
+    "payout": ("withdrawal_pending",),
+    "withdraw_wait": ("withdrawal_pending",),
+    "ready": ("payout_pending",),
     "paidout": ("paid_out",),
     "notfound": ("not_found",),
     "refunded": ("payment_refunded",),
     "gs": ("gs",),
     "waiting": ("paypal_issued",),
-    "all": ("paypal_issued", "waiting_check", "payout_pending", "paid_out", "not_found", "gs", "payment_refunded"),
+    "all": ("paypal_issued", "waiting_check", "withdrawal_pending", "payout_pending", "paid_out", "not_found", "gs", "payment_refunded"),
 }
 
 
@@ -1329,7 +1365,11 @@ async def get_payment_counts() -> dict[str, int]:
             )
         ) or 0)
     counts["check"] = raw.get("waiting_check", 0)
-    counts["payout"] = raw.get("payout_pending", 0)
+    withdrawal = await get_paypal_withdrawal_counts()
+    counts["payout"] = withdrawal["first_attempt"]
+    counts["withdraw_wait"] = withdrawal["waiting_24"]
+    counts["retry_ready"] = withdrawal["retry_ready"]
+    counts["ready"] = raw.get("payout_pending", 0)
     counts["paidout"] = recent_paid
     counts["notfound"] = raw.get("not_found", 0)
     counts["refunded"] = raw.get("payment_refunded", 0)
@@ -1342,6 +1382,10 @@ async def get_payment_counts() -> dict[str, int]:
 async def list_payment_requests(filter_name: str, offset: int = 0, limit: int = 10) -> tuple[list[Request], bool]:
     statuses = PAYMENT_FILTERS.get(filter_name, PAYMENT_FILTERS["all"])
     query = select(Request).where(Request.status.in_(statuses))
+    if filter_name == "payout":
+        query = query.where(Request.withdrawal_retry_at.is_(None))
+    elif filter_name == "withdraw_wait":
+        query = query.where(Request.withdrawal_retry_at.is_not(None))
     if filter_name == "paidout":
         # Не удаляем выплату из БД: спустя 24 часа она лишь исчезает из активного списка.
         paid_cutoff = datetime.utcnow() - timedelta(hours=24)
@@ -1350,7 +1394,9 @@ async def list_payment_requests(filter_name: str, offset: int = 0, limit: int = 
             Request.payout_at >= paid_cutoff,
         )
     async with SessionLocal() as session:
-        if filter_name == "payout":
+        if filter_name == "withdraw_wait":
+            query = query.order_by(Request.withdrawal_retry_at.asc(), Request.id.asc())
+        elif filter_name == "payout":
             query = query.order_by(
                 Request.paypal_withdrawn_at.is_not(None).asc(),
                 Request.updated_at.desc(),
@@ -1368,54 +1414,65 @@ async def list_payment_requests(filter_name: str, offset: int = 0, limit: int = 
 
 
 async def get_paypal_withdrawal_counts() -> dict[str, int]:
-    """Counts for the admin-only «Вывести деньги» control list."""
     async with SessionLocal() as session:
-        not_withdrawn = int(
-            await session.scalar(
-                select(func.count(Request.id)).where(
-                    Request.status == "payout_pending",
-                    Request.paypal_withdrawn_at.is_(None),
-                )
-            )
-            or 0
-        )
-        withdrawn = int(
-            await session.scalar(
-                select(func.count(Request.id)).where(
-                    Request.status == "payout_pending",
-                    Request.paypal_withdrawn_at.is_not(None),
-                )
-            )
-            or 0
-        )
-        return {
-            "not_withdrawn": not_withdrawn,
-            "withdrawn": withdrawn,
-            "total": not_withdrawn + withdrawn,
-        }
+        async def count(*conditions):
+            return int(await session.scalar(select(func.count(Request.id)).where(*conditions)) or 0)
+        waiting = Request.status == "withdrawal_pending"
+        first = await count(waiting, Request.withdrawal_retry_at.is_(None))
+        scheduled = await count(waiting, Request.withdrawal_retry_at.is_not(None))
+        ready = await count(waiting, Request.withdrawal_retry_at <= datetime.utcnow())
+        withdrawn = await count(Request.status == "payout_pending")
+        return {"not_withdrawn": first + scheduled, "withdrawn": withdrawn,
+                "total": first + scheduled + withdrawn, "first_attempt": first,
+                "waiting_24": scheduled, "retry_ready": ready}
 
 
-async def mark_paypal_withdrawn(
-    request_id: int,
-    admin_id: int,
-) -> tuple[Request | None, str]:
-    """Mark money as withdrawn from this PayPal without completing user payout."""
+async def mark_paypal_withdrawn(request_id: int, admin_id: int) -> tuple[Request | None, str]:
+    """Release one held accrual atomically, with payout/refund lock ordering."""
     async with SessionLocal() as session:
-        req = await session.get(Request, request_id, with_for_update=True)
-        if req is None:
-            return None, "not_found"
-        if req.status != "payout_pending":
-            return req, "not_pending"
-        if req.paypal_withdrawn_at is not None:
-            return req, "already_done"
-
-        req.paypal_withdrawn_at = datetime.utcnow()
-        req.paypal_withdrawn_by = admin_id
-        req.updated_at = datetime.utcnow()
-
-        await session.commit()
+        async with session.begin():
+            user_id = await session.scalar(select(Request.user_id).where(Request.id == request_id))
+            if user_id is None:
+                return None, "not_found"
+            await session.get(User, user_id, with_for_update=True)
+            entry = await session.scalar(select(BalanceEntry).where(BalanceEntry.request_id == request_id).with_for_update())
+            req = await session.get(Request, request_id, with_for_update=True)
+            if req is None:
+                return None, "not_found"
+            if req.paypal_withdrawn_at is not None:
+                return req, "already_done"
+            if req.status != "withdrawal_pending":
+                return req, "not_pending"
+            if (entry is None or entry.status != "held" or entry.user_id != user_id
+                    or entry.payout_id is not None or entry.paid_at is not None or req.payout_at is not None):
+                return req, "no_held_entry"
+            now = datetime.utcnow()
+            entry.status = "available"
+            req.status = "payout_pending"
+            req.paypal_withdrawn_at = now
+            req.paypal_withdrawn_by = admin_id
+            req.updated_at = now
         await session.refresh(req)
         return req, "done"
+
+
+async def wait_paypal_withdrawal(request_id: int, expected_count: int) -> tuple[Request | None, str]:
+    """Start/restart 24 hours once per current button; stale clicks cannot extend it."""
+    async with SessionLocal() as session:
+        req = await session.get(Request, request_id, with_for_update=True)
+        if req is None or req.status != "withdrawal_pending" or req.paypal_withdrawn_at is not None:
+            return req, "not_pending"
+        if (req.withdrawal_wait_count or 0) != expected_count:
+            return req, "stale"
+        now = datetime.utcnow()
+        if req.withdrawal_retry_at is not None and req.withdrawal_retry_at > now:
+            return req, "already_waiting"
+        req.withdrawal_wait_count = expected_count + 1
+        req.withdrawal_retry_at = now + timedelta(hours=24)
+        req.updated_at = now
+        await session.commit()
+        await session.refresh(req)
+        return req, "waiting"
 
 
 async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
@@ -1426,7 +1483,7 @@ async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
         percent, is_happy = await _get_effective_request_rate(session, req)
         if percent is None:
             return None
-        req.status = "payout_pending"
+        req.status = "withdrawal_pending"
         req.payout_percent = percent
         req.payout_amount = round(req.amount * percent / 100, 2)
         req.happy_hours_applied = 1 if is_happy else 0
@@ -1439,7 +1496,7 @@ async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
                 user_id=req.user_id,
                 request_id=req.id,
                 amount=req.payout_amount,
-                status="available",
+                status="held",
             ))
         await session.commit()
         await session.refresh(req)
@@ -1460,7 +1517,7 @@ async def confirm_working_payment(request_id: int, admin_id: int) -> Request | N
         if percent is None:
             return None
         now = datetime.utcnow()
-        req.status = "payout_pending"
+        req.status = "withdrawal_pending"
         req.payout_percent = percent
         req.payout_amount = round(req.amount * percent / 100, 2)
         req.happy_hours_applied = 0
@@ -1475,7 +1532,7 @@ async def confirm_working_payment(request_id: int, admin_id: int) -> Request | N
                 user_id=req.user_id,
                 request_id=req.id,
                 amount=req.payout_amount,
-                status="available",
+                status="held",
             ))
         if req.paypal_tag_id is not None:
             tag = await session.get(
@@ -1542,9 +1599,9 @@ async def refund_confirmed_payment(request_id: int, admin_id: int) -> tuple[Requ
                 entry is not None and (entry.status == "paid" or entry.payout_id is not None or entry.paid_at is not None)
             ):
                 return req, "already_paid"
-            if req.status != "payout_pending":
+            if req.status not in {"withdrawal_pending", "payout_pending"}:
                 return req, "not_pending"
-            if entry is None or entry.status != "available" or entry.user_id != user_id:
+            if entry is None or entry.status not in {"held", "available"} or entry.user_id != user_id:
                 return req, "no_available_entry"
             now = datetime.utcnow()
             entry.status = "cancelled"
@@ -1643,15 +1700,28 @@ async def return_to_payment_check(request_id: int, admin_id: int) -> Request | N
 
 
 async def mark_payout_done(request_id: int, admin_id: int) -> Request | None:
+    """Legacy single-payment button: obey the same withdrawal/ledger rules."""
     async with SessionLocal() as session:
-        req = await session.get(Request, request_id, with_for_update=True)
-        if req is None or req.status != "payout_pending":
-            return None
-        req.status = "paid_out"
-        req.payout_at = datetime.utcnow()
-        req.payout_by = admin_id
-        req.updated_at = datetime.utcnow()
-        await session.commit()
+        async with session.begin():
+            user_id = await session.scalar(select(Request.user_id).where(Request.id == request_id))
+            if user_id is None:
+                return None
+            user = await session.get(User, user_id, with_for_update=True)
+            entry = await session.scalar(select(BalanceEntry).where(BalanceEntry.request_id == request_id).with_for_update())
+            req = await session.get(Request, request_id, with_for_update=True)
+            if (user is None or req is None or req.status != "payout_pending"
+                    or req.paypal_withdrawn_at is None or req.payout_at is not None
+                    or entry is None or entry.status != "available" or entry.user_id != user_id
+                    or entry.payout_id is not None or entry.paid_at is not None):
+                return None
+            payout = ManualPayout(user_id=user_id, total_amount=entry.amount,
+                                  provider=user.payout_method or "cryptobot", admin_id=admin_id)
+            session.add(payout)
+            await session.flush()
+            now = datetime.utcnow()
+            entry.status, entry.payout_id, entry.paid_at = "paid", payout.id, now
+            req.status, req.payout_at, req.payout_by = "paid_out", now, admin_id
+            req.updated_at = now
         await session.refresh(req)
         return req
 
@@ -1895,10 +1965,10 @@ async def get_happy_hours_stats(campaign_id: int) -> dict[str, float | int]:
 async def get_finance_summary() -> dict[str, float | int]:
     async with SessionLocal() as session:
         received = float(await session.scalar(
-            select(func.coalesce(func.sum(Request.amount), 0)).where(Request.status.in_(("payout_pending", "paid_out")))
+            select(func.coalesce(func.sum(Request.amount), 0)).where(Request.status.in_(("withdrawal_pending", "payout_pending", "paid_out")))
         ) or 0)
         payout = float(await session.scalar(
-            select(func.coalesce(func.sum(Request.payout_amount), 0)).where(Request.status.in_(("payout_pending", "paid_out")))
+            select(func.coalesce(func.sum(Request.payout_amount), 0)).where(Request.status.in_(("withdrawal_pending", "payout_pending", "paid_out")))
         ) or 0)
         pending = float(await session.scalar(
             select(func.coalesce(func.sum(Request.payout_amount), 0)).where(Request.status == "payout_pending")
@@ -2356,6 +2426,7 @@ async def set_paypal_tag_gender(
                             (
                                 "paypal_issued",
                                 "waiting_check",
+                                "withdrawal_pending",
                                 "payout_pending",
                                 "return_pending",
                             )
@@ -2867,6 +2938,7 @@ async def get_dashboard_summary() -> dict:
             "available": await scalar(select(func.count(PaypalTag.id)).where(PaypalTag.status == "available")),
             "working": await scalar(select(func.count(Request.id)).where(Request.status == "paypal_issued")),
             "waiting_check": await scalar(select(func.count(Request.id)).where(Request.status == "waiting_check")),
+            "withdrawal_pending": await scalar(select(func.count(Request.id)).where(Request.status == "withdrawal_pending")),
             "payout_pending": await scalar(select(func.count(Request.id)).where(Request.status == "payout_pending")),
             "paid_today": await scalar(
                 select(func.count(Request.id)).where(
@@ -2886,11 +2958,11 @@ async def get_user_crm_stats(user_id: int) -> dict:
         rows = (await session.execute(select(Request.status, func.count(Request.id), func.coalesce(func.sum(Request.amount), 0)).where(Request.user_id == user_id).group_by(Request.status))).all()
         counts = {status: int(count) for status, count, _ in rows}
         total_amount = sum(float(amount or 0) for _, _, amount in rows)
-        successful = counts.get("paid_out", 0) + counts.get("payout_pending", 0)
+        successful = counts.get("paid_out", 0) + counts.get("payout_pending", 0) + counts.get("withdrawal_pending", 0)
         returned = sum(counts.get(s, 0) for s in ("returned", "admin_recalled", "user_returned", "return_pending"))
-        active = sum(counts.get(s, 0) for s in ("waiting_issue", "paypal_issued", "waiting_check", "payout_pending"))
+        active = sum(counts.get(s, 0) for s in ("waiting_issue", "paypal_issued", "waiting_check", "withdrawal_pending", "payout_pending"))
         return {
-            "received": sum(counts.get(s, 0) for s in ("paypal_issued", "waiting_check", "payout_pending", "paid_out", "gs", "not_found")),
+            "received": sum(counts.get(s, 0) for s in ("paypal_issued", "waiting_check", "withdrawal_pending", "payout_pending", "paid_out", "gs", "not_found")),
             "successful": successful,
             "returned": returned,
             "gs": counts.get("gs", 0),
@@ -2942,11 +3014,11 @@ async def get_period_statistics(period: str) -> dict:
         return {
             "requests": len(requests),
             "issued": sum(r.paypal_tag_id is not None for r in requests),
-            "successful": sum(r.status in {"payout_pending", "paid_out"} for r in requests),
+            "successful": sum(r.status in {"withdrawal_pending", "payout_pending", "paid_out"} for r in requests),
             "returns": sum(r.status in {"returned", "admin_recalled", "user_returned", "return_pending"} for r in requests),
             "gs": sum(r.status == "gs" for r in requests),
-            "turnover": sum(float(r.amount or 0) for r in requests if r.status in {"payout_pending", "paid_out"}),
-            "payout": sum(float(r.payout_amount or 0) for r in requests if r.status in {"payout_pending", "paid_out"}),
+            "turnover": sum(float(r.amount or 0) for r in requests if r.status in {"withdrawal_pending", "payout_pending", "paid_out"}),
+            "payout": sum(float(r.payout_amount or 0) for r in requests if r.status in {"withdrawal_pending", "payout_pending", "paid_out"}),
             "active_users": len({r.user_id for r in requests}),
         }
 
@@ -3090,7 +3162,7 @@ def _dt_payments_success_condition():
         Request.status != "payment_refunded",
         or_(
             Request.payment_confirmed_at.is_not(None),
-            Request.status.in_(("payout_pending", "paid_out")),
+            Request.status.in_(("withdrawal_pending", "payout_pending", "paid_out")),
             Request.payout_at.is_not(None),
             Request.paypal_withdrawn_at.is_not(None),
         ),
@@ -3268,6 +3340,11 @@ async def get_user_balance(user_id: int) -> dict:
                 BalanceEntry.user_id == user_id, BalanceEntry.status == "available"
             )
         ) or 0)
+        held = float(await session.scalar(
+            select(func.coalesce(func.sum(BalanceEntry.amount), 0)).where(
+                BalanceEntry.user_id == user_id, BalanceEntry.status == "held"
+            )
+        ) or 0)
         paid = float(await session.scalar(
             select(func.coalesce(func.sum(BalanceEntry.amount), 0)).where(
                 BalanceEntry.user_id == user_id, BalanceEntry.status == "paid"
@@ -3286,7 +3363,7 @@ async def get_user_balance(user_id: int) -> dict:
         )
         method = await session.scalar(select(User.payout_method).where(User.id == user_id)) or "cryptobot"
         return {
-            "available": available, "paid": paid, "count_available": count_available,
+            "available": available, "held": held, "paid": paid, "count_available": count_available,
             "count_paid": count_paid, "last": last, "method": method,
         }
 
@@ -3353,6 +3430,11 @@ async def complete_manual_payout(
             requests = list(await session.scalars(
                 select(Request).where(Request.id.in_(request_ids)).order_by(Request.id).with_for_update()
             ))
+            if len(requests) != len(entries) or any(
+                req.status != "payout_pending" or req.paypal_withdrawn_at is None
+                or req.payout_at is not None for req in requests
+            ):
+                return None
             total = round(sum(float(e.amount) for e in entries), 2)
             payout = ManualPayout(
                 user_id=user_id, total_amount=total, provider=user.payout_method or "cryptobot",

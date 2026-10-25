@@ -1,4 +1,27 @@
 from __future__ import annotations
+from datetime import datetime
+from math import ceil
+from zoneinfo import ZoneInfo
+
+
+def withdrawal_wait_text(req, now: datetime | None = None) -> str:
+    """Display-only deadline; expiry never releases funds."""
+    retry_at = getattr(req, "withdrawal_retry_at", None)
+    if retry_at is None:
+        return "⏳ Ожидает вывода с PayPal"
+    now = now or datetime.utcnow()
+    if retry_at <= now:
+        return "🔄 Ожидает повторной попытки вывода"
+    minutes = ceil((retry_at - now).total_seconds() / 60)
+    return f"⏳ До повторной попытки: {minutes // 60} ч {minutes % 60:02d} мин"
+
+
+def withdrawal_retry_date(req) -> str:
+    retry_at = getattr(req, "withdrawal_retry_at", None)
+    if retry_at is None:
+        return ""
+    local = retry_at.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("Europe/Moscow"))
+    return local.strftime("%d.%m.%Y %H:%M МСК")
 
 DIVIDER = "━━━━━━━━━━━━━━━━━━"
 
@@ -36,6 +59,7 @@ def admin_dashboard_caption(
         f"🔵 В работе: <b>{data['working']}</b>\n"
         f"📥 Новые заявки: <b>{data['queue']}</b>\n"
         f"🟠 На проверке: <b>{data['waiting_check']}</b>\n"
+        f"⏳ Ожидают вывода: <b>{data.get('withdrawal_pending', 0)}</b>\n"
         f"🟣 К выплате: <b>{data['payout_pending']}</b>\n"
         f"✅ Выплачено сегодня: <b>{data['paid_today']}</b>\n"
         f"🔴 GS: <b>{data['gs']}</b>\n"

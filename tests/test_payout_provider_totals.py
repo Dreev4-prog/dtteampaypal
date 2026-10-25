@@ -2,6 +2,7 @@
 import os
 import unittest
 from decimal import Decimal
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -43,6 +44,7 @@ class PayoutProviderTotalsTests(unittest.IsolatedAsyncioTestCase):
         session.add(db.Request(
             id=entry_id, user_id=user_id, amount=100,
             status="paid_out" if status == "paid" else "payout_pending",
+            paypal_withdrawn_at=datetime(2026, 10, 1),
         ))
         session.add(db.BalanceEntry(
             id=entry_id, request_id=entry_id, user_id=user_id,

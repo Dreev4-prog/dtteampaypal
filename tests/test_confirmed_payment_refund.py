@@ -49,8 +49,13 @@ class ConfirmedRefundTests(unittest.IsolatedAsyncioTestCase):
             req.paypal_tag_id = tag.id
             await session.commit()
         if direct:
-            return await db.confirm_working_payment(req.id, 999)
-        return await db.confirm_payment(req.id, 999)
+            confirmed = await db.confirm_working_payment(req.id, 999)
+        else:
+            confirmed = await db.confirm_payment(req.id, 999)
+        # These regression cases concern refunds of already released accruals.
+        released, result = await db.mark_paypal_withdrawn(confirmed.id, 999)
+        self.assertEqual(result, "done")
+        return released
 
     def callback(self, data, user_id=999):
         return SimpleNamespace(
