@@ -5,12 +5,12 @@ from app.ui import withdrawal_wait_text
 
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 ПОЛУЧИТЬ PAYPAL", callback_data="paypal_request")],
-        [InlineKeyboardButton(text="📂 МОИ PAYPAL", callback_data="my_paypals")],
-        [InlineKeyboardButton(text="💰 КОШЕЛЁК", callback_data="wallet")],
-        [InlineKeyboardButton(text="💸 DT Payments", callback_data="dt_payments")],
-        [InlineKeyboardButton(text="👤 ЛИЧНЫЙ КАБИНЕТ", callback_data="profile")],
-        [InlineKeyboardButton(text="🛟 ПОДДЕРЖКА", callback_data="support")],
+        [InlineKeyboardButton(text="💳 Получить PayPal", callback_data="paypal_request")],
+        [InlineKeyboardButton(text="📂 Мои PayPal", callback_data="my_paypals"),
+         InlineKeyboardButton(text="💰 Кошелёк", callback_data="wallet")],
+        [InlineKeyboardButton(text="🏆 DT Payments", callback_data="dt_payments"),
+         InlineKeyboardButton(text="👤 Кабинет", callback_data="profile")],
+        [InlineKeyboardButton(text="🛟 Поддержка", callback_data="support")],
     ])
 
 

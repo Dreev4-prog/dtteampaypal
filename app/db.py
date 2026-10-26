@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.config import settings
+from app.rules import MIN_PAYPAL_AMOUNT, valid_paypal_request_amount
 
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -433,6 +434,7 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE rate_rules ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP"))
         await conn.execute(text("INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (50, 60, CURRENT_TIMESTAMP) ON CONFLICT (min_amount) DO NOTHING"))
         await conn.execute(text("INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (100, 70, CURRENT_TIMESTAMP) ON CONFLICT (min_amount) DO NOTHING"))
+        await _migrate_personal_home(conn)
         await conn.execute(text("""
             WITH matched_rates AS (
                 SELECT req.id AS request_id, rule.percent
@@ -477,6 +479,38 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("ALTER TABLE requests ALTER COLUMN paypal_was_gestop SET DEFAULT 0"))
         await conn.execute(text("ALTER TABLE requests ALTER COLUMN paypal_was_gestop SET NOT NULL"))
+
+
+async def _migrate_personal_home(conn) -> None:
+    """Apply the approved home and 40 EUR tier once, preserving old content."""
+    from app.ui import HOME_SUMMARY_TEMPLATE, request_amount_caption
+
+    claimed = await conn.scalar(text("""
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES ('migration_personal_home_v2521', '1', CURRENT_TIMESTAMP)
+        ON CONFLICT (key) DO NOTHING RETURNING key
+    """))
+    if claimed is None:
+        return
+    replacements = {
+        "content_home_text": HOME_SUMMARY_TEMPLATE,
+        "content_home_image": "",
+        "content_paypal_text": request_amount_caption(),
+    }
+    for key, value in replacements.items():
+        await conn.execute(text("""
+            INSERT INTO app_settings (key, value, updated_at)
+            SELECT :backup, value, CURRENT_TIMESTAMP FROM app_settings WHERE key = :key
+            ON CONFLICT (key) DO NOTHING
+        """), {"backup": key + "_before_v2521", "key": key})
+        await conn.execute(text("""
+            INSERT INTO app_settings (key, value, updated_at) VALUES (:key, :value, CURRENT_TIMESTAMP)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+        """), {"key": key, "value": value})
+    await conn.execute(text("""
+        INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (40, 50, CURRENT_TIMESTAMP)
+        ON CONFLICT (min_amount) DO UPDATE SET percent = 50
+    """))
 
 
 async def _backfill_withdrawal_holds() -> None:
@@ -817,6 +851,8 @@ async def create_request_with_work_limit(
     paypal_gender: str = "male",
 ) -> tuple[Request | None, dict]:
     """Atomically create a request while respecting a personal work limit."""
+    if not valid_paypal_request_amount(amount):
+        return None, {"reason": "invalid_amount", "minimum": MIN_PAYPAL_AMOUNT}
     async with SessionLocal() as session:
         async with session.begin():
             user = await session.get(User, user_id, with_for_update=True)
@@ -866,6 +902,8 @@ async def create_request_with_work_limit(
 
 
 async def create_request(user_id: int, amount: int, screenshot_file_id: str | None = None, paypal_gender: str = "male") -> Request:
+    if not valid_paypal_request_amount(amount):
+        raise ValueError("PayPal request amount must be an integer from 40 to 100000 EUR")
     async with SessionLocal() as session:
         req = Request(user_id=user_id, amount=amount, screenshot_file_id=screenshot_file_id, paypal_gender=paypal_gender)
         session.add(req)
@@ -884,6 +922,8 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
         async with session.begin():
             req = await session.get(Request, request_id, with_for_update=True)
             if req is None or req.status != "waiting_issue":
+                return req, None
+            if not valid_paypal_request_amount(req.amount):
                 return req, None
 
             # Lock the user row too, so two manual/auto issuances for the
@@ -3372,6 +3412,24 @@ async def set_user_payout_method(user_id: int, method: str) -> bool:
         user.payout_method = method
         await session.commit()
         return True
+
+
+async def get_user_home_summary(user_id: int) -> dict:
+    """One DB snapshot of this user's issued PayPals and separate ledger sums."""
+    working = select(func.count(Request.id)).where(
+        Request.user_id == user_id, Request.status == "paypal_issued",
+        Request.paypal_tag_id.is_not(None),
+    ).scalar_subquery()
+    def balance(status):
+        return select(func.coalesce(func.sum(BalanceEntry.amount), 0)).where(
+            BalanceEntry.user_id == user_id, BalanceEntry.status == status,
+        ).scalar_subquery()
+    async with SessionLocal() as session:
+        row = (await session.execute(select(
+            working.label("working"), balance("held").label("held"),
+            balance("available").label("available"),
+        ))).one()
+        return dict(row._mapping)
 
 
 async def get_user_balance(user_id: int) -> dict:

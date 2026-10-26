@@ -23,6 +23,8 @@ from aiogram.types import (
 )
 
 from app.config import settings
+from app.rules import MIN_PAYPAL_AMOUNT, MAX_PAYPAL_AMOUNT, valid_paypal_request_amount
+from app.ui import HOME_SUMMARY_TEMPLATE, rates_caption
 from app.ui import admin_dashboard_caption, request_amount_caption, support_caption, user_home_caption, withdrawal_wait_text, withdrawal_retry_date
 from app.db import (
     add_paypal_tag,
@@ -101,6 +103,7 @@ from app.db import (
     ensure_dt_payments_tag, get_dt_payments_tag_profile, change_dt_payments_tag,
     get_dt_payments_feed, get_dt_payments_ranking,
     get_user_payout_method, set_user_payout_method, get_user_balance,
+    get_user_home_summary,
     list_users_with_available_balance, get_payout_user_details, complete_manual_payout,
     list_manual_payouts, get_manual_payout, get_payout_dashboard_counts,
 )
@@ -262,7 +265,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = BASE_DIR / "assets"
 
 BANNERS = {
-    "home": ASSETS_DIR / "home_v2.jpg",
+    "home": ASSETS_DIR / "home_summary_v2521.png",
     "paypal": ASSETS_DIR / "request_v2.jpg",
     "requests": ASSETS_DIR / "requests.jpg",
     "profile": ASSETS_DIR / "profile_v2.jpg",
@@ -285,12 +288,13 @@ async def render_screen(
     banner: str,
     caption: str,
     reply_markup=None,
+    photo_file_id: str = "",
 ) -> Message:
     """Показывает экран; длинные подписи отправляет обычным текстом."""
     # Count the HTML source conservatively, including UTF-16 emoji pairs.
     # Telegram allows only 1024 characters in a photo caption.
     text_screen = len(caption.encode("utf-16-le")) // 2 > 1024
-    photo = FSInputFile(BANNERS[banner])
+    photo = photo_file_id or FSInputFile(BANNERS[banner])
 
     if isinstance(target, Message):
         if text_screen:
@@ -343,20 +347,7 @@ async def render_custom_photo_screen(
     reply_markup=None,
 ) -> Message:
     """Render local banner or Telegram file_id stored in settings."""
-    photo = photo_file_id or FSInputFile(BANNERS[default_banner])
-    if isinstance(target, Message):
-        return await target.answer_photo(photo=photo, caption=caption, reply_markup=reply_markup)
-    message = target.message
-    if message.photo:
-        try:
-            return await message.edit_media(InputMediaPhoto(media=photo, caption=caption), reply_markup=reply_markup)
-        except TelegramBadRequest:
-            pass
-    try:
-        await message.delete()
-    except TelegramBadRequest:
-        pass
-    return await target.bot.send_photo(chat_id=message.chat.id, photo=photo, caption=caption, reply_markup=reply_markup)
+    return await render_screen(target, default_banner, caption, reply_markup, photo_file_id)
 
 
 async def show_home(target: Message | CallbackQuery) -> None:
@@ -411,11 +402,10 @@ async def show_home(target: Message | CallbackQuery) -> None:
         return
 
     work_enabled = await is_work_enabled()
-    default_home = user_home_caption(work_enabled)
-    home_text = await get_app_setting("content_home_text", default_home)
-    status = "🟢 Сервис работает" if work_enabled else "🔴 Новые заявки временно закрыты"
-    if "{status}" in home_text:
-        home_text = home_text.replace("{status}", status)
+    summary = await get_user_home_summary(user_id)
+    rules = await list_rate_rules()
+    template = await get_app_setting("content_home_text", HOME_SUMMARY_TEMPLATE)
+    home_text = user_home_caption(work_enabled, summary=summary, rates=rates_caption(rules), template=template)
     home_image = await get_app_setting("content_home_image", "")
     await render_custom_photo_screen(target, "home", home_image, home_text, main_menu())
 
@@ -485,7 +475,7 @@ async def paypal_command(message: Message, state: FSMContext) -> None:
     await state.set_state(PaypalRequestForm.amount)
     await message.answer_photo(
         photo=FSInputFile(BANNERS["paypal"]),
-        caption=await get_app_setting("content_paypal_text", request_amount_caption()),
+        caption=await _paypal_amount_prompt(),
         reply_markup=request_cancel_menu(),
     )
 
@@ -675,6 +665,32 @@ async def _get_reached_paypal_work_limit(user_id: int) -> dict | None:
     return None
 
 
+async def _minimum_paypal_notice() -> str:
+    percent, _ = await get_rate_for_amount(MIN_PAYPAL_AMOUNT)
+    rate = f" под <b>{percent}%</b>" if percent is not None else ""
+    return f"Минимум <b>{MIN_PAYPAL_AMOUNT} €</b>{rate}."
+
+
+async def _paypal_amount_prompt() -> str:
+    template = await get_app_setting("content_paypal_text", request_amount_caption())
+    minimum = await _minimum_paypal_notice()
+    return template.replace("{minimum}", minimum) if "{minimum}" in template else template + "\n\n" + minimum
+
+
+async def _reject_stale_request_amount(target, state: FSMContext) -> bool:
+    """Old FSM steps must also obey the minimum after an update."""
+    data = await state.get_data()
+    if valid_paypal_request_amount(data.get("amount")):
+        return False
+    await state.update_data(amount=None, paypal_gender=None)
+    await state.set_state(PaypalRequestForm.amount)
+    await target.answer(
+        await _minimum_paypal_notice() + "\nВведите сумму от 40 до 100000 €.",
+        reply_markup=request_cancel_menu(),
+    )
+    return True
+
+
 @router.callback_query(F.data == "paypal_request")
 async def paypal_request(callback: CallbackQuery, state: FSMContext) -> None:
     if not await has_access(callback):
@@ -719,7 +735,7 @@ async def paypal_request(callback: CallbackQuery, state: FSMContext) -> None:
 
     await state.clear()
     await state.set_state(PaypalRequestForm.amount)
-    paypal_text = await get_app_setting("content_paypal_text", request_amount_caption())
+    paypal_text = await _paypal_amount_prompt()
     await render_screen(
         callback,
         "paypal",
@@ -740,12 +756,25 @@ async def paypal_amount_input(message: Message, state: FSMContext) -> None:
         await message.answer("🛑 Сейчас STOP WORK. Создание новых заявок остановлено.", reply_markup=back_home())
         return
     raw = (message.text or "").strip().replace("€", "").replace(" ", "")
-    if not raw.isdigit():
-        await message.answer("Введите сумму целым числом, например: <code>75</code>", reply_markup=request_cancel_menu())
+    if not raw.isascii() or not raw.isdigit():
+        await message.answer(
+            "Введите сумму целым числом, например: <code>75</code>.\n" + await _minimum_paypal_notice(),
+            reply_markup=request_cancel_menu(),
+        )
+        return
+    raw = raw.lstrip("0") or "0"
+    if len(raw) > 6:
+        await message.answer("Введите сумму от 40 до 100000 €.", reply_markup=request_cancel_menu())
         return
     amount = int(raw)
-    if amount < 1 or amount > 100000:
-        await message.answer("Введите сумму от 1 до 100000 €.", reply_markup=request_cancel_menu())
+    if amount < MIN_PAYPAL_AMOUNT:
+        await message.answer(
+            "❌ PayPal не выдан. " + await _minimum_paypal_notice() + "\nВведите сумму от 40 €.",
+            reply_markup=request_cancel_menu(),
+        )
+        return
+    if amount > MAX_PAYPAL_AMOUNT:
+        await message.answer("Введите сумму от 40 до 100000 €.", reply_markup=request_cancel_menu())
         return
 
     work_limit = await _get_reached_paypal_work_limit(message.from_user.id)
@@ -803,6 +832,10 @@ async def paypal_gender_choice(callback: CallbackQuery, state: FSMContext) -> No
     gender = callback.data.split(":", 1)[1]
     if gender not in {"male", "female"}:
         await callback.answer("Неизвестный тип PayPal", show_alert=True)
+        return
+
+    if await _reject_stale_request_amount(callback.message, state):
+        await callback.answer()
         return
 
     work_limit = await _get_reached_paypal_work_limit(callback.from_user.id)
@@ -918,6 +951,9 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
         await message.answer("🛑 Сейчас STOP WORK. Создание новых заявок остановлено.", reply_markup=back_home())
         return
 
+    if await _reject_stale_request_amount(message, state):
+        return
+
     work_limit = await _get_reached_paypal_work_limit(message.from_user.id)
     if work_limit is not None:
         await state.clear()
@@ -933,7 +969,7 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
         await message.answer("❌ У вас уже есть 2 активные заявки.", reply_markup=back_home())
         return
     data = await state.get_data()
-    amount = int(data["amount"])
+    amount = data["amount"]
     screenshot_file_id = message.photo[-1].file_id
     gender = data.get("paypal_gender", "male")
 
@@ -961,7 +997,9 @@ async def paypal_screenshot_input(message: Message, state: FSMContext) -> None:
     await state.clear()
 
     if req is None:
-        if create_info.get("reason") == "work_limit":
+        if create_info.get("reason") == "invalid_amount":
+            await message.answer(await _minimum_paypal_notice(), reply_markup=back_home())
+        elif create_info.get("reason") == "work_limit":
             await message.answer(
                 _paypal_work_limit_user_text(create_info),
                 reply_markup=back_home(),
@@ -1893,8 +1931,10 @@ async def content_menu_handler(callback: CallbackQuery, state: FSMContext) -> No
     text = (
         "📣 <b>КОНТЕНТ И РАССЫЛКИ</b>\n\n"
         "Здесь можно создавать рассылки, менять основные тексты и картинку главного экрана без обновления кода.\n\n"
-        "Подсказка: в приветствии можно использовать <code>{status}</code> — "
-        "бот автоматически подставит статус работы."
+        "В приветствии доступны <code>{status}</code>, <code>{working}</code>, "
+        "<code>{held}</code>, <code>{available}</code>, <code>{rates}</code> — "
+        "статус, число PayPal в работе, ожидание, доступный баланс и тарифы.\n"
+        "На экране запроса <code>{minimum}</code> показывает минимум и текущий процент."
     )
     await replace_photo_with_text(callback, text, content_menu(bool(home_image)))
     await callback.answer()
@@ -1917,7 +1957,7 @@ async def content_edit_start(callback: CallbackQuery, state: FSMContext) -> None
         "support": "content_support_text",
     }
     defaults = {
-        "home": user_home_caption(await is_work_enabled()),
+        "home": HOME_SUMMARY_TEMPLATE,
         "paypal": request_amount_caption(),
         "support": support_caption(),
     }
@@ -2016,7 +2056,7 @@ async def content_reset_handler(callback: CallbackQuery, state: FSMContext) -> N
         return
     kind = callback.data.split(":", 1)[1]
     defaults = {
-        "home": user_home_caption(await is_work_enabled()),
+        "home": HOME_SUMMARY_TEMPLATE,
         "paypal": request_amount_caption(),
         "support": support_caption(),
     }
@@ -3851,6 +3891,9 @@ async def admin_issue(callback: CallbackQuery) -> None:
         await callback.answer("Заявка не найдена", show_alert=True)
         return
     if tag is None:
+        if req.status == "waiting_issue" and not valid_paypal_request_amount(req.amount):
+            await callback.answer("Выдача запрещена: сумма заявки должна быть от 40 до 100000 €.", show_alert=True)
+            return
         limit_info = await get_user_paypal_work_limit_status(req.user_id)
         if (
             req.status == "waiting_issue"
@@ -4494,7 +4537,7 @@ async def rates_panel(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.clear()
     rules = await list_rate_rules()
-    text = "⚙️ <b>Проценты выплат</b>\n\nБот выбирает самый высокий порог, который не превышает сумму.\nНапример: от 50 € — 60%, от 100 € — 70%."
+    text = "⚙️ <b>Проценты выплат</b>\n\nБот выбирает самый высокий порог, который не превышает сумму.\nМинимум для новой заявки — 40 €.\nНачальные тарифы: от 40 € — 50%, от 50 € — 60%, от 100 € — 70%."
     await replace_photo_with_text(callback, text, rates_menu(rules))
     await callback.answer()
 

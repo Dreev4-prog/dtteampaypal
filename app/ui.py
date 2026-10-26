@@ -2,6 +2,16 @@ from __future__ import annotations
 from datetime import datetime
 from math import ceil
 from zoneinfo import ZoneInfo
+from app.rules import MIN_PAYPAL_AMOUNT
+
+
+HOME_SUMMARY_TEMPLATE = (
+    "<b>Твой рабочий день 👋</b>\n\n{status}\n\n"
+    "💳 В работе: <b>{working} PayPal</b>\n"
+    "⏳ Ожидают вывода: <b>{held} USDT</b>\n"
+    "💰 Доступно к выплате: <b>{available} USDT</b>\n\n"
+    "{rates}"
+)
 
 
 def withdrawal_wait_text(req, now: datetime | None = None) -> str:
@@ -34,14 +44,29 @@ def card(title: str, body: str, footer: str | None = None) -> str:
     return "\n".join(parts)
 
 
-def user_home_caption(work_enabled: bool = True) -> str:
-    status = "🟢 Сервис работает" if work_enabled else "🔴 Новые заявки временно закрыты"
-    return card(
-        "DT TEAM · PAYPAL SERVICE",
-        "👋 Добро пожаловать в закрытый сервис DT Team.\n\n"
-        "Получайте PayPal, отслеживайте заявки и выплаты в одном месте.",
-        status,
-    )
+def user_home_caption(
+    work_enabled: bool = True, *, summary: dict | None = None,
+    rates: str = "", template: str = HOME_SUMMARY_TEMPLATE,
+) -> str:
+    summary = summary or {}
+    values = {
+        "status": "🟢 Работа открыта" if work_enabled else "🔴 Новые заявки временно закрыты",
+        "working": str(int(summary.get("working", 0))),
+        "held": f"{summary.get('held', 0):.2f}",
+        "available": f"{summary.get('available', 0):.2f}",
+        "rates": rates,
+    }
+    for key, value in values.items():
+        template = template.replace("{" + key + "}", value)
+    return template
+
+
+def rates_caption(rules) -> str:
+    """Show the live rate table, including any rule that covers the minimum."""
+    below = [rule for rule in rules if rule.min_amount <= MIN_PAYPAL_AMOUNT]
+    visible = [(MIN_PAYPAL_AMOUNT, max(below, key=lambda rule: rule.min_amount).percent)] if below else []
+    visible.extend((rule.min_amount, rule.percent) for rule in rules if rule.min_amount > MIN_PAYPAL_AMOUNT)
+    return "\n".join(f"От {int(amount)} € — {int(percent)}%" for amount, percent in visible)
 
 
 def admin_dashboard_caption(
@@ -69,11 +94,11 @@ def admin_dashboard_caption(
 
 
 def request_amount_caption() -> str:
-    return card(
-        "💳 НОВАЯ ЗАЯВКА",
-        "Введите необходимую сумму в евро одним числом.\n\n"
-        "Пример: <code>150</code>",
-        "Следующий шаг — выбор типа PayPal",
+    return (
+        "<b>💳 Получить PayPal</b>\n\n"
+        "Введите ожидаемую сумму в евро целым числом.\n\n"
+        "{minimum}\n\nПример: <code>100</code>\n\n"
+        "Следующий шаг — выбор типа PayPal."
     )
 
 
