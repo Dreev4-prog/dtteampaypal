@@ -5565,11 +5565,8 @@ async def paypal_db_list_handler(callback: CallbackQuery) -> None:
 
     if filter_name == "deleted":
         caption += "\n\nОткройте PayPal, чтобы восстановить его в активную свободную базу."
-    await callback.message.edit_caption(
-        caption=caption,
-        reply_markup=paypal_list_menu(tags, filter_name),
-    )
     await callback.answer()
+    await render_screen(callback, "paypal", caption, paypal_list_menu(tags, filter_name))
 
 
 def _gestop_date_label(tag) -> str:
@@ -5761,7 +5758,7 @@ async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
         else "❓ Не указан"
     )
     text = (
-        f"<b>💳 {tag.tag}</b>\n\n"
+        f"<b>💳 {escape(tag.tag)}</b>\n\n"
         f"Статус: <b>{tag.status}</b>\n"
         f"🚻 Пол: <b>{gender_label}</b>\n"
         f"Пользователь ID: <code>{tag.issued_to_user_id or '—'}</code>\n"
@@ -5778,18 +5775,21 @@ async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
             f"\n\n⚠️ <b>Связанные прежние выдачи: "
             f"{len(deleted_working_requests)}</b>"
         )
-        for index, old_req in enumerate(deleted_working_requests, start=1):
+        # Keep the card within Telegram's text limit even with a long history.
+        for index, old_req in enumerate(deleted_working_requests[:5], start=1):
             source = (
                 "после возврата"
                 if old_req.status == "returned_deleted"
                 else "из работы"
             )
             text += (
-                f"\n\n{index}. 👤 <b>{old_req._display_username}</b>"
+                f"\n\n{index}. 👤 <b>{escape(old_req._display_username)}</b>"
                 f"\n   🆔 Заявка: <code>#{old_req.id}</code>"
                 f"\n   💶 Сумма: <b>{old_req.amount} €</b>"
                 f"\n   📌 Удалён: {source}"
             )
+        if len(deleted_working_requests) > 5:
+            text += "\n\nПоказаны последние 5 выдач. Все прежние выдачи доступны через «Выбрать пользователя»."
 
     card_markup = paypal_card_admin_menu(
         tag.id,
@@ -5797,17 +5797,8 @@ async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
         tag.status,
         restore_working_count=len(deleted_working_requests),
     )
-    if callback.message.photo:
-        await callback.message.edit_caption(
-            caption=text,
-            reply_markup=card_markup,
-        )
-    else:
-        await callback.message.edit_text(
-            text,
-            reply_markup=card_markup,
-        )
     await callback.answer()
+    await render_screen(callback, "paypal", text, card_markup)
 
 
 @router.callback_query(F.data.startswith("paypal_gender_edit:"))
@@ -5965,16 +5956,17 @@ async def paypal_restore_working_users_handler(callback: CallbackQuery) -> None:
         await callback.answer("Прежние выдачи не найдены", show_alert=True)
         return
 
-    await callback.message.edit_caption(
+    await callback.answer()
+    await render_screen(
+        callback, "paypal",
         caption=(
             "<b>👥 Выберите пользователя</b>\n\n"
-            f"PayPal: <code>{tag.tag}</code>\n\n"
+            f"PayPal: <code>{escape(tag.tag)}</code>\n\n"
             "Этот PayPal ранее был связан с несколькими людьми. "
             "Выберите, кому именно вернуть его в работу."
         ),
         reply_markup=paypal_restore_working_users_menu(tag_id, requests),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("paypal_restore_working_ask:"))
@@ -6013,11 +6005,13 @@ async def paypal_restore_working_ask_handler(callback: CallbackQuery) -> None:
         else str(req.user_id)
     )
 
-    await callback.message.edit_caption(
+    await callback.answer()
+    await render_screen(
+        callback, "paypal",
         caption=(
             "<b>↩️ Вернуть PayPal тому же пользователю?</b>\n\n"
-            f"PayPal: <code>{tag.tag}</code>\n"
-            f"Пользователь: <b>{username}</b>\n"
+            f"PayPal: <code>{escape(tag.tag)}</code>\n"
+            f"Пользователь: <b>{escape(username)}</b>\n"
             f"Сумма: <b>{req.amount} €</b>\n\n"
             "PayPal снова появится в разделе <b>«PayPal в работе»</b> "
             "и не попадёт в свободную базу."
@@ -6027,7 +6021,6 @@ async def paypal_restore_working_ask_handler(callback: CallbackQuery) -> None:
             req.id,
         ),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("paypal_restore_working_confirm:"))
@@ -6057,6 +6050,7 @@ async def paypal_restore_working_confirm_handler(callback: CallbackQuery) -> Non
         )
         return
 
+    await callback.answer("PayPal возвращён пользователю")
     user = await get_user(req.user_id)
     username = (
         f"@{user.username}"
@@ -6068,18 +6062,19 @@ async def paypal_restore_working_confirm_handler(callback: CallbackQuery) -> Non
         await callback.bot.send_message(
             req.user_id,
             "ℹ️ Администратор восстановил выданный вам PayPal.\n\n"
-            f"PayPal: <code>{tag.tag}</code>\n"
+            f"PayPal: <code>{escape(tag.tag)}</code>\n"
             "Вы можете продолжить работу с ним.",
             reply_markup=paid_or_return_menu(req.id),
         )
     except Exception:
         pass
 
-    await callback.message.edit_caption(
+    await render_screen(
+        callback, "paypal",
         caption=(
             "<b>✅ PayPal возвращён в работу</b>\n\n"
-            f"PayPal: <code>{tag.tag}</code>\n"
-            f"Пользователь: <b>{username}</b>\n"
+            f"PayPal: <code>{escape(tag.tag)}</code>\n"
+            f"Пользователь: <b>{escape(username)}</b>\n"
             f"Сумма: <b>{req.amount} €</b>\n\n"
             "Он снова отображается в разделе <b>«PayPal в работе»</b>."
         ),
@@ -6089,7 +6084,6 @@ async def paypal_restore_working_confirm_handler(callback: CallbackQuery) -> Non
             tag.status,
         ),
     )
-    await callback.answer("PayPal возвращён пользователю")
 
 
 @router.callback_query(F.data.startswith("paypal_restore_ask:"))
@@ -6104,16 +6098,17 @@ async def paypal_restore_ask_handler(callback: CallbackQuery) -> None:
         await callback.answer("PayPal уже восстановлен или не найден", show_alert=True)
         return
 
-    await callback.message.edit_caption(
+    await callback.answer()
+    await render_screen(
+        callback, "paypal",
         caption=(
             "<b>♻️ Восстановить PayPal?</b>\n\n"
-            f"PayPal: <code>{tag.tag}</code>\n\n"
+            f"PayPal: <code>{escape(tag.tag)}</code>\n\n"
             "После восстановления он попадёт в свободную активную базу "
             "и снова сможет выдаваться пользователям."
         ),
         reply_markup=paypal_restore_confirm_menu(tag.id),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("paypal_restore_confirm:"))
@@ -6133,16 +6128,18 @@ async def paypal_restore_confirm_handler(callback: CallbackQuery) -> None:
         await callback.answer(message, show_alert=True)
         return
 
+    await callback.answer("PayPal восстановлен")
     deleted_tags = await list_paypal_tags("deleted")
-    await callback.message.edit_caption(
+    counts = await get_paypal_database_counts()
+    await render_screen(
+        callback, "paypal",
         caption=(
             "<b>✅ PayPal восстановлен</b>\n\n"
-            f"<code>{tag.tag}</code> добавлен в свободную активную базу.\n\n"
-            f"В корзине осталось: <b>{len(deleted_tags)}</b>"
+            f"<code>{escape(tag.tag)}</code> добавлен в свободную активную базу.\n\n"
+            f"В корзине осталось: <b>{counts['deleted']}</b>"
         ),
         reply_markup=paypal_list_menu(deleted_tags, "deleted"),
     )
-    await callback.answer("PayPal восстановлен")
 
 
 @router.callback_query(F.data.startswith("paypal_mark_"))
