@@ -435,6 +435,7 @@ async def init_db() -> None:
         await conn.execute(text("INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (50, 60, CURRENT_TIMESTAMP) ON CONFLICT (min_amount) DO NOTHING"))
         await conn.execute(text("INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (100, 70, CURRENT_TIMESTAMP) ON CONFLICT (min_amount) DO NOTHING"))
         await _migrate_personal_home(conn)
+        await _migrate_home_rates_v2522(conn)
         await conn.execute(text("""
             WITH matched_rates AS (
                 SELECT req.id AS request_id, rule.percent
@@ -510,6 +511,40 @@ async def _migrate_personal_home(conn) -> None:
     await conn.execute(text("""
         INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (40, 50, CURRENT_TIMESTAMP)
         ON CONFLICT (min_amount) DO UPDATE SET percent = 50
+    """))
+
+
+async def _migrate_home_rates_v2522(conn) -> None:
+    """Remove obsolete user-facing rate blocks and set the requested base rate once."""
+    from app.ui import remove_old_placeholder
+
+    claimed = await conn.scalar(text("""
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES ('migration_home_rates_v2522', '1', CURRENT_TIMESTAMP)
+        ON CONFLICT (key) DO NOTHING RETURNING key
+    """))
+    if claimed is None:
+        return
+    for key, token in (("content_home_text", "rates"), ("content_paypal_text", "minimum")):
+        old = await conn.scalar(text("SELECT value FROM app_settings WHERE key = :key"), {"key": key})
+        if old is None:
+            continue
+        await conn.execute(text("""
+            INSERT INTO app_settings (key, value, updated_at) VALUES (:key, :value, CURRENT_TIMESTAMP)
+            ON CONFLICT (key) DO NOTHING
+        """), {"key": key + "_before_v2522", "value": old})
+        await conn.execute(text("""
+            UPDATE app_settings SET value = :value, updated_at = CURRENT_TIMESTAMP WHERE key = :key
+        """), {"key": key, "value": remove_old_placeholder(old, token)})
+    await conn.execute(text("""
+        INSERT INTO app_settings (key, value, updated_at)
+        SELECT 'rate_100_before_v2522', CAST(percent AS VARCHAR), CURRENT_TIMESTAMP
+        FROM rate_rules WHERE min_amount = 100
+        ON CONFLICT (key) DO NOTHING
+    """))
+    await conn.execute(text("""
+        INSERT INTO rate_rules (min_amount, percent, created_at) VALUES (100, 70, CURRENT_TIMESTAMP)
+        ON CONFLICT (min_amount) DO UPDATE SET percent = 70
     """))
 
 

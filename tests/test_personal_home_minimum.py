@@ -99,8 +99,9 @@ class PersonalHomeMinimumTests(unittest.IsolatedAsyncioTestCase):
         callback.from_user = SimpleNamespace(id=1, username="member", full_name="Member")
         await handlers.show_home(callback)
         caption, markup = screen.delivered[-1]
-        for value in ("1 PayPal", "120.45 USDT", "70.50 USDT", "От 40 € — 50%", "Работа открыта"):
+        for value in ("1 PayPal", "120.45 USDT", "70.50 USDT", "Работа открыта"):
             self.assertIn(value, caption)
+        self.assertNotIn("%", caption)
         self.assertNotIn("900", caption)
         self.assertNotIn("{available}", caption)
         self.assertEqual([len(row) for row in markup.inline_keyboard], [1, 2, 2, 1])
@@ -142,13 +143,14 @@ class PersonalHomeMinimumTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await db.get_app_setting("content_home_image"), "NEW_PHOTO_ID")
         self.assertEqual((await db.get_rate_for_amount(40))[0], 55)
 
-    async def test_current_rates_are_used_in_caption_and_minimum_notice(self):
+    async def test_rates_are_not_in_request_prompt_or_minimum_error(self):
         await db.upsert_rate_rule(40, 52)
-        self.assertIn("52%", await handlers._minimum_paypal_notice())
-        self.assertIn("От 40 € — 52%", ui.rates_caption(await db.list_rate_rules()))
-        self.assertIn("52%", await handlers._paypal_amount_prompt())
+        self.assertNotIn("%", await handlers._minimum_paypal_notice())
+        self.assertIn("40 €", await handlers._minimum_paypal_notice())
+        self.assertNotIn("Минимум", await handlers._paypal_amount_prompt())
+        self.assertNotIn("%", await handlers._paypal_amount_prompt())
         await db.set_app_setting("content_paypal_text", "Custom instructions")
-        self.assertIn("52%", await handlers._paypal_amount_prompt())
+        self.assertEqual(await handlers._paypal_amount_prompt(), "Custom instructions")
 
     async def test_rate_boundaries_and_40_euro_real_accrual(self):
         for amount, percent in ((40, 50), (49, 50), (50, 60), (99, 60), (100, 70)):
@@ -166,14 +168,14 @@ class PersonalHomeMinimumTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((summary["held"], summary["available"]), (0, 20))
 
     async def test_under_minimum_input_keeps_amount_step_and_creates_nothing(self):
-        for value in ("0", "1", "39", " 39 € ", "00000039", "-1", "39.5"):
+        for value in ("0", "1", "39", " 39 € ", "00000039", "-1"):
             with self.subTest(value=value):
                 await self.state.set_state(handlers.PaypalRequestForm.amount)
                 message = self.message(value)
                 await handlers.paypal_amount_input(message, self.state)
                 response = message.answer.await_args.args[0]
                 self.assertIn("40 €", response)
-                self.assertIn("50%", response)
+                self.assertNotIn("%", response)
                 self.assertEqual(await self.state.get_state(), handlers.PaypalRequestForm.amount.state)
                 self.assertEqual(await self.request_count(), 0)
         self.assertEqual((await db.get_paypal_tag(1)).status, "available")
@@ -202,7 +204,8 @@ class PersonalHomeMinimumTests(unittest.IsolatedAsyncioTestCase):
         callback = self.callback("request_gender:male")
         await handlers.paypal_gender_choice(callback, self.state)
         self.assertEqual(await self.state.get_state(), handlers.PaypalRequestForm.amount.state)
-        self.assertIn("50%", callback.message.answer.await_args.args[0])
+        self.assertIn("40 €", callback.message.answer.await_args.args[0])
+        self.assertNotIn("%", callback.message.answer.await_args.args[0])
         self.assertEqual(await self.request_count(), 0)
 
     async def test_stale_screenshot_cannot_create_or_auto_issue_below_minimum(self):
@@ -268,6 +271,57 @@ class PersonalHomeMinimumTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("send_message", screen.events)
         self.assertLess(screen.events.index("send_message"), screen.events.index("delete"))
         self.assertIn("0.00", screen.delivered[-1][0])
+
+    async def test_existing_75_percent_rule_changes_to_70_without_recalculating_accruals(self):
+        await db.upsert_rate_rule(100, 75)
+        async with self.sessions() as session:
+            session.add(db.Request(id=100, user_id=1, amount=100, status="withdrawal_pending",
+                                   payout_percent=75, payout_amount=75))
+            await session.flush()
+            session.add(db.BalanceEntry(user_id=1, request_id=100, amount=75, status="held"))
+            await session.commit()
+        async with self.engine.begin() as conn:
+            await db._migrate_home_rates_v2522(conn)
+        for amount, percent in ((40, 50), (49, 50), (50, 60), (99, 60), (100, 70), (200, 70)):
+            self.assertEqual((await db.get_rate_for_amount(amount))[0], percent)
+        self.assertEqual(await db.get_app_setting("rate_100_before_v2522"), "75")
+        self.assertEqual((await db.get_request(100)).payout_percent, 75)
+        self.assertEqual((await db.get_payment_balance_entry(100)).amount, 75)
+        new = await db.create_request(1, 100)
+        await db.issue_paypal(new.id)
+        await db.mark_paid_by_user(new.id, 1)
+        confirmed = await db.confirm_payment(new.id, 999)
+        self.assertEqual((confirmed.payout_percent, confirmed.payout_amount), (70, Decimal("70.00")))
+
+    async def test_rate_cleanup_preserves_custom_text_and_is_one_time(self):
+        await db.upsert_rate_rule(100, 75)
+        await db.set_app_setting("content_home_text", "Моя сводка\n{available}\n\n{rates}")
+        await db.set_app_setting("content_paypal_text", "Введите сумму.\n\n{minimum}\n\nМой текст")
+        async with self.engine.begin() as conn:
+            await db._migrate_home_rates_v2522(conn)
+        self.assertEqual(await db.get_app_setting("content_home_text"), "Моя сводка\n{available}")
+        self.assertEqual(await handlers._paypal_amount_prompt(), "Введите сумму.\n\nМой текст")
+        self.assertIn("{rates}", await db.get_app_setting("content_home_text_before_v2522"))
+        await db.upsert_rate_rule(100, 72)
+        await db.set_app_setting("content_home_text", "Поздняя правка")
+        async with self.engine.begin() as conn:
+            await db._migrate_home_rates_v2522(conn)
+        self.assertEqual((await db.get_rate_for_amount(100))[0], 72)
+        self.assertEqual(await db.get_app_setting("content_home_text"), "Поздняя правка")
+        self.assertEqual(await db.get_app_setting("rate_100_before_v2522"), "75")
+
+    async def test_legacy_placeholders_never_leak_into_user_screens(self):
+        await db.set_app_setting("content_home_text", ui.HOME_SUMMARY_TEMPLATE + "\n\n{rates}")
+        await db.set_app_setting("content_paypal_text", "Введите сумму\n\n{minimum}")
+        self.assertEqual(await handlers._paypal_amount_prompt(), "Введите сумму")
+        screen = TelegramScreen()
+        callback = screen.callback("home")
+        callback.from_user = SimpleNamespace(id=1, username="member", full_name="Member")
+        with patch.object(handlers, "list_rate_rules", new_callable=AsyncMock) as rates:
+            await handlers.show_home(callback)
+            rates.assert_not_awaited()
+        self.assertNotIn("%", screen.delivered[-1][0])
+        self.assertNotIn("{rates}", screen.delivered[-1][0])
 
 
 if __name__ == "__main__":

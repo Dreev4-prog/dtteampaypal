@@ -24,7 +24,7 @@ from aiogram.types import (
 
 from app.config import settings
 from app.rules import MIN_PAYPAL_AMOUNT, MAX_PAYPAL_AMOUNT, valid_paypal_request_amount
-from app.ui import HOME_SUMMARY_TEMPLATE, rates_caption
+from app.ui import HOME_SUMMARY_TEMPLATE, remove_old_placeholder
 from app.ui import admin_dashboard_caption, request_amount_caption, support_caption, user_home_caption, withdrawal_wait_text, withdrawal_retry_date
 from app.db import (
     add_paypal_tag,
@@ -403,9 +403,8 @@ async def show_home(target: Message | CallbackQuery) -> None:
 
     work_enabled = await is_work_enabled()
     summary = await get_user_home_summary(user_id)
-    rules = await list_rate_rules()
     template = await get_app_setting("content_home_text", HOME_SUMMARY_TEMPLATE)
-    home_text = user_home_caption(work_enabled, summary=summary, rates=rates_caption(rules), template=template)
+    home_text = user_home_caption(work_enabled, summary=summary, template=template)
     home_image = await get_app_setting("content_home_image", "")
     await render_custom_photo_screen(target, "home", home_image, home_text, main_menu())
 
@@ -666,15 +665,12 @@ async def _get_reached_paypal_work_limit(user_id: int) -> dict | None:
 
 
 async def _minimum_paypal_notice() -> str:
-    percent, _ = await get_rate_for_amount(MIN_PAYPAL_AMOUNT)
-    rate = f" под <b>{percent}%</b>" if percent is not None else ""
-    return f"Минимум <b>{MIN_PAYPAL_AMOUNT} €</b>{rate}."
+    return f"Минимальная сумма — <b>{MIN_PAYPAL_AMOUNT} €</b>."
 
 
 async def _paypal_amount_prompt() -> str:
     template = await get_app_setting("content_paypal_text", request_amount_caption())
-    minimum = await _minimum_paypal_notice()
-    return template.replace("{minimum}", minimum) if "{minimum}" in template else template + "\n\n" + minimum
+    return remove_old_placeholder(template, "minimum")
 
 
 async def _reject_stale_request_amount(target, state: FSMContext) -> bool:
@@ -756,11 +752,15 @@ async def paypal_amount_input(message: Message, state: FSMContext) -> None:
         await message.answer("🛑 Сейчас STOP WORK. Создание новых заявок остановлено.", reply_markup=back_home())
         return
     raw = (message.text or "").strip().replace("€", "").replace(" ", "")
-    if not raw.isascii() or not raw.isdigit():
+    digits = raw[1:] if raw.startswith("-") else raw
+    if not digits.isascii() or not digits.isdigit():
         await message.answer(
-            "Введите сумму целым числом, например: <code>75</code>.\n" + await _minimum_paypal_notice(),
+            "Введите сумму целым числом, например: <code>75</code>.",
             reply_markup=request_cancel_menu(),
         )
+        return
+    if raw.startswith("-"):
+        await message.answer(await _minimum_paypal_notice(), reply_markup=request_cancel_menu())
         return
     raw = raw.lstrip("0") or "0"
     if len(raw) > 6:
@@ -1932,9 +1932,8 @@ async def content_menu_handler(callback: CallbackQuery, state: FSMContext) -> No
         "📣 <b>КОНТЕНТ И РАССЫЛКИ</b>\n\n"
         "Здесь можно создавать рассылки, менять основные тексты и картинку главного экрана без обновления кода.\n\n"
         "В приветствии доступны <code>{status}</code>, <code>{working}</code>, "
-        "<code>{held}</code>, <code>{available}</code>, <code>{rates}</code> — "
-        "статус, число PayPal в работе, ожидание, доступный баланс и тарифы.\n"
-        "На экране запроса <code>{minimum}</code> показывает минимум и текущий процент."
+        "<code>{held}</code>, <code>{available}</code> — "
+        "статус, число PayPal в работе, ожидание и доступный баланс."
     )
     await replace_photo_with_text(callback, text, content_menu(bool(home_image)))
     await callback.answer()
