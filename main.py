@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from contextlib import suppress
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -9,11 +10,14 @@ from aiogram.types import BotCommand, BotCommandScopeChat
 from app.config import settings
 from app.db import init_db
 from app.handlers import router
+from app.autopost_handlers import router as auto_post_router
+from app.autoposts import seed_auto_posts, auto_post_loop
 
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     await init_db()
+    await seed_auto_posts()
 
     bot = Bot(
         token=settings.bot_token,
@@ -44,7 +48,15 @@ async def main() -> None:
 
     dp = Dispatcher()
     dp.include_router(router)
-    await dp.start_polling(bot)
+    dp.include_router(auto_post_router)
+    worker = asyncio.create_task(auto_post_loop(bot), name="daily-auto-posts")
+    try:
+        await dp.start_polling(bot, close_bot_session=False)
+    finally:
+        worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker
+        await bot.session.close()
 
 
 if __name__ == "__main__":

@@ -183,6 +183,7 @@ def admin_main_menu(
             InlineKeyboardButton(text=work_label, callback_data="work_control"),
         ],
         [InlineKeyboardButton(text="🔥 HAPPY HOURS", callback_data="happy_hours_menu")],
+        [InlineKeyboardButton(text="📅 АВТОПОСТЫ", callback_data="ap:list:0")],
         [InlineKeyboardButton(text="🔍 ОБЩИЙ ПОИСК", callback_data="global_search")],
         [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="admin_home")],
     ])
@@ -1366,6 +1367,7 @@ def work_control_menu(
         [InlineKeyboardButton(text=status, callback_data="work_control")],
         [action],
         [auto_action],
+        [InlineKeyboardButton(text="📅 Автопосты", callback_data="ap:list:0")],
         [InlineKeyboardButton(text="✏️ Текст Start Work", callback_data="work_edit:start")],
         [InlineKeyboardButton(text="🖼 Картинка Start Work", callback_data="work_image:start")],
         [InlineKeyboardButton(text="✏️ Текст Stop Work", callback_data="work_edit:stop")],

@@ -216,6 +216,39 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class AutoPost(Base):
+    __tablename__ = "auto_posts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    creation_key: Mapped[str] = mapped_column(String(64), unique=True)
+    name: Mapped[str] = mapped_column(String(80))
+    body: Mapped[str] = mapped_column(String(4096))
+    photo: Mapped[str] = mapped_column(String(512), default="")
+    minute: Mapped[int] = mapped_column(Integer, index=True)
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    schedule_changed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AutoPostRun(Base):
+    __tablename__ = "auto_post_runs"
+
+    # A durable daily claim precedes any Telegram call, including across processes.
+    post_id: Mapped[int] = mapped_column(Integer, ForeignKey("auto_posts.id"), primary_key=True)
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(20))
+    reason: Mapped[str] = mapped_column(String(120), default="")
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    sent: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
@@ -2893,7 +2926,15 @@ async def is_work_enabled() -> bool:
 
 
 async def set_work_enabled(enabled: bool) -> None:
-    await set_app_setting("work_enabled", "1" if enabled else "0")
+    # Repeated START/STOP must not look like a new work session to the scheduler.
+    async with SessionLocal() as session:
+        row = await session.get(AppSetting, "work_enabled", with_for_update=True)
+        value = "1" if enabled else "0"
+        if row is None:
+            session.add(AppSetting(key="work_enabled", value=value, updated_at=datetime.utcnow()))
+        elif row.value != value:
+            row.value, row.updated_at = value, datetime.utcnow()
+        await session.commit()
 
 
 async def is_auto_issue_enabled() -> bool:
