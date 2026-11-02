@@ -214,6 +214,7 @@ def paypal_payments_hub_menu(
         ],
         [InlineKeyboardButton(text=f"⏳ Ждём 24 часа ({payment_counts.get('withdraw_wait', 0)}) · 🔄 {payment_counts.get('retry_ready', 0)}", callback_data="payments_list:withdraw_wait:0")],
         [InlineKeyboardButton(text=f"💰 Готовы к выплате ({payment_counts.get('ready', 0)})", callback_data="payments_list:ready:0")],
+        [InlineKeyboardButton(text=f"⏳ На выдержке ({database_counts.get('warming', 0)})", callback_data="paypal_db_list:warming:0")],
         [
             InlineKeyboardButton(
                 text=f"🟢 Свободные ({database_counts.get('available', 0)})",
@@ -961,10 +962,20 @@ def paypal_add_cancel_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="❌ Отмена", callback_data="paypal_add_cancel")],
     ])
 
+
+def paypal_add_timing_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Сразу в работу", callback_data="paypal_add_timing:0")],
+        [InlineKeyboardButton(text="⏳ Через 24 часа", callback_data="paypal_add_timing:24")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="paypal_add_cancel")],
+    ])
+
+
 def paypal_database_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить PayPal", callback_data="paypal_add_single"), InlineKeyboardButton(text="📥 Массовое добавление", callback_data="paypal_add_bulk")],
         [InlineKeyboardButton(text=f"🟢 Свободные ({counts.get('available', 0)})", callback_data="paypal_db_list:available:0")],
+        [InlineKeyboardButton(text=f"⏳ На выдержке ({counts.get('warming', 0)})", callback_data="paypal_db_list:warming:0")],
         [InlineKeyboardButton(text=f"👤 В работе ({counts.get('issued', 0)})", callback_data="working_dates")],
         [InlineKeyboardButton(text=f"↩️ Возвраты ({counts.get('return_pending', 0)})", callback_data="returns_menu")],
         [InlineKeyboardButton(text=f"🚫 Gestop ({counts.get('gestoppt', 0)})", callback_data="paypal_db_list:gestoppt:0")],
@@ -1102,7 +1113,9 @@ def paypal_card_admin_menu(
         [InlineKeyboardButton(text="🚫 Пометить Gestop", callback_data=f"paypal_mark_gestoppt:{tag_id}:{filter_name}")],
         [InlineKeyboardButton(text="🟢 Сделать свободным", callback_data=f"paypal_mark_available:{tag_id}:{filter_name}")],
     ]
-    if status == "available":
+    if status == "warming":
+        rows = [rows[0]]
+    if status in {"available", "warming"}:
         rows.append([InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"paypal_delete_ask:{tag_id}:{filter_name}")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"paypal_db_list:{filter_name}:0")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

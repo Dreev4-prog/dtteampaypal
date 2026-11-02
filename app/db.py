@@ -71,6 +71,8 @@ class PaypalTag(Base):
     gestop_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
     gestop_date_source: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     had_gestop: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    available_from: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    stock_announced_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class Request(Base):
@@ -257,6 +259,7 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _migrate_paypal_warmup(conn)
 
         # create_all не добавляет новые столбцы в уже существующие таблицы.
         # Поэтому обновляем таблицу users безопасными ALTER TABLE.
@@ -768,20 +771,101 @@ async def set_user_access_status(user_id: int, status: str, admin_id: int) -> Us
         return user
 
 
-async def add_paypal_tag(tag: str, photo_file_id: str | None = None, gender: str = "male") -> tuple[PaypalTag | None, bool]:
+def paypal_stock_now() -> datetime:
+    return datetime.utcnow()
+
+
+async def _migrate_paypal_warmup(conn) -> None:
+    # Existing stock stays immediately available: no backfill or deadline reset.
+    if conn.dialect.name == "sqlite":
+        columns = {row[1] for row in (await conn.execute(text("PRAGMA table_info(paypal_tags)"))).all()}
+        for column in ("available_from", "stock_announced_at"):
+            if column not in columns:
+                await conn.execute(text(f"ALTER TABLE paypal_tags ADD COLUMN {column} TIMESTAMP"))
+    else:
+        for column in ("available_from", "stock_announced_at"):
+            await conn.execute(text(f"ALTER TABLE paypal_tags ADD COLUMN IF NOT EXISTS {column} TIMESTAMP"))
+    await conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_paypal_tags_available_from ON paypal_tags (available_from)"
+    ))
+
+
+def paypal_is_warming(tag: PaypalTag) -> bool:
+    return tag.available_from is not None and tag.available_from > paypal_stock_now()
+
+
+def _paypal_available_condition(now: datetime | None = None):
+    return and_(
+        PaypalTag.status == "available",
+        or_(PaypalTag.available_from.is_(None), PaypalTag.available_from <= (now or paypal_stock_now())),
+    )
+
+
+def _paypal_warming_condition(now: datetime | None = None):
+    return and_(PaypalTag.status == "available", PaypalTag.available_from > (now or paypal_stock_now()))
+
+
+def _paypal_stock_condition(status: str, now: datetime | None = None):
+    if status == "available":
+        return _paypal_available_condition(now)
+    if status == "warming":
+        return _paypal_warming_condition(now)
+    return PaypalTag.status == status
+
+
+def _paypal_availability_deadline(delay_hours: int) -> datetime | None:
+    if type(delay_hours) is not int or delay_hours not in (0, 24):
+        raise ValueError("PayPal delay must be 0 or 24 hours")
+    return paypal_stock_now() + timedelta(hours=24) if delay_hours else None
+
+
+async def claim_matured_paypal_stock() -> set[str]:
+    """Claim replenishment notifications once; availability itself needs no worker."""
+    async with SessionLocal() as session:
+        async with session.begin():
+            now = paypal_stock_now()
+            tags = list(await session.scalars(
+                select(PaypalTag).where(
+                    _paypal_available_condition(now),
+                    PaypalTag.available_from.is_not(None),
+                    PaypalTag.stock_announced_at.is_(None),
+                ).order_by(PaypalTag.id).with_for_update(skip_locked=True).limit(1000)
+            ))
+            for tag in tags:
+                tag.stock_announced_at = now
+            return {tag.gender for tag in tags if tag.gender in {"male", "female"}}
+
+
+async def get_warming_paypal_page(offset: int = 0, limit: int = 15) -> dict:
+    size = max(1, min(int(limit), 15))
+    condition = _paypal_warming_condition()
+    async with SessionLocal() as session:
+        total = int(await session.scalar(select(func.count(PaypalTag.id)).where(condition)) or 0)
+        offset = min(max(0, int(offset)), max(0, ((total - 1) // size) * size))
+        rows = list(await session.scalars(select(PaypalTag).where(condition)
+            .order_by(PaypalTag.available_from, PaypalTag.id).offset(offset).limit(size)))
+        return {"rows": rows, "total": total, "offset": offset, "page_size": size,
+                "has_next": offset + size < total}
+
+
+async def add_paypal_tag(tag: str, photo_file_id: str | None = None, gender: str = "male", *, delay_hours: int = 0) -> tuple[PaypalTag | None, bool]:
     """Добавляет один PayPal. Возвращает (объект, был_дубликат)."""
+    available_from = _paypal_availability_deadline(delay_hours)
     async with SessionLocal() as session:
         exists = await session.scalar(select(PaypalTag).where(PaypalTag.tag == tag))
         if exists:
             return exists, True
-        item = PaypalTag(tag=tag, photo_file_id=photo_file_id, gender=gender)
+        item = PaypalTag(tag=tag, photo_file_id=photo_file_id, gender=gender, available_from=available_from)
+        if available_from is not None:
+            item.created_at = available_from - timedelta(hours=24)
         session.add(item)
         await session.commit()
         await session.refresh(item)
         return item, False
 
 
-async def add_paypal_tags(tags: list[str], gender: str = "male") -> tuple[int, int]:
+async def add_paypal_tags(tags: list[str], gender: str = "male", *, delay_hours: int = 0) -> tuple[int, int]:
+    available_from = _paypal_availability_deadline(delay_hours)
     added = 0
     duplicates = 0
     async with SessionLocal() as session:
@@ -790,7 +874,10 @@ async def add_paypal_tags(tags: list[str], gender: str = "male") -> tuple[int, i
             if exists:
                 duplicates += 1
                 continue
-            session.add(PaypalTag(tag=tag, gender=gender))
+            item = PaypalTag(tag=tag, gender=gender, available_from=available_from)
+            if available_from is not None:
+                item.created_at = available_from - timedelta(hours=24)
+            session.add(item)
             added += 1
         await session.commit()
     return added, duplicates
@@ -992,7 +1079,7 @@ async def issue_paypal(request_id: int) -> tuple[Request | None, PaypalTag | Non
             tag = await session.scalar(
                 select(PaypalTag)
                 .where(
-                    PaypalTag.status == "available",
+                    _paypal_available_condition(),
                     PaypalTag.gender == req.paypal_gender,
                     ~refused_by_user,
                 )
@@ -1195,7 +1282,7 @@ async def get_requestable_paypal_gender_counts(
         free_stmt = select(
             PaypalTag.gender,
             func.count(PaypalTag.id),
-        ).where(PaypalTag.status == "available")
+        ).where(_paypal_available_condition())
 
         if user_id is not None:
             refused_by_user = (
@@ -1336,8 +1423,7 @@ async def get_paypal_stock_waitlist_counts() -> dict[str, int]:
 
 async def count_available_tags() -> int:
     async with SessionLocal() as session:
-        rows = await session.scalars(select(PaypalTag).where(PaypalTag.status == "available"))
-        return len(list(rows))
+        return int(await session.scalar(select(func.count(PaypalTag.id)).where(_paypal_available_condition())) or 0)
 
 
 async def get_user_counts() -> dict[str, int]:
@@ -2201,18 +2287,20 @@ async def resolve_paypal_return(return_id: int, action: str, admin_id: int, admi
 
 
 async def get_paypal_database_counts() -> dict[str, int]:
+    now = paypal_stock_now()
     async with SessionLocal() as session:
         result = {
             key: int(
                 await session.scalar(
                     select(func.count())
                     .select_from(PaypalTag)
-                    .where(PaypalTag.status == key)
+                    .where(_paypal_stock_condition(key, now))
                 )
                 or 0
             )
             for key in (
                 "available",
+                "warming",
                 "return_pending",
                 "gestoppt",
                 "gs",
@@ -2253,7 +2341,7 @@ async def get_paypal_gender_counts(status: str = "available") -> dict[str, int]:
         rows = (
             await session.execute(
                 select(PaypalTag.gender, func.count(PaypalTag.id))
-                .where(PaypalTag.status == status)
+                .where(_paypal_stock_condition(status))
                 .group_by(PaypalTag.gender)
             )
         ).all()
@@ -2287,7 +2375,7 @@ async def list_paypal_tags(filter_name: str = "all", limit: int = 50) -> list[Pa
             query = query.where(PaypalTag.status != "deleted")
         else:
             query = query.where(
-                PaypalTag.status == filter_name,
+                _paypal_stock_condition(filter_name),
                 PaypalTag.status != "deleted",
             )
         return list(await session.scalars(query.limit(limit)))
@@ -2419,6 +2507,8 @@ async def restore_deleted_paypal_to_work(
             return None, None, "not_found"
         if tag.status != "deleted":
             return None, None, "not_deleted"
+        if paypal_is_warming(tag):
+            return None, tag, "warming"
 
         source_query = select(Request).where(
             Request.paypal_tag_id == tag_id,
@@ -3051,7 +3141,7 @@ async def get_dashboard_summary() -> dict:
             return (await session.scalar(stmt)) or 0
         today_start, today_end = _moscow_day_utc_bounds(_moscow_today())
         return {
-            "available": await scalar(select(func.count(PaypalTag.id)).where(PaypalTag.status == "available")),
+            "available": await scalar(select(func.count(PaypalTag.id)).where(_paypal_available_condition())),
             "working": await scalar(select(func.count(Request.id)).where(Request.status == "paypal_issued")),
             "waiting_check": await scalar(select(func.count(Request.id)).where(Request.status == "waiting_check")),
             "withdrawal_pending": await scalar(select(func.count(Request.id)).where(Request.status == "withdrawal_pending")),

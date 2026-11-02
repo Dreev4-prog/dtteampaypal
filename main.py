@@ -9,9 +9,10 @@ from aiogram.types import BotCommand, BotCommandScopeChat
 
 from app.config import settings
 from app.db import init_db
-from app.handlers import router
+from app.handlers import router, _notify_stock_after_replenishment
 from app.autopost_handlers import router as auto_post_router
 from app.autoposts import seed_auto_posts, auto_post_loop
+from app.stock_warmup import stock_warmup_loop
 
 
 async def main() -> None:
@@ -50,12 +51,18 @@ async def main() -> None:
     dp.include_router(router)
     dp.include_router(auto_post_router)
     worker = asyncio.create_task(auto_post_loop(bot), name="daily-auto-posts")
+    stock_worker = asyncio.create_task(
+        stock_warmup_loop(bot, _notify_stock_after_replenishment), name="paypal-stock-warmup"
+    )
     try:
         await dp.start_polling(bot, close_bot_session=False)
     finally:
         worker.cancel()
+        stock_worker.cancel()
         with suppress(asyncio.CancelledError):
             await worker
+        with suppress(asyncio.CancelledError):
+            await stock_worker
         await bot.session.close()
 
 

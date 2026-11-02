@@ -29,6 +29,8 @@ from app.ui import admin_dashboard_caption, request_amount_caption, support_capt
 from app.db import (
     add_paypal_tag,
     add_paypal_tags,
+    paypal_is_warming,
+    get_warming_paypal_page,
     count_available_tags,
     get_requestable_paypal_gender_counts,
     subscribe_paypal_stock_waitlist,
@@ -157,6 +159,7 @@ from app.keyboards import (
     working_delete_day_confirm_menu, working_search_results_menu,
     working_search_cancel_menu, work_control_menu, work_edit_cancel_menu, work_image_edit_menu,
     paypal_add_photo_menu, paypal_add_confirm_menu, paypal_add_cancel_menu, gender_choice_menu,
+    paypal_add_timing_menu,
     request_gender_choice_menu, paypal_stock_empty_menu, paypal_stock_missing_menu,
     paypal_stock_available_menu,
     broadcast_photo_menu, broadcast_confirm_menu, gs_photo_menu,
@@ -257,6 +260,7 @@ class ContentForm(StatesGroup):
 
 
 class PaypalAddForm(StatesGroup):
+    timing = State()
     gender = State()
     tag = State()
     photo = State()
@@ -3091,9 +3095,10 @@ async def show_paypal_add_preview(message: Message, state: FSMContext) -> None:
     photo_file_id = data.get("paypal_add_photo")
     caption = (
         "<b>Проверьте данные</b>\n\n"
-        f"💳 <code>{tag}</code>\n"
+        f"💳 <code>{escape(tag)}</code>\n"
         f"🚻 Тип: <b>{'Мужской' if data.get('paypal_add_gender') == 'male' else 'Женский'}</b>\n"
-        f"🖼 Фото: <b>{'Есть' if photo_file_id else 'Нет'}</b>"
+        f"🖼 Фото: <b>{'Есть' if photo_file_id else 'Нет'}</b>\n"
+        f"⏱ Выдача: <b>{'через 24 часа после сохранения' if data.get('paypal_add_delay_hours') == 24 else 'сразу после сохранения'}</b>"
     )
     if photo_file_id:
         await message.answer_photo(photo_file_id, caption=caption, reply_markup=paypal_add_confirm_menu())
@@ -3107,13 +3112,37 @@ async def paypal_add_single_start(callback: CallbackQuery, state: FSMContext) ->
         await callback.answer("Нет доступа", show_alert=True)
         return
     await state.clear()
-    await state.set_state(PaypalAddForm.gender)
-    await callback.message.answer("🚻 <b>Выберите тип добавляемого PayPal</b>", reply_markup=gender_choice_menu("paypal_add_gender"))
+    await state.set_state(PaypalAddForm.timing)
+    await callback.message.answer("⏱ <b>Когда PayPal можно выдавать работникам?</b>", reply_markup=paypal_add_timing_menu())
     await callback.answer()
+
+
+@router.callback_query(PaypalAddForm.timing, F.data.startswith("paypal_add_timing:"))
+async def paypal_add_timing_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    value = callback.data.split(":", 1)[1]
+    if value not in {"0", "24"}:
+        await callback.answer("Выберите один из двух вариантов", show_alert=True)
+        return
+    data = await state.get_data()
+    await state.update_data(paypal_add_delay_hours=int(value))
+    await state.set_state(PaypalAddForm.gender)
+    prefix = "paypal_bulk_gender" if data.get("paypal_add_bulk_mode") else "paypal_add_gender"
+    timing = "Через 24 часа после сохранения" if value == "24" else "Сразу после сохранения"
+    await callback.answer()
+    await callback.message.answer(
+        f"⏱ <b>{timing}</b>\n\n🚻 Выберите тип PayPal:",
+        reply_markup=gender_choice_menu(prefix),
+    )
 
 
 @router.callback_query(PaypalAddForm.gender, F.data.startswith("paypal_add_gender:"))
 async def paypal_add_gender_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
     await state.update_data(paypal_add_gender=callback.data.split(":", 1)[1])
     await state.set_state(PaypalAddForm.tag)
     await callback.message.answer(
@@ -3179,13 +3208,16 @@ async def paypal_add_save(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Данные устарели. Начните заново.", show_alert=True)
         return
     add_gender = data.get("paypal_add_gender", "male")
+    delay_hours = data.get("paypal_add_delay_hours", 0)
     item, duplicate = await add_paypal_tag(
         tag,
         data.get("paypal_add_photo"),
         add_gender,
+        delay_hours=delay_hours,
     )
+    await callback.answer("Дубликат" if duplicate else "Сохранено")
     notified = 0
-    if not duplicate:
+    if not duplicate and delay_hours == 0:
         notified = await _notify_stock_after_replenishment(
             callback.bot,
             add_gender,
@@ -3196,21 +3228,25 @@ async def paypal_add_save(callback: CallbackQuery, state: FSMContext) -> None:
     hub_keyboard = paypal_payments_hub_menu(payment_counts, database_counts)
     if duplicate:
         await callback.message.answer(
-            f"⚠️ PayPal <code>{tag}</code> уже есть в базе.",
+            f"⚠️ PayPal <code>{escape(tag)}</code> уже есть в базе.",
             reply_markup=hub_keyboard,
         )
-        await callback.answer("Дубликат", show_alert=True)
         return
     stock_now = await get_requestable_paypal_gender_counts()
-    await callback.message.answer(
-        f"✅ PayPal <code>{tag}</code> сохранён и добавлен в свободную базу.\n\n"
+    result = (
+        f"⏳ PayPal <code>{escape(tag)}</code> сохранён на выдержку.\n"
+        f"Доступен работникам с <b>{format_dt(item.available_from)}</b>.\n\n"
+        if delay_hours == 24 else
+        f"✅ PayPal <code>{escape(tag)}</code> сохранён и добавлен в свободную базу.\n\n"
         f"🔔 Уведомлено ожидающих: <b>{notified}</b>\n"
+    )
+    await callback.message.answer(
+        result +
         f"📲 Доступно для новых заявок:\n"
         f"👨 Мужские: <b>{stock_now['male']}</b>\n"
         f"👩 Женские: <b>{stock_now['female']}</b>",
         reply_markup=hub_keyboard,
     )
-    await callback.answer("Сохранено")
 
 
 @router.callback_query(F.data == "paypal_add_restart")
@@ -3218,7 +3254,10 @@ async def paypal_add_restart(callback: CallbackQuery, state: FSMContext) -> None
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+    data = await state.get_data()
     await state.clear()
+    await state.update_data(paypal_add_delay_hours=data.get("paypal_add_delay_hours", 0),
+                            paypal_add_gender=data.get("paypal_add_gender", "male"))
     await state.set_state(PaypalAddForm.tag)
     await callback.message.answer("Введите PayPal заново:", reply_markup=paypal_add_cancel_menu())
     await callback.answer()
@@ -3245,18 +3284,23 @@ async def paypal_add_bulk_start(callback: CallbackQuery, state: FSMContext) -> N
         await callback.answer("Нет доступа", show_alert=True)
         return
     await state.clear()
-    await state.set_state(PaypalAddForm.gender)
+    await state.set_state(PaypalAddForm.timing)
     await state.update_data(paypal_add_bulk_mode=True)
-    await callback.message.answer("🚻 <b>Выберите тип для всего списка</b>", reply_markup=gender_choice_menu("paypal_bulk_gender"))
+    await callback.message.answer("⏱ <b>Когда можно выдавать PayPal из этого списка?</b>", reply_markup=paypal_add_timing_menu())
     await callback.answer()
 
 
 @router.callback_query(PaypalAddForm.gender, F.data.startswith("paypal_bulk_gender:"))
 async def paypal_bulk_gender_choice(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
     await state.update_data(paypal_add_gender=callback.data.split(":", 1)[1])
     await state.set_state(PaypalAddForm.bulk)
     await callback.message.answer(
-        "📥 <b>Массовое добавление</b>\n\nОтправьте PayPal-теги списком — каждый с новой строки или через пробел.\nФотографии при массовом добавлении не прикрепляются.",
+        "📥 <b>Массовое добавление</b>\n\n"
+        + ("⏳ Выдача через 24 часа после добавления.\n\n" if (await state.get_data()).get("paypal_add_delay_hours") == 24 else "🟢 Выдача сразу после добавления.\n\n")
+        + "Отправьте PayPal-теги списком — каждый с новой строки или через пробел.\nФотографии при массовом добавлении не прикрепляются.",
         reply_markup=paypal_add_cancel_menu(),
     )
     await callback.answer()
@@ -3285,12 +3329,14 @@ async def paypal_add_bulk_input(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     add_gender = data.get("paypal_add_gender", "male")
+    delay_hours = data.get("paypal_add_delay_hours", 0)
     added, duplicates = await add_paypal_tags(
         tags,
         add_gender,
+        delay_hours=delay_hours,
     )
     notified = 0
-    if added > 0:
+    if added > 0 and delay_hours == 0:
         notified = await _notify_stock_after_replenishment(
             message.bot,
             add_gender,
@@ -3302,7 +3348,9 @@ async def paypal_add_bulk_input(message: Message, state: FSMContext) -> None:
         f"Добавлено: <b>{added}</b>\n"
         f"Уже были в базе: <b>{duplicates}</b>\n"
         f"Некорректных: <b>{invalid}</b>\n\n"
-        f"🔔 Уведомлено ожидающих: <b>{notified}</b>\n"
+        + ("⏳ Новые PayPal доступны работникам через 24 часа после добавления.\n"
+           "Время готовности — в разделе «На выдержке».\n\n" if delay_hours == 24
+           else f"🔔 Уведомлено ожидающих: <b>{notified}</b>\n") +
         f"📲 Доступно для новых заявок:\n"
         f"👨 Мужские: <b>{stock_now['male']}</b>\n"
         f"👩 Женские: <b>{stock_now['female']}</b>",
@@ -5565,6 +5613,14 @@ async def paypal_database_handler(callback: CallbackQuery) -> None:
 async def paypal_db_list_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id): return
     filter_name = callback.data.split(":")[1]
+    if filter_name == "warming":
+        try:
+            offset = max(0, int(callback.data.split(":")[2]))
+        except (ValueError, IndexError):
+            offset = 0
+        await callback.answer()
+        await _show_warming_paypals(callback, offset)
+        return
     if filter_name == "gestoppt":
         await callback.answer()
         await _show_gestop_dates(callback)
@@ -5609,6 +5665,32 @@ async def paypal_db_list_handler(callback: CallbackQuery) -> None:
         caption += "\n\nОткройте PayPal, чтобы восстановить его в активную свободную базу."
     await callback.answer()
     await render_screen(callback, "paypal", caption, paypal_list_menu(tags, filter_name))
+
+
+async def _show_warming_paypals(callback: CallbackQuery, offset: int = 0) -> None:
+    data = await get_warming_paypal_page(offset)
+    rows = [[InlineKeyboardButton(
+        text=f"{tag.tag} · {format_dt(tag.available_from)}",
+        callback_data=f"paypal_card:{tag.id}:warming",
+    )] for tag in data["rows"]]
+    navigation = []
+    if data["offset"]:
+        navigation.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"paypal_db_list:warming:{max(0, data['offset'] - data['page_size'])}"))
+    if data["has_next"]:
+        navigation.append(InlineKeyboardButton(text="Далее ➡️", callback_data=f"paypal_db_list:warming:{data['offset'] + data['page_size']}"))
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"paypal_db_list:warming:{data['offset']}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Работа с PayPal", callback_data="paypal_payments_hub")])
+    first = data["offset"] + 1 if data["total"] else 0
+    last = data["offset"] + len(data["rows"])
+    await render_screen(callback, "paypal",
+        "<b>⏳ PayPal на выдержке</b>\n\n"
+        f"Всего: <b>{data['total']}</b> · Показаны {first}–{last}.\n\n"
+        "На кнопках — время готовности по Москве. Сначала ближайшие.\n"
+        "Через 24 часа после добавления PayPal автоматически станет свободным. "
+        "До этого он недоступен для выдачи работникам.",
+        InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 def _gestop_date_label(tag) -> str:
@@ -5799,14 +5881,18 @@ async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
         if tag.gender == "female"
         else "❓ Не указан"
     )
+    warming = paypal_is_warming(tag)
+    display_status = "⏳ На выдержке" if tag.status == "available" and warming else tag.status
     text = (
         f"<b>💳 {escape(tag.tag)}</b>\n\n"
-        f"Статус: <b>{tag.status}</b>\n"
+        f"Статус: <b>{display_status}</b>\n"
         f"🚻 Пол: <b>{gender_label}</b>\n"
         f"Пользователь ID: <code>{tag.issued_to_user_id or '—'}</code>\n"
         f"Выдан: {format_dt(tag.issued_at)}\n"
         f"Добавлен: {format_dt(tag.created_at)}"
     )
+    if tag.available_from is not None:
+        text += f"\n⏱ Доступен для выдачи с: <b>{format_dt(tag.available_from)}</b>"
     if tag.had_gestop:
         text += "\n♻️ <b>GeS</b> · PayPal ранее был в Gestop"
     if tag.status == "gestoppt":
@@ -5836,7 +5922,7 @@ async def paypal_card_admin_handler(callback: CallbackQuery) -> None:
     card_markup = paypal_card_admin_menu(
         tag.id,
         filter_name,
-        tag.status,
+        "warming" if tag.status == "available" and warming else tag.status,
         restore_working_count=len(deleted_working_requests),
     )
     await callback.answer()
@@ -5928,13 +6014,16 @@ async def paypal_gender_set_handler(callback: CallbackQuery) -> None:
     gender_label = "👨 Мужской" if tag.gender == "male" else "👩 Женский"
     text = (
         "✅ <b>Пол PayPal изменён</b>\n\n"
-        f"PayPal: <code>{tag.tag}</code>\n"
+        f"PayPal: <code>{escape(tag.tag)}</code>\n"
         f"Новый тип: <b>{gender_label}</b>"
     )
+    warming = paypal_is_warming(tag)
+    if warming:
+        text += f"\n⏳ На выдержке до {format_dt(tag.available_from)}."
     markup = paypal_card_admin_menu(
         tag.id,
         filter_name,
-        tag.status,
+        "warming" if warming else tag.status,
     )
     if callback.message.photo:
         await callback.message.edit_caption(
@@ -5958,11 +6047,11 @@ async def paypal_delete_ask_handler(callback: CallbackQuery) -> None:
         await callback.answer("PayPal не найден", show_alert=True); return
     if tag.status != "available":
         await callback.answer("Удалить можно только свободный PayPal", show_alert=True); return
-    await callback.message.edit_caption(
-        caption=f"<b>🗑 Удалить PayPal?</b>\n\n<code>{tag.tag}</code>\n\nPayPal будет перемещён в корзину и перестанет выдаваться. Его можно восстановить позже.",
+    await callback.answer()
+    await render_screen(callback, "paypal",
+        caption=f"<b>🗑 Удалить PayPal?</b>\n\n<code>{escape(tag.tag)}</code>\n\nPayPal будет перемещён в корзину и перестанет выдаваться. Его можно восстановить позже.",
         reply_markup=paypal_delete_confirm_menu(tag.id, filter_name),
     )
-    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("paypal_delete_confirm:"))
@@ -5973,12 +6062,15 @@ async def paypal_delete_confirm_handler(callback: CallbackQuery) -> None:
     if not ok:
         message = "Удалить можно только свободный PayPal" if reason == "not_available" else "PayPal уже удалён или не найден"
         await callback.answer(message, show_alert=True); return
+    await callback.answer("PayPal перемещён в корзину")
+    if filter_name == "warming":
+        await _show_warming_paypals(callback)
+        return
     tags = await list_paypal_tags(filter_name)
-    await callback.message.edit_caption(
+    await render_screen(callback, "paypal",
         caption=f"<b>💳 PayPal: {filter_name}</b>\n\nНайдено: <b>{len(tags)}</b>",
         reply_markup=paypal_list_menu(tags, filter_name),
     )
-    await callback.answer("PayPal перемещён в корзину")
 
 
 @router.callback_query(F.data.startswith("paypal_restore_working_users:"))
@@ -6085,6 +6177,7 @@ async def paypal_restore_working_confirm_handler(callback: CallbackQuery) -> Non
             "not_found": "PayPal не найден",
             "not_deleted": "PayPal уже восстановлен",
             "no_working_request": "Не найдена заявка, из которой PayPal был удалён",
+            "warming": "Выдержка 24 часа ещё не закончилась. Выдача пока недоступна.",
         }
         await callback.answer(
             messages.get(reason, "Не удалось восстановить PayPal"),
@@ -6146,8 +6239,8 @@ async def paypal_restore_ask_handler(callback: CallbackQuery) -> None:
         caption=(
             "<b>♻️ Восстановить PayPal?</b>\n\n"
             f"PayPal: <code>{escape(tag.tag)}</code>\n\n"
-            "После восстановления он попадёт в свободную активную базу "
-            "и снова сможет выдаваться пользователям."
+            + (f"После восстановления он останется на выдержке до {format_dt(tag.available_from)}."
+               if paypal_is_warming(tag) else "После восстановления он попадёт в свободную активную базу и снова сможет выдаваться пользователям.")
         ),
         reply_markup=paypal_restore_confirm_menu(tag.id),
     )
@@ -6177,7 +6270,9 @@ async def paypal_restore_confirm_handler(callback: CallbackQuery) -> None:
         callback, "paypal",
         caption=(
             "<b>✅ PayPal восстановлен</b>\n\n"
-            f"<code>{escape(tag.tag)}</code> добавлен в свободную активную базу.\n\n"
+            f"<code>{escape(tag.tag)}</code>\n"
+            + (f"⏳ На выдержке до {format_dt(tag.available_from)}.\n\n"
+               if paypal_is_warming(tag) else "Добавлен в свободную активную базу.\n\n") +
             f"В корзине осталось: <b>{counts['deleted']}</b>"
         ),
         reply_markup=paypal_list_menu(deleted_tags, "deleted"),
@@ -6196,6 +6291,10 @@ async def paypal_mark_status_handler(callback: CallbackQuery) -> None:
     if filter_name == "gestoppt":
         await callback.answer("Статус обновлён" if tag else "Статус PayPal уже изменился")
         await _show_gestop_dates(callback)
+        return
+    if filter_name == "warming":
+        await callback.answer("Статус обновлён. Срок выдержки сохранён.")
+        await _show_warming_paypals(callback)
         return
     tags = await list_paypal_tags(filter_name)
     await callback.message.edit_caption(caption=f"<b>💳 PayPal: {filter_name}</b>\n\nНайдено: <b>{len(tags)}</b>", reply_markup=paypal_list_menu(tags, filter_name))
