@@ -1867,18 +1867,23 @@ async def support(callback: CallbackQuery) -> None:
 
 async def replace_photo_with_text(callback: CallbackQuery, text: str, reply_markup=None) -> None:
     """Show a text admin screen even when the current screen is a photo message."""
-    if callback.message.photo:
+    if not callback.message.photo:
         try:
-            await callback.message.delete()
-        except TelegramBadRequest:
-            pass
-        await callback.bot.send_message(
-            callback.message.chat.id,
-            text,
-            reply_markup=reply_markup,
-        )
-    else:
-        await callback.message.edit_text(text, reply_markup=reply_markup)
+            await callback.message.edit_text(text, reply_markup=reply_markup)
+            return
+        except TelegramBadRequest as exc:
+            if "message is not modified" in exc.message.lower():
+                return
+    # Keep the previous screen available until Telegram accepts the replacement.
+    await callback.bot.send_message(
+        callback.message.chat.id,
+        text,
+        reply_markup=reply_markup,
+    )
+    try:
+        await callback.message.delete()
+    except TelegramBadRequest:
+        pass
 
 
 async def show_admin_home(target: Message | CallbackQuery) -> None:
@@ -4108,7 +4113,6 @@ async def finish_user_paid(callback_or_message, request_id: int, user_id: int):
     user = await get_user(user_id)
     tag = await get_paypal_tag(req.paypal_tag_id) if req.paypal_tag_id else None
     username = f"@{user.username}" if user and user.username else "без username"
-    profile = f'<a href="tg://user?id={user_id}">Открыть профиль</a>'
     happy_line = (
         f"\n🔥 Happy Hours зафиксирован: <b>{req.happy_hours_percent}%</b>"
         f"\n🕒 Фиксация: <b>{format_dt(req.happy_hours_locked_at)}</b>"
@@ -4122,7 +4126,6 @@ async def finish_user_paid(callback_or_message, request_id: int, user_id: int):
             admin_id,
             "💰 <b>Пользователь сообщил об оплате</b>\n\n"
             f"👤 Пользователь: {username}\n"
-            f"🔗 {profile}\n"
             f"🆔 ID: <code>{user_id}</code>\n\n"
             f"💳 PayPal: <code>{escape(tag.tag) if tag else 'не найден'}</code>\n"
             f"{_admin_ges_line(req)}"
@@ -6788,7 +6791,6 @@ async def collect_return_confirm_handler(callback: CallbackQuery) -> None:
                 admin_id,
                 "↩️ <b>PayPal передан в возвраты после предупреждения</b>\n\n"
                 f"👤 Пользователь: <b>{username}</b>\n"
-                f'🔗 Профиль: <a href="tg://user?id={req.user_id}">открыть пользователя</a>\n'
                 f"🆔 Telegram ID: <code>{req.user_id}</code>\n"
                 f"💳 PayPal: <code>{tag.tag if tag else '—'}</code>\n"
                 f"💶 Сумма: <b>{req.amount} €</b>\n\n"

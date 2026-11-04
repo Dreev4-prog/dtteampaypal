@@ -317,7 +317,6 @@ def member_card_menu(user_id: int, status: str) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="💬 Сообщение через бота", callback_data=f"user_message_start:{user_id}")])
     rows.append([InlineKeyboardButton(text="💳 PayPal пользователя", callback_data=f"crm_user_paypals:{user_id}")])
     rows.append([InlineKeyboardButton(text="💰 Баланс и выплаты", callback_data=f"payout_user:{user_id}")])
-    rows.append([InlineKeyboardButton(text="👤 Открыть профиль", url=f"tg://user?id={user_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ К участникам", callback_data="members_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -361,7 +360,8 @@ def queue_request_menu(request_id: int, user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="❌ Отказать", callback_data=f"admin_reject:{request_id}"),
         ],
         [InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"queue_block:{request_id}:{user_id}")],
-        [InlineKeyboardButton(text="💬 Написать", url=f"tg://user?id={user_id}")],
+        [InlineKeyboardButton(text="👤 Карточка пользователя", callback_data=f"member_card:{user_id}")],
+        [InlineKeyboardButton(text="💬 Сообщение через бота", callback_data=f"user_message_start:{user_id}")],
         [InlineKeyboardButton(text="⬅️ К очереди", callback_data="paypal_queue:0")],
     ])
 
@@ -544,7 +544,8 @@ def payment_card_menu(
         )])
     elif status == "not_found":
         rows.append([InlineKeyboardButton(text="↩️ Вернуть на проверку", callback_data=f"payment_recheck:{request_id}")])
-    rows.append([InlineKeyboardButton(text="💬 Написать клиенту", url=f"tg://user?id={user_id}")])
+    rows.append([InlineKeyboardButton(text="👤 Карточка пользователя", callback_data=f"member_card:{user_id}")])
+    rows.append([InlineKeyboardButton(text="💬 Сообщение через бота", callback_data=f"user_message_start:{user_id}")])
     rows.append([InlineKeyboardButton(text="🔄 Обновить карточку", callback_data=f"payment_card:{request_id}:{filter_name}:{offset}")])
     rows.append([InlineKeyboardButton(text="⬅️ К списку", callback_data=f"payments_list:{filter_name}:{offset}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -794,7 +795,8 @@ def returns_menu(items: list) -> InlineKeyboardMarkup:
 def return_card_menu(return_id: int, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Проверил PayPal", callback_data=f"return_checked:{return_id}")],
-        [InlineKeyboardButton(text="💬 Написать пользователю", url=f"tg://user?id={user_id}")],
+        [InlineKeyboardButton(text="👤 Карточка пользователя", callback_data=f"member_card:{user_id}")],
+        [InlineKeyboardButton(text="💬 Сообщение через бота", callback_data=f"user_message_start:{user_id}")],
         [InlineKeyboardButton(text="⬅️ К возвратам", callback_data="returns_menu")],
     ])
 
@@ -1284,7 +1286,8 @@ def working_card_menu(
         [InlineKeyboardButton(text="📥 Забрать в возвраты", callback_data=f"working_recall_ask:{request_id}:available:{day}")],
         [InlineKeyboardButton(text="🚫 Gestop", callback_data=f"working_recall_ask:{request_id}:gestoppt:{day}")],
         [InlineKeyboardButton(text="🗑 Удалить PayPal", callback_data=f"working_recall_ask:{request_id}:deleted:{day}")],
-        [InlineKeyboardButton(text="👤 Открыть пользователя", url=f"tg://user?id={user_id}")],
+        [InlineKeyboardButton(text="👤 Карточка пользователя", callback_data=f"member_card:{user_id}")],
+        [InlineKeyboardButton(text="💬 Сообщение через бота", callback_data=f"user_message_start:{user_id}")],
         [InlineKeyboardButton(text="⬅️ К списку за день", callback_data=f"working_day:{day}")],
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1436,7 +1439,6 @@ def global_search_results_menu(results: dict) -> InlineKeyboardMarkup:
 def crm_user_menu(user_id: int, status: str) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="💬 Сообщение через бота", callback_data=f"user_message_start:{user_id}")],
-        [InlineKeyboardButton(text="👤 Открыть профиль", url=f"tg://user?id={user_id}")],
         [InlineKeyboardButton(text="💳 PayPal пользователя", callback_data=f"crm_user_paypals:{user_id}")],
         [InlineKeyboardButton(text="💰 Баланс и выплаты", callback_data=f"payout_user:{user_id}")],
         [
