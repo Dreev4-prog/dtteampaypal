@@ -11,6 +11,7 @@ from app.config import settings
 from app.db import init_db
 from app.handlers import router, _notify_stock_after_replenishment
 from app.autopost_handlers import router as auto_post_router
+from app.user_messages import router as user_message_router
 from app.autoposts import seed_auto_posts, auto_post_loop
 from app.stock_warmup import stock_warmup_loop
 
@@ -37,6 +38,7 @@ async def main() -> None:
     admin_commands = [
         *user_commands,
         BotCommand(command="admin", description="Админ-панель"),
+        BotCommand(command="user", description="Найти пользователя по ID или @username"),
     ]
     for admin_id in settings.admin_ids:
         try:
@@ -49,6 +51,7 @@ async def main() -> None:
 
     dp = Dispatcher()
     dp.include_router(router)
+    dp.include_router(user_message_router)
     dp.include_router(auto_post_router)
     worker = asyncio.create_task(auto_post_loop(bot), name="daily-auto-posts")
     stock_worker = asyncio.create_task(

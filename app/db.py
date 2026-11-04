@@ -12,6 +12,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.config import settings
 from app.rules import MIN_PAYPAL_AMOUNT, valid_paypal_request_amount
+from app.identity import user_id_query, literal_like
 
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -1450,23 +1451,30 @@ async def list_users(status: str = "all", offset: int = 0, limit: int = 10) -> t
 
 
 async def search_users(query_text: str, limit: int = 10) -> list[User]:
-    from sqlalchemy import or_
-
-    value = query_text.strip()
-    if value.startswith("@"):
-        value = value[1:]
+    is_id, user_id = user_id_query(query_text)
+    if is_id:
+        user = await get_user(user_id) if user_id is not None else None
+        return [user] if user else []
+    value = query_text.strip().lstrip("@").strip()
+    if not value:
+        return []
+    pattern = f"%{literal_like(value)}%"
     async with SessionLocal() as session:
-        conditions = [User.username.ilike(f"%{value}%"), User.full_name.ilike(f"%{value}%")]
-        if value.isdigit():
-            conditions.append(User.id == int(value))
+        conditions = [User.username.ilike(pattern, escape="\\"), User.full_name.ilike(pattern, escape="\\")]
         rows = await session.scalars(
-            select(User).where(or_(*conditions)).order_by(User.created_at.desc()).limit(limit)
+            select(User).where(or_(*conditions)).order_by(
+                (func.lower(User.username) == value.lower()).desc().nulls_last(), User.created_at.desc(), User.id.desc()
+            ).limit(limit)
         )
         return list(rows)
 
 
 async def search_users_by_tag(query_text: str, limit: int = 20) -> list[User]:
-    """Search users by Telegram username, prioritising an exact match."""
+    """Legacy entry point: accept exact Telegram ID or search usernames."""
+    is_id, user_id = user_id_query(query_text)
+    if is_id:
+        user = await get_user(user_id) if user_id is not None else None
+        return [user] if user else []
     value = query_text.strip().lstrip("@").strip()
     if not value:
         return []
@@ -1474,11 +1482,11 @@ async def search_users_by_tag(query_text: str, limit: int = 20) -> list[User]:
     async with SessionLocal() as session:
         rows = await session.scalars(
             select(User)
-            .where(User.username.is_not(None), User.username.ilike(f"%{value}%"))
+            .where(User.username.is_not(None), User.username.ilike(f"%{literal_like(value)}%", escape="\\"))
             .order_by(
                 # Exact username first, then prefix matches, then newest users.
                 (func.lower(User.username) == value.lower()).desc(),
-                User.username.ilike(f"{value}%").desc(),
+                User.username.ilike(f"{literal_like(value)}%", escape="\\").desc(),
                 User.created_at.desc(),
                 User.id.desc(),
             )
@@ -3032,19 +3040,22 @@ async def search_working_requests(query: str, limit: int = 50) -> list[Request]:
     value = query.strip()
     if not value:
         return []
-    pattern = f"%{value.lstrip('@')}%"
+    is_id, user_id = user_id_query(value)
+    if is_id and user_id is None:
+        return []
+    pattern = f"%{literal_like(value.lstrip('@'))}%"
+    condition = Request.user_id == user_id if is_id else or_(
+        PaypalTag.tag.ilike(pattern, escape="\\"),
+        User.username.ilike(pattern, escape="\\"),
+        User.full_name.ilike(pattern, escape="\\"),
+    )
     async with SessionLocal() as session:
         stmt = (
             select(Request, User.username, User.full_name, PaypalTag.tag)
             .join(PaypalTag, PaypalTag.id == Request.paypal_tag_id)
             .join(User, User.id == Request.user_id)
             .where(Request.status == "paypal_issued")
-            .where(
-                PaypalTag.tag.ilike(pattern)
-                | User.username.ilike(pattern)
-                | User.full_name.ilike(pattern)
-                | func.cast(Request.user_id, String).ilike(pattern)
-            )
+            .where(condition)
             .order_by(PaypalTag.issued_at.desc())
             .limit(limit)
         )
@@ -3180,18 +3191,29 @@ async def global_admin_search(query: str, limit: int = 30) -> dict:
     value = query.strip().lstrip("@")
     if not value:
         return {"users": [], "requests": [], "tags": []}
-    pattern = f"%{value}%"
+    is_id, user_id = user_id_query(query)
+    if is_id and user_id is None:
+        return {"users": [], "requests": [], "tags": []}
+    pattern = f"%{literal_like(value)}%"
     async with SessionLocal() as session:
+        if is_id:
+            user = await session.get(User, user_id)
+            # A known user ID (or explicit ID: prefix) always selects that person.
+            # Bare numbers can still find a request/amount when no user has that ID.
+            explicit_id = query.strip().lower().startswith("id")
+            condition = Request.user_id == user_id
+            if not user and not explicit_id and user_id <= 2**31 - 1:
+                condition = or_(condition, Request.id == user_id, Request.amount == user_id)
+            requests = list(await session.scalars(select(Request).where(condition)
+                .order_by(Request.id.desc()).limit(limit)))
+            return {"users": [user] if user else [], "requests": requests, "tags": []}
         users = list(await session.scalars(select(User).where(
-            User.username.ilike(pattern) | User.full_name.ilike(pattern) | func.cast(User.id, String).ilike(pattern)
-        ).limit(limit)))
+            User.username.ilike(pattern, escape="\\") | User.full_name.ilike(pattern, escape="\\")
+        ).order_by((func.lower(User.username) == value.lower()).desc().nulls_last(), User.id.desc()).limit(limit)))
         requests = list(await session.scalars(select(Request).join(User, User.id == Request.user_id, isouter=True).where(
-            func.cast(Request.id, String).ilike(pattern) |
-            func.cast(Request.user_id, String).ilike(pattern) |
-            func.cast(Request.amount, String).ilike(pattern) |
-            User.username.ilike(pattern)
+            User.username.ilike(pattern, escape="\\")
         ).order_by(Request.id.desc()).limit(limit)))
-        tags = list(await session.scalars(select(PaypalTag).where(PaypalTag.tag.ilike(pattern)).order_by(PaypalTag.id.desc()).limit(limit)))
+        tags = list(await session.scalars(select(PaypalTag).where(PaypalTag.tag.ilike(pattern, escape="\\")).order_by(PaypalTag.id.desc()).limit(limit)))
         return {"users": users, "requests": requests, "tags": tags}
 
 async def get_period_statistics(period: str) -> dict:

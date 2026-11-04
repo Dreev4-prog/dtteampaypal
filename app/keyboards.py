@@ -3,6 +3,14 @@ from datetime import datetime
 from app.ui import withdrawal_wait_text
 
 
+def user_identity_label(user) -> str:
+    name = f"@{user.username}" if user.username else (getattr(user, "full_name", None) or "Без username")
+    name = " ".join(name.split())
+    if len(name) > 36:
+        name = name[:35] + "…"
+    return f"{name} · ID {user.id}"
+
+
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Получить PayPal", callback_data="paypal_request")],
@@ -185,6 +193,7 @@ def admin_main_menu(
         [InlineKeyboardButton(text="🔥 HAPPY HOURS", callback_data="happy_hours_menu")],
         [InlineKeyboardButton(text="📅 АВТОПОСТЫ", callback_data="ap:list:0")],
         [InlineKeyboardButton(text="🔍 ОБЩИЙ ПОИСК", callback_data="global_search")],
+        [InlineKeyboardButton(text="👤 ПОЛЬЗОВАТЕЛЬ ПО ID / @USERNAME", callback_data="member_tag_search")],
         [InlineKeyboardButton(text="🔄 ОБНОВИТЬ", callback_data="admin_home")],
     ])
 
@@ -263,7 +272,7 @@ def members_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=f"❌ Отклонённые ({counts.get('rejected', 0)})", callback_data="members_list:rejected:0"),
             InlineKeyboardButton(text=f"🚫 Заблокированные ({counts.get('blocked', 0)})", callback_data="members_list:blocked:0"),
         ],
-        [InlineKeyboardButton(text="🏷 Поиск по Telegram-тегу", callback_data="member_tag_search")],
+        [InlineKeyboardButton(text="🔎 Поиск по ID / @username", callback_data="member_tag_search")],
         [InlineKeyboardButton(text="🔍 Расширенный поиск", callback_data="member_search")],
         [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
     ])
@@ -272,7 +281,7 @@ def members_menu(counts: dict[str, int]) -> InlineKeyboardMarkup:
 def members_list_menu(users: list, status: str, offset: int, page_size: int, has_next: bool) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for user in users:
-        username = f"@{user.username}" if user.username else str(user.id)
+        username = user_identity_label(user)
         rows.append([InlineKeyboardButton(text=username, callback_data=f"member_card:{user.id}")])
 
     navigation: list[InlineKeyboardButton] = []
@@ -305,7 +314,10 @@ def member_card_menu(user_id: int, status: str) -> InlineKeyboardMarkup:
             callback_data=f"user_paypal_limit:{user_id}:member",
         )
     ])
-    rows.append([InlineKeyboardButton(text="💬 Написать пользователю", url=f"tg://user?id={user_id}")])
+    rows.append([InlineKeyboardButton(text="💬 Сообщение через бота", callback_data=f"user_message_start:{user_id}")])
+    rows.append([InlineKeyboardButton(text="💳 PayPal пользователя", callback_data=f"crm_user_paypals:{user_id}")])
+    rows.append([InlineKeyboardButton(text="💰 Баланс и выплаты", callback_data=f"payout_user:{user_id}")])
+    rows.append([InlineKeyboardButton(text="👤 Открыть профиль", url=f"tg://user?id={user_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ К участникам", callback_data="members_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1410,7 +1422,7 @@ def global_search_cancel_menu() -> InlineKeyboardMarkup:
 def global_search_results_menu(results: dict) -> InlineKeyboardMarkup:
     rows = []
     for user in results.get("users", [])[:10]:
-        label = f"👤 @{user.username}" if user.username else f"👤 ID {user.id}"
+        label = f"👤 {user_identity_label(user)}"
         rows.append([InlineKeyboardButton(text=label, callback_data=f"crm_user:{user.id}")])
     for req in results.get("requests", [])[:10]:
         rows.append([InlineKeyboardButton(text=f"📄 Заявка #{req.id} · {req.amount} €", callback_data=f"payment_card:{req.id}:all:0")])
@@ -1423,8 +1435,10 @@ def global_search_results_menu(results: dict) -> InlineKeyboardMarkup:
 
 def crm_user_menu(user_id: int, status: str) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="💬 Написать", url=f"tg://user?id={user_id}")],
+        [InlineKeyboardButton(text="💬 Сообщение через бота", callback_data=f"user_message_start:{user_id}")],
+        [InlineKeyboardButton(text="👤 Открыть профиль", url=f"tg://user?id={user_id}")],
         [InlineKeyboardButton(text="💳 PayPal пользователя", callback_data=f"crm_user_paypals:{user_id}")],
+        [InlineKeyboardButton(text="💰 Баланс и выплаты", callback_data=f"payout_user:{user_id}")],
         [
             InlineKeyboardButton(
                 text="🎚 Лимит PayPal в работе",
@@ -1612,7 +1626,7 @@ def payout_history_card_menu(payout_id: int) -> InlineKeyboardMarkup:
 def payouts_users_menu(rows, offset: int, has_next: bool, page_size: int = 10) -> InlineKeyboardMarkup:
     buttons = []
     for user, balance, entries in rows:
-        name = f"@{user.username}" if user.username else str(user.id)
+        name = user_identity_label(user)
         buttons.append([InlineKeyboardButton(
             text=f"{name} · {float(balance):.2f} USDT · {entries} начисл.",
             callback_data=f"payout_user:{user.id}",
@@ -1633,6 +1647,7 @@ def payout_user_menu(user_id: int, has_balance: bool) -> InlineKeyboardMarkup:
     if has_balance:
         rows.append([InlineKeyboardButton(text="💸 ВЫПЛАТИТЬ ОБЩИЙ БАЛАНС", callback_data=f"manual_payout_start:{user_id}")])
     rows.append([InlineKeyboardButton(text="👤 Открыть пользователя", callback_data=f"member_card:{user_id}")])
+    rows.append([InlineKeyboardButton(text="💬 Сообщение через бота", callback_data=f"user_message_start:{user_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ К выплатам", callback_data="payouts_v22:0")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

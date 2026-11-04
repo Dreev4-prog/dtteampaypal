@@ -24,6 +24,7 @@ from aiogram.types import (
 
 from app.config import settings
 from app.rules import MIN_PAYPAL_AMOUNT, MAX_PAYPAL_AMOUNT, valid_paypal_request_amount
+from app.identity import user_id_query
 from app.ui import HOME_SUMMARY_TEMPLATE, remove_old_placeholder
 from app.ui import admin_dashboard_caption, request_amount_caption, support_caption, user_home_caption, withdrawal_wait_text, withdrawal_retry_date
 from app.db import (
@@ -447,6 +448,23 @@ async def menu_command(message: Message, state: FSMContext) -> None:
     await state.clear()
     await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.full_name)
     await show_home(message)
+
+
+@router.message(Command("user"))
+async def user_lookup_command(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    parts = (message.text or "").split(maxsplit=1)
+    await state.set_state(MemberTagSearch.query)
+    if len(parts) == 1:
+        await message.answer(
+            "👤 Введите Telegram ID или @username пользователя.\n"
+            "Например: <code>123456789</code> или <code>@username</code>.",
+            reply_markup=cancel_search_menu(),
+        )
+        return
+    await _send_user_lookup_result(message, state, parts[1])
 
 
 @router.message(Command("paypal"))
@@ -2584,7 +2602,7 @@ async def members_panel(callback: CallbackQuery, state: FSMContext) -> None:
         f"↩️ Возвратов: <b>{stats['returns']}</b>\n"
         f"🚫 GS: <b>{stats['gs']}</b>\n"
         f"💸 Выплачено: <b>{stats['payout']:.2f}</b>\n\n"
-        "Выберите список, найдите пользователя по Telegram-тегу "
+        "Выберите список, найдите пользователя по Telegram ID или @username "
         "или используйте расширенный поиск.",
         members_menu(counts),
     )
@@ -2707,8 +2725,8 @@ async def show_member_card(callback: CallbackQuery, user_id: int) -> None:
         "rejected": "❌ Отклонён",
         "blocked": "🚫 Заблокирован",
     }
-    username = f"@{user.username}" if user.username else "не указан"
-    name = user.full_name or "не указано"
+    username = f"@{escape(user.username)}" if user.username else "не указан"
+    name = escape(user.full_name or "не указано")
     approver = f"<code>{user.decided_by}</code>" if user.decided_by else "—"
     text = (
         "👤 <b>Карточка участника</b>\n\n"
@@ -2730,15 +2748,17 @@ async def show_member_card(callback: CallbackQuery, user_id: int) -> None:
             f"📦 Сейчас занято слотов: <b>{limit_info['used']}</b>"
         )
     )
-    await callback.message.edit_text(text, reply_markup=member_card_menu(user.id, user.status))
+    await replace_photo_with_text(callback, text, member_card_menu(user.id, user.status))
 
 
 @router.callback_query(F.data.startswith("member_card:"))
-async def member_card_handler(callback: CallbackQuery) -> None:
+async def member_card_handler(callback: CallbackQuery, state: FSMContext = None) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
     user_id = int(callback.data.split(":", 1)[1])
+    if state is not None:
+        await state.clear()
     await show_member_card(callback, user_id)
     await callback.answer()
 
@@ -2751,7 +2771,7 @@ async def _user_paypal_limit_screen_data(user_id: int) -> tuple[object | None, d
 
 def _user_paypal_limit_screen_text(user, info: dict) -> str:
     username = (
-        f"@{user.username}"
+        f"@{escape(user.username)} · ID {user.id}"
         if user and user.username
         else f"ID {user.id}" if user else "—"
     )
@@ -2970,11 +2990,12 @@ async def member_tag_search_start(
 
     await state.clear()
     await state.set_state(MemberTagSearch.query)
-    await callback.message.edit_text(
-        "🏷 <b>Поиск пользователя по Telegram-тегу</b>\n\n"
-        "Отправьте тег пользователя, например:\n"
-        "<code>@username</code> или <code>username</code>.",
-        reply_markup=cancel_search_menu(),
+    await replace_photo_with_text(callback,
+        "🔎 <b>Поиск пользователя по ID или @username</b>\n\n"
+        "Отправьте Telegram ID, например <code>123456789</code>, "
+        "либо <code>@username</code>.\n"
+        "По ID можно найти пользователя без username.",
+        cancel_search_menu(),
     )
     await callback.answer()
 
@@ -2988,21 +3009,31 @@ async def member_tag_search_result(
         await state.clear()
         return
 
-    query = (message.text or "").strip()
+    await _send_user_lookup_result(message, state, message.text or "")
+
+
+async def _send_user_lookup_result(message: Message, state: FSMContext, query: str) -> None:
+    query = query.strip()
     normalized = query.lstrip("@").strip()
+    is_id, user_id = user_id_query(query)
+    if is_id and user_id is None:
+        await message.answer("Некорректный Telegram ID. Введите положительное целое число, например <code>123456789</code>.",
+                             reply_markup=cancel_search_menu())
+        return
     if not normalized:
         await message.answer(
-            "Введите Telegram-тег, например <code>@username</code>.",
+            "Введите Telegram ID или @username пользователя.",
             reply_markup=cancel_search_menu(),
         )
         return
 
-    users = await search_users_by_tag(normalized)
+    users = await search_users_by_tag(query)
     await state.clear()
 
     if not users:
         await message.answer(
-            f"🏷 Пользователь с тегом <code>@{normalized}</code> не найден.",
+            f"Пользователь <code>{escape(query)}</code> не найден в базе бота.\n"
+            "Проверьте ID или username. Пользователь должен ранее открыть бота и нажать /start.",
             reply_markup=members_menu(await get_user_counts()),
         )
         return
@@ -3011,21 +3042,23 @@ async def member_tag_search_result(
         (
             user
             for user in users
-            if user.username
-            and user.username.lower() == normalized.lower()
+            if (is_id and user.id == user_id) or (
+                not is_id and user.username and user.username.lower() == normalized.lower()
+            )
         ),
         None,
     )
 
     if exact is not None:
         title = (
-            "🏷 <b>Пользователь найден</b>\n\n"
-            f"Точное совпадение: <b>@{exact.username}</b>"
+            "👤 <b>Пользователь найден</b>\n\n"
+            f"Telegram ID: <code>{exact.id}</code>\n"
+            f"Username: <b>{'@' + escape(exact.username) if exact.username else 'не указан'}</b>"
         )
     else:
         title = (
-            "🏷 <b>Результаты поиска по тегу</b>\n\n"
-            f"Запрос: <code>@{normalized}</code>\n"
+            "🔎 <b>Результаты поиска пользователей</b>\n\n"
+            f"Запрос: <code>{escape(query)}</code>\n"
             f"Найдено: <b>{len(users)}</b>"
         )
 
@@ -6959,7 +6992,7 @@ async def working_search_query_handler(message: Message, state: FSMContext) -> N
     await state.clear()
     await message.answer_photo(
         photo=FSInputFile(BANNERS["paypal"]),
-        caption=f"<b>🔍 Результаты поиска</b>\n\nЗапрос: <code>{query}</code>\nНайдено: <b>{len(rows)}</b>",
+        caption=f"<b>🔍 Результаты поиска</b>\n\nЗапрос: <code>{escape(query)}</code>\nНайдено: <b>{len(rows)}</b>",
         reply_markup=working_search_results_menu(rows),
     )
 
@@ -7145,28 +7178,30 @@ async def global_search_query_handler(message: Message, state: FSMContext) -> No
     results = await global_admin_search(query)
     await state.clear()
     total = sum(len(v) for v in results.values())
-    text = f"🔍 <b>Результаты поиска</b>\n\nЗапрос: <code>{query}</code>\nНайдено: <b>{total}</b>"
+    text = f"🔍 <b>Результаты поиска</b>\n\nЗапрос: <code>{escape(query)}</code>\nНайдено: <b>{total}</b>"
     if not total:
         text += "\n\nСовпадений нет."
     await message.answer(text, reply_markup=global_search_results_menu(results))
 
 
 @router.callback_query(F.data.startswith("crm_user:"))
-async def crm_user_card_handler(callback: CallbackQuery) -> None:
+async def crm_user_card_handler(callback: CallbackQuery, state: FSMContext = None) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True); return
     user_id = int(callback.data.split(":")[1])
+    if state is not None:
+        await state.clear()
     user = await get_user(user_id)
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True); return
     stats = await get_user_crm_stats(user_id)
     limit_info = await get_user_paypal_work_limit_status(user_id)
-    username = f"@{user.username}" if user.username else "—"
+    username = f"@{escape(user.username)}" if user.username else "—"
     text = (
         "━━━━━━━━━━━━━━\n"
         "👤 <b>Карточка пользователя</b>\n\n"
         f"Username: <b>{username}</b>\n"
-        f"Имя: <b>{user.full_name or '—'}</b>\n"
+        f"Имя: <b>{escape(user.full_name or '—')}</b>\n"
         f"Telegram ID: <code>{user.id}</code>\n"
         f"Статус: <b>{user.status}</b>\n\n"
         "📊 <b>Статистика</b>\n"
@@ -7186,7 +7221,7 @@ async def crm_user_card_handler(callback: CallbackQuery) -> None:
         )
         + "━━━━━━━━━━━━━━"
     )
-    await callback.message.edit_text(text, reply_markup=crm_user_menu(user.id, user.status))
+    await replace_photo_with_text(callback, text, crm_user_menu(user.id, user.status))
     await callback.answer()
 
 
@@ -7195,13 +7230,16 @@ async def crm_user_paypals_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True); return
     user_id = int(callback.data.split(":")[1])
+    user = await get_user(user_id)
+    if user is None:
+        await callback.answer("Пользователь не найден", show_alert=True); return
     reqs = await get_user_requests(user_id)
-    lines = ["💳 <b>PayPal пользователя</b>", ""]
+    lines = [f"💳 <b>PayPal пользователя</b> · ID <code>{user_id}</code>", ""]
     for req in reqs[:25]:
         tag = await get_paypal_tag(req.paypal_tag_id) if req.paypal_tag_id else None
-        lines.append(f"#{req.id} · {req.amount} € · {tag.tag if tag else 'без PayPal'} · {req.status}")
+        lines.append(f"#{req.id} · {req.amount} € · {escape(tag.tag) if tag else 'без PayPal'} · {req.status}")
     if len(lines) == 2: lines.append("Записей нет.")
-    await callback.message.edit_text("\n".join(lines), reply_markup=crm_user_menu(user_id, (await get_user(user_id)).status))
+    await replace_photo_with_text(callback, "\n".join(lines), crm_user_menu(user_id, user.status))
     await callback.answer()
 
 
@@ -7552,7 +7590,7 @@ async def payout_user_handler(callback: CallbackQuery, state: FSMContext) -> Non
     provider = "🤖 CryptoBot" if data["method"] == "cryptobot" else "🚀 xRocket"
     lines = [
         "👤 <b>ВЫПЛАТА ПОЛЬЗОВАТЕЛЮ</b>", "",
-        f"Пользователь: <b>{name}</b>", f"ID: <code>{user.id}</code>",
+        f"Пользователь: <b>{escape(name)}</b>", f"ID: <code>{user.id}</code>",
         f"Способ: <b>{provider}</b>", "",
         f"💰 Общий баланс: <b>{data['total']:.2f} USDT</b>",
         f"🧾 Включено начислений: <b>{len(data['entries'])}</b>",
