@@ -1130,9 +1130,12 @@ async def update_request_amount(request_id: int, amount: int, user_id: int | Non
     """Replace the single current amount for a request.
 
     When user_id is supplied, only the request owner may change it and only
-    while PayPal has been issued. Admin flows call it without user_id.
+    while PayPal has been issued and within the user's permitted amount range.
+    Admin flows call it without user_id to record the actual received amount.
     Confirmed amounts are frozen to match the balance ledger.
     """
+    if user_id is not None and not valid_paypal_request_amount(amount):
+        return None
     async with SessionLocal() as session:
         req = await session.get(Request, request_id, with_for_update=True)
         if req is None:
@@ -1152,6 +1155,9 @@ async def mark_paid_by_user(request_id: int, user_id: int) -> bool:
     async with SessionLocal() as session:
         req = await session.get(Request, request_id, with_for_update=True)
         if req is None or req.user_id != user_id or req.status != "paypal_issued":
+            return False
+        # Old buttons and already stored amounts must obey the same policy as edits.
+        if not valid_paypal_request_amount(req.amount):
             return False
 
         now = datetime.utcnow()

@@ -4140,6 +4140,15 @@ async def finish_user_paid(callback_or_message, request_id: int, user_id: int):
 @router.callback_query(F.data.startswith("user_paid_confirm:"))
 async def user_paid_confirm(callback: CallbackQuery) -> None:
     request_id = int(callback.data.split(":")[1])
+    current = await get_request(request_id)
+    if (current is not None and current.user_id == callback.from_user.id
+            and current.status == "paypal_issued" and not valid_paypal_request_amount(current.amount)):
+        await callback.answer(
+            f"Минимальная сумма — {MIN_PAYPAL_AMOUNT} €. Максимум — {MAX_PAYPAL_AMOUNT} €. "
+            "Если ошиблись — измените сумму. Если переведено меньше — напишите в поддержку.",
+            show_alert=True,
+        )
+        return
     req = await finish_user_paid(
         callback,
         request_id,
@@ -4197,12 +4206,23 @@ async def user_paid_change(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(PaymentAmountForm.user_amount)
 async def user_paid_amount_input(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip().replace("€", "").replace(" ", "")
-    if not raw.isdigit():
+    if not raw.isascii() or not raw.isdigit():
         await message.answer("Введите сумму целым числом, например: <code>75</code>")
         return
+    raw = raw.lstrip("0") or "0"
+    if len(raw) > 6:
+        await message.answer(f"Сумма должна быть от {MIN_PAYPAL_AMOUNT} до {MAX_PAYPAL_AMOUNT} €.")
+        return
     amount = int(raw)
-    if amount < 1 or amount > 100000:
-        await message.answer("Сумма должна быть от 1 до 100000 €.")
+    if amount < MIN_PAYPAL_AMOUNT:
+        await message.answer(
+            "❌ Сумма не отправлена на проверку. " + await _minimum_paypal_notice()
+            + "\n\nЕсли ошиблись — введите сумму заново. "
+            "Если фактически переведено меньше — обратитесь в поддержку."
+        )
+        return
+    if amount > MAX_PAYPAL_AMOUNT:
+        await message.answer(f"Сумма должна быть от {MIN_PAYPAL_AMOUNT} до {MAX_PAYPAL_AMOUNT} €.")
         return
     data = await state.get_data()
     request_id = int(data["payment_request_id"])
