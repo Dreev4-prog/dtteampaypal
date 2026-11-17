@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from datetime import datetime
 from app.ui import withdrawal_wait_text
 
@@ -12,14 +12,18 @@ def user_identity_label(user) -> str:
 
 
 def main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+    from app.config import settings
+    rows = [
         [InlineKeyboardButton(text="💳 Получить PayPal", callback_data="paypal_request")],
         [InlineKeyboardButton(text="📂 Мои PayPal", callback_data="my_paypals"),
          InlineKeyboardButton(text="💰 Кошелёк", callback_data="wallet")],
         [InlineKeyboardButton(text="🏆 DT Payments", callback_data="dt_payments"),
          InlineKeyboardButton(text="👤 Кабинет", callback_data="profile")],
         [InlineKeyboardButton(text="🛟 Поддержка", callback_data="support")],
-    ])
+    ]
+    if settings.mini_app_url:
+        rows.append([InlineKeyboardButton(text="🚀 Открыть Mini App", web_app=WebAppInfo(url=settings.mini_app_url))])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def dt_payments_menu() -> InlineKeyboardMarkup:

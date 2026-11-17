@@ -282,6 +282,14 @@ BANNERS = {
     "database": ASSETS_DIR / "database_v2.jpg",
     "broadcast": ASSETS_DIR / "broadcast_v2.jpg",
 }
+CLUB_ART = BASE_DIR / "app" / "miniapp_static" / "art"
+for _section, _scene in {
+    "home": "home", "paypal": "paypal", "requests": "check", "profile": "support",
+    "support": "support", "issued": "paypal", "admin": "home", "payments": "check",
+    "database": "paypal", "broadcast": "support", "links": "support",
+}.items():
+    if (CLUB_ART / f"{_scene}.jpg").is_file():
+        BANNERS[_section] = CLUB_ART / f"{_scene}.jpg"
 
 
 def is_admin(user_id: int) -> bool:
@@ -296,6 +304,10 @@ async def render_screen(
     photo_file_id: str = "",
 ) -> Message:
     """Показывает экран; длинные подписи отправляет обычным текстом."""
+    from app.miniapp_transport import web_context
+    mini_session = web_context.get()
+    if mini_session is not None:
+        mini_session.banner = banner
     # Count the HTML source conservatively, including UTF-16 emoji pairs.
     # Telegram allows only 1024 characters in a photo caption.
     text_screen = len(caption.encode("utf-16-le")) // 2 > 1024

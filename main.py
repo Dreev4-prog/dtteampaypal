@@ -19,6 +19,8 @@ from app.autopost_handlers import router as auto_post_router
 from app.user_messages import router as user_message_router
 from app.autoposts import seed_auto_posts, auto_post_loop
 from app.stock_warmup import stock_warmup_loop
+from app.miniapp import start_web_server
+from app.miniapp_transport import SurfaceStorage, WebTransport
 
 
 async def retry_telegram_startup(operation, label: str):
@@ -92,11 +94,14 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     workers = []
+    web_runner = None
     try:
-        dp = Dispatcher()
+        bot.session.middleware(WebTransport())
+        dp = Dispatcher(storage=SurfaceStorage())
         dp.include_router(router)
         dp.include_router(user_message_router)
         dp.include_router(auto_post_router)
+        web_runner = await start_web_server(bot, dp)
         # Updating the menu is optional and must never gate receiving updates.
         workers.append(asyncio.create_task(configure_bot_commands(bot), name="telegram-menu"))
         workers.append(asyncio.create_task(auto_post_loop(bot), name="daily-auto-posts"))
@@ -105,6 +110,8 @@ async def main() -> None:
         ))
         await dp.start_polling(bot, close_bot_session=False)
     finally:
+        if web_runner is not None:
+            await web_runner.cleanup()
         for worker in workers:
             worker.cancel()
         results = await asyncio.gather(*workers, return_exceptions=True)

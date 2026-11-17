@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#09090b">
+  <title>DT TEAM · Private Club</title>
+  <link rel="stylesheet" href="/static/app.css?v=1">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="/static/app.js?v=1" defer></script>
+</head>
+<body>
+  <div id="dt-app">
+    <header class="brand"><button id="back" aria-label="Назад" hidden>‹</button><div class="monogram">DT</div><div class="brand-name">TEAM<span>PRIVATE CLUB</span></div><button id="notifications" aria-label="Уведомления" hidden><svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M6 9a6 6 0 0 1 12 0v5l2 3H4l2-3Z"/><path d="M10 20h4"/></svg><span id="notification-count" hidden></span></button><button id="refresh" aria-label="Обновить данные">↻</button></header>
+    <main id="screen" aria-live="polite"><section class="entry"><img src="/static/art/home.webp" alt="Альф в закрытом клубе DT TEAM"><div class="entry-copy"><span>DT TEAM / PRIVATE CLUB</span><h1>Для<br>своих.</h1><p id="loading-label">Открываем ваш кабинет…</p></div></section></main>
+    <div id="notice" role="status" hidden></div>
+    <div id="progress" role="status" hidden><span></span>Выполняем действие…</div>
+    <button id="live-alert" hidden aria-live="polite"></button>
+    <dialog id="notification-panel" aria-labelledby="notification-title"><header><div><span>DT TEAM</span><h2 id="notification-title">Уведомления</h2></div><button id="close-notifications" aria-label="Закрыть уведомления">×</button></header><p class="notification-help">События по заявкам и выплатам · время по Москве</p><div id="notification-list"></div></dialog>
+    <nav id="navigation" aria-label="Разделы Mini App" hidden></nav>
+  </div>
+</body>
+</html>
