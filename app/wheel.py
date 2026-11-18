@@ -6,6 +6,7 @@ in production. No background recalculation or historical payment backfill.
 """
 from datetime import datetime, timezone
 from decimal import Decimal
+import logging
 import secrets
 
 from sqlalchemy import select, func, text, literal, union_all
@@ -36,6 +37,52 @@ async def migrate(conn):
         END $$
     """))
     await conn.execute(text("INSERT INTO wheel_campaign (id, enabled, revision) VALUES (1, 0, 0) ON CONFLICT (id) DO NOTHING"))
+
+    await grant_admin_trials(conn, db.settings.admin_ids)
+
+
+async def grant_admin_trials(conn, admin_ids):
+    """Issue this one-off grant to the configured admins in the startup transaction."""
+    if not admin_ids:
+        return
+    first = await conn.scalar(text("""
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES ('admin_wheel_trials_nov_2026', 'granted', CURRENT_TIMESTAMP)
+        ON CONFLICT (key) DO NOTHING RETURNING key
+    """))
+    if first:
+        await conn.execute(db.AdminWheelTrial.__table__.insert(), [
+            {"admin_id": uid, "slot": slot} for uid in sorted(admin_ids) for slot in range(1, 4)
+        ])
+        logging.getLogger(__name__).info("Issued 3 test spins each to %d admins", len(admin_ids))
+
+
+def trial_record(row):
+    points, cash = PRIZES[row.prize]
+    return dict(id=row.slot, prize=row.prize, points=points, cash=cash, test=True)
+
+
+async def admin_trials(admin_id, nonce=None):
+    """Load or use a trial. No payment, campaign or live prize records are touched."""
+    if nonce is not None and (not isinstance(nonce, str) or not 16 <= len(nonce) <= 80):
+        raise ValueError("Недействительный запрос вращения.")
+    async with db.SessionLocal() as session, session.begin():
+        stmt = select(db.AdminWheelTrial).where(db.AdminWheelTrial.admin_id == admin_id).order_by(db.AdminWheelTrial.slot)
+        if nonce is not None:
+            stmt = stmt.with_for_update()
+        slots = list(await session.scalars(stmt))
+        result = None
+        if nonce is not None:
+            slot = next((r for r in slots if r.nonce == nonce), None)
+            if slot is None:
+                slot = next((r for r in slots if r.nonce is None), None)
+                if slot is None:
+                    raise ValueError("Все тестовые вращения использованы.")
+                slot.nonce, slot.prize = nonce, choose_prize(False)
+            result = trial_record(slot)
+        history = [trial_record(r) for r in reversed(slots) if r.prize]
+        state = dict(remaining=len(slots) - len(history), total=len(slots), history=history)
+        return dict(result=result, wheel=state)
 
 
 async def campaign(session, *, lock=False):

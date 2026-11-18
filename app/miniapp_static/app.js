@@ -140,7 +140,7 @@
       screen.innerHTML='<section class="entry"><img src="/static/art/support.webp" alt="Альф на связи"><div class="entry-copy"><span>DT TEAM</span><h1>Доступ<br>закрыт.</h1><p>Обратитесь в поддержку.</p><a class="entry-action" href="https://t.me/profitgeld">Написать поддержке ↗</a></div></section>';nav.hidden=true;return;
     }
     if(data.route==='home'&&data.summary){screen.innerHTML=homeHTML(data);}
-    else if(data.route==='wheel'||data.route==='rope'){screen.innerHTML='<div id="wheel-root"></div>';window.DTWheel.mount(document.getElementById('wheel-root'),data.wheel,{game:data.route,request,busy,isBusy:()=>inFlight,notice:showNotice,userId:data.user.id,haptic:()=>tg?.HapticFeedback?.notificationOccurred?.('success'),updated:refreshUpdates});}
+    else if(['wheel','rope','wheel_test'].includes(data.route)){screen.innerHTML='<div id="wheel-root"></div>';window.DTWheel.mount(document.getElementById('wheel-root'),data.route==='wheel_test'?data.trials:data.wheel,{game:data.route,admin:data.user.admin,request,busy,isBusy:()=>inFlight,notice:showNotice,userId:data.user.id,haptic:()=>tg?.HapticFeedback?.notificationOccurred?.('success'),updated:refreshUpdates});}
     else{
       const messages=data.messages||[], first=messages.find(m=>m.html)||messages[0];
       const lines=plain(first?.html).split('\n').filter(x=>x.trim());
@@ -151,6 +151,10 @@
       if(title.length>35)title=({paypal:'Получить PayPal',requests:'Мои PayPal',profile:'Кабинет',payments:'Оплаты',admin:'Управление',database:'База PayPal',support:'Поддержка',broadcast:'Контент'}[banner]||'DT TEAM');
       const provider=data.payouts?`<div class="provider-totals"><div>CryptoBot<strong>${amount(data.payouts.cryptobot_total)}</strong><small>USDT к выплате</small></div><div>xRocket<strong>${amount(data.payouts.xrocket_total)}</strong><small>USDT к выплате</small></div></div>`:'';
       screen.innerHTML=`<section class="cover ${data.form||data.journey?'compact':''}"><img src="/static/art/${art(data.wallet?'home':banner)}.webp" alt="Альф · DT TEAM"><div class="cover-copy"><span>DT TEAM / PRIVATE CLUB</span><h1>${escape(title)}</h1><small>${data.user.admin?'Управление клубом':'Личный кабинет'}</small></div></section><section class="content">${journeyHTML(data.journey)}${provider}${messages.map((m,i)=>`<article class="message">${m.photo&&!m.photo.is_banner?`<img class="proof" data-media="${escape(m.photo.id)}" alt="Изображение из бота">`:''}${copyHTML(m,data)}${m.document?`<a class="download" data-media="${escape(m.document.id)}" download="${escape(m.document.filename)}">↓ ${escape(m.document.filename)}</a>`:''}${i===messages.length-1?formHTML(data.form):''}${rows(m)}</article>`).join('')}${messages.length?'':formHTML(data.form)}</section>`;
+    }
+    if(data.user.admin && (['admin_home','wheel_admin'].includes(data.route) || data.route.startsWith('wheel_toggle:'))){
+      const content=screen.querySelector('.content');
+      content?.insertAdjacentHTML('afterbegin','<button class="action" data-nav="wheel_test"><span class="symbol" aria-hidden="true">⟳</span><span class="label">Тестовые вращения</span><span class="arrow" aria-hidden="true">›</span></button>');
     }
     if(data.user.admin&&(data.route==='wheel_admin'||data.route.startsWith('wheel_toggle:'))){
       const panel=document.createElement('section');screen.append(panel);window.mountDTGameStats(panel,request);
@@ -240,7 +244,7 @@
     if(current.form||current.journey){poll();return;}
     const refreshButton=current.messages.flatMap(m=>m.rows.flat()).find(b=>b.action&&/обновить/i.test(b.label));
     if(refreshButton){act({action:refreshButton.action});return;}
-    if(['home','paypal_request','my_paypals','wallet','profile','support','dt_payments','admin_home','wheel','rope'].includes(current.route))act({nav:current.route});
+    if(['home','paypal_request','my_paypals','wallet','profile','support','dt_payments','admin_home','wheel','rope','wheel_test'].includes(current.route))act({nav:current.route});
     else poll();
   });
   document.getElementById('back').addEventListener('click',goBack);

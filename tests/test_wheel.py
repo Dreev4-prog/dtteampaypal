@@ -78,6 +78,43 @@ class WheelTests(unittest.IsolatedAsyncioTestCase):
         armed=await self.rope_action(run,"arm",at)
         return await self.rope_action(armed,"release",at+timedelta(seconds=seconds))
 
+    async def test_one_off_trials_are_personal_and_have_no_ledger_effects(self):
+        async with self.engine.begin() as conn:
+            await wheel.grant_admin_trials(conn, [1, 999])
+        with patch.object(wheel, 'choose_prize', return_value='jackpot'):
+            first = await wheel.admin_trials(1, 'first-trial-request')
+        self.assertEqual(first['wheel']['remaining'], 2)
+        self.assertEqual(first['result']['cash'], 500)
+        await self.toggle(True)
+        await self.earn(150)
+        before = await wheel.state(1, admin=True)
+        with patch.object(wheel, 'choose_prize', return_value='five'):
+            await wheel.admin_trials(1, 'second-trial-request')
+            final = await wheel.admin_trials(1, 'third-trial-request')
+        async with self.engine.begin() as conn:
+            await wheel.grant_admin_trials(conn, [1, 999, 1000])
+        self.assertEqual(final, await wheel.admin_trials(1, 'third-trial-request'))
+        with self.assertRaises(ValueError):
+            await wheel.admin_trials(1, 'fourth-trial-request')
+        self.assertEqual((await wheel.admin_trials(999))['wheel']['remaining'], 3)
+        self.assertEqual((await wheel.admin_trials(1000))['wheel']['total'], 0)
+        self.assertEqual(await wheel.state(1, admin=True), before)
+        self.assertEqual((await db.get_user_balance(1))['available'], 105)
+        self.assertEqual((await self.confirm()).wheel_bonus_percent, 0)
+        self.assertEqual((await game_stats.report(uid=1))['stats']['spins'], 0)
+
+    @unittest.skipUnless(POSTGRES, 'requires dedicated local PostgreSQL')
+    async def test_concurrent_admin_trials_respect_quota_and_retry(self):
+        async with self.engine.begin() as conn:
+            await wheel.grant_admin_trials(conn, [999])
+        same = await asyncio.gather(*(wheel.admin_trials(999, 'duplicate-trial-request') for _ in range(8)))
+        self.assertTrue(all(r == same[0] for r in same))
+        draws = await asyncio.gather(*(wheel.admin_trials(999, f'distinct-trial-request-{i}') for i in range(12)),
+                                     return_exceptions=True)
+        self.assertEqual(sum(isinstance(r, dict) for r in draws), 2)
+        self.assertEqual(sum(isinstance(r, ValueError) for r in draws), 10)
+        self.assertEqual((await wheel.admin_trials(999))['wheel']['remaining'], 0)
+
     async def test_two_games_one_balance_fifo_single_combined_reward_refund_and_stats(self):
         await self.toggle(True)
         payment=await self.earn(250)

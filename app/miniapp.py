@@ -25,7 +25,7 @@ from app.miniapp_transport import WebTransport, public_records, web_context, med
 STATIC = Path(__file__).resolve().parent / "miniapp_static"
 TTL = 8 * 3600
 MAX_PHOTO = 8 * 1024 * 1024
-NAVIGATION = {"home", "paypal_request", "request_back", "my_paypals", "wallet", "profile", "support", "dt_payments", "admin_home", "wheel", "rope"}
+NAVIGATION = {"home", "paypal_request", "request_back", "my_paypals", "wallet", "profile", "support", "dt_payments", "admin_home", "wheel", "rope", "wheel_test"}
 
 
 @dataclass
@@ -175,6 +175,23 @@ class MiniApp:
             session.updates_at = 0
             return web.json_response({"result": result, "wheel": await wheel.state(session.user.id)})
 
+    async def wheel_test(self, request):
+        session = self.session(request)
+        if session.user.id not in settings.admin_ids:
+            raise web.HTTPForbidden(text="Тестовые вращения доступны только администраторам.")
+        if request.method == "GET":
+            return web.json_response((await wheel.admin_trials(session.user.id))["wheel"])
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"request_id"} or not isinstance(body["request_id"], str):
+            raise web.HTTPBadRequest(text="Недействительный запрос вращения.")
+        async with self.lock(session.user.id):
+            self.session(request)
+            try:
+                result = await wheel.admin_trials(session.user.id, body["request_id"])
+            except ValueError as exc:
+                raise web.HTTPConflict(text=str(exc)) from exc
+            return web.json_response(result)
+
     async def rope_game(self, request):
         received = datetime.utcnow()
         session = await self.wheel_access(request)
@@ -212,7 +229,7 @@ class MiniApp:
             raise web.HTTPBadRequest(text="Ожидается объект запроса.")
         user, admin = await self.identity(session)
         callback = session.actions.get(body.get("action"), (None, ""))[1]
-        if body.get("nav") == "admin_home" and not admin:
+        if body.get("nav") in ("admin_home", "wheel_test") and not admin:
             raise web.HTTPForbidden(text="Нет доступа к управлению.")
         if not admin and (not user or user.status != "approved"):
             if body.get("nav") not in {"home", "support"} and callback != "membership_apply":
@@ -279,7 +296,7 @@ class MiniApp:
         user, admin = await self.identity(session)
         approved = user is not None and user.status == "approved"
         nav = body.get("nav")
-        if nav == "admin_home" and not admin:
+        if nav in {"admin_home", "wheel_test"} and not admin:
             raise web.HTTPForbidden(text="Нет доступа.")
         if not approved and not admin and nav not in {"home", "support"}:
             # Membership apply is the sole non-navigation callback permitted.
@@ -306,6 +323,11 @@ class MiniApp:
                     await state.set_state(PaypalRequestForm.amount)
                     message = self.incoming(session, text=str(value))
                     await self.dp.feed_update(self.bot, Update(update_id=abs(message.message_id), message=message))
+            elif nav == "wheel_test":
+                await state.clear()
+                session.route, session.section = nav, "admin_home"
+                session.display = []
+                session.actions.clear()
             elif nav is not None:
                 await state.clear()
                 session.route = nav
@@ -361,6 +383,8 @@ class MiniApp:
             }
             if session.route in {"wheel", "rope"} and (approved or admin):
                 session.response["wheel"] = await wheel.state(session.user.id)
+            if admin and session.route == "wheel_test":
+                session.response["trials"] = (await wheel.admin_trials(session.user.id))["wheel"]
             if admin and session.route.startswith("payouts_v22"):
                 totals = await db.get_payout_dashboard_counts()
                 session.response["payouts"] = {key: float(totals.get(key, 0)) for key in ("cryptobot_total", "xrocket_total")}
@@ -540,6 +564,8 @@ def create_app(bot, dispatcher):
     app.router.add_get("/api/rope", service.rope_game)
     app.router.add_post("/api/rope", service.rope_game)
     app.router.add_get("/api/games/statistics", service.game_statistics)
+    app.router.add_get("/api/wheel/test", service.wheel_test)
+    app.router.add_post("/api/wheel/test", service.wheel_test)
     app.router.add_get("/api/wheel", service.get_wheel)
     app.router.add_post("/api/wheel/spin", service.spin_wheel)
     app.router.add_get("/api/media/{media_id}", service.media)

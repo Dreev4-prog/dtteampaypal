@@ -85,6 +85,32 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
     def text(self):
         return '\n'.join(m['html'] for m in self.view['messages'])
 
+    async def test_admin_wheel_trials_when_campaign_paused(self):
+        path = '/api/wheel/test'
+        self.assertEqual((await self.client.get(path)).status, 401)
+        await self.login()
+        self.assertEqual((await self.client.get(path, headers=self.headers)).status, 403)
+        self.assertEqual((await self.client.post(path, json={'request_id':'demo-trial-request'}, headers=self.headers)).status, 403)
+        self.assertEqual((await self.client.post('/api/action', json={'nav':'wheel_test'}, headers=self.headers)).status, 403)
+        async with db.SessionLocal() as session, session.begin():
+            (await session.get(db.User, 999)).status = 'pending'
+        await self.login(999)
+        view = await self.act(nav='wheel_test')
+        self.assertFalse(view['wheel']['enabled'])
+        self.assertEqual(view['trials']['remaining'], 3)
+        for payload in ({'request_id':None}, {'request_id':'demo-trial-request', 'user_id':1}):
+            self.assertEqual((await self.client.post(path, json=payload, headers=self.headers)).status, 400)
+        for i in range(3):
+            payload = {'request_id': f'admin-demo-request-{i}'}
+            spin = await self.client.post(path, json=payload, headers=self.headers)
+            self.assertEqual(spin.status, 200)
+            self.assertEqual((await spin.json())['wheel']['remaining'], 2-i)
+        await self.login(999)
+        self.assertEqual((await self.act(nav='wheel_test'))['trials']['remaining'], 0)
+        replay = await self.client.post(path, json=payload, headers=self.headers)
+        self.assertEqual((await replay.json())['result']['id'], 3)
+        self.assertEqual((await self.client.post(path, json={'request_id':'extra-demo-request'}, headers=self.headers)).status, 409)
+
     async def test_home_reads_real_balances_and_support_launcher_order(self):
         data = await self.login()
         self.assertEqual(data['summary']['held'], 70)

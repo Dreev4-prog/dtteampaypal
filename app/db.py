@@ -223,6 +223,18 @@ class WheelPayment(Base):
     cancelled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class AdminWheelTrial(Base):
+    __tablename__ = "admin_wheel_trials"
+    __table_args__ = (
+        UniqueConstraint("admin_id", "nonce", name="uq_admin_wheel_trial_nonce"),
+        CheckConstraint("slot BETWEEN 1 AND 3", name="ck_admin_wheel_trial_slot"),
+    )
+    admin_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    slot: Mapped[int] = mapped_column(Integer, primary_key=True)
+    nonce: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    prize: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+
+
 class WheelSpin(Base):
     __tablename__ = "wheel_spins"
     __table_args__ = (
