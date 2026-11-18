@@ -25,7 +25,7 @@ from app.miniapp_transport import WebTransport, public_records, web_context, med
 STATIC = Path(__file__).resolve().parent / "miniapp_static"
 TTL = 8 * 3600
 MAX_PHOTO = 8 * 1024 * 1024
-NAVIGATION = {"home", "paypal_request", "request_back", "my_paypals", "wallet", "profile", "support", "dt_payments", "admin_home", "wheel"}
+NAVIGATION = {"home", "paypal_request", "request_back", "my_paypals", "wallet", "profile", "support", "dt_payments", "admin_home", "wheel", "rope"}
 
 
 @dataclass
@@ -316,7 +316,7 @@ class MiniApp:
                 if nav == "home":
                     await show_home(message)
                 else:
-                    await self.dispatch_callback(session, nav, message)
+                    await self.dispatch_callback(session, "wheel" if nav == "rope" else nav, message)
                 if not session.emitted and not await state.get_state():
                     session.route = "home"
                     session.section = "home"
@@ -359,7 +359,7 @@ class MiniApp:
                 "journey": journey_description(form_state, state_data),
                 "wheel": await wheel.summary(session.user.id) if approved or admin else {"enabled": False},
             }
-            if session.route == "wheel" and (approved or admin):
+            if session.route in {"wheel", "rope"} and (approved or admin):
                 session.response["wheel"] = await wheel.state(session.user.id)
             if admin and session.route.startswith("payouts_v22"):
                 totals = await db.get_payout_dashboard_counts()

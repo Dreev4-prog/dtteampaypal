@@ -13,11 +13,11 @@
   function saveNonce(nonce){pending=nonce;try{if(nonce)localStorage.setItem(key(),nonce);else localStorage.removeItem(key());}catch{}}
   function buildSectors(keep){const s=[...ordinary];if(!data.jackpot_claimed||keep==='jackpot')s.splice(5,0,'jackpot');return s;}
   function mount(container,value,context){
-    unmount();root=container;ctx=context;data=value;tab=value.open_run?'rope':'wheel';spinning=false;lastResult=null;rotation=0;
+    unmount();root=container;ctx=context;data=value;tab=context.game==='rope'?'rope':'wheel';spinning=false;lastResult=null;rotation=0;
     try{pending=localStorage.getItem(key());}catch{pending=null;}
     paint();
     root.onclick=async event=>{
-      const button=event.target.closest('button');if(!button||spinning)return;
+      const button=event.target.closest('button');if(!button||button.dataset.nav||spinning)return;
       if(button.dataset.wheelTab){
         const wanted=button.dataset.wheelTab;
         if(wanted===tab)return;
@@ -32,7 +32,7 @@
   function paint(){
     if(!root?.isConnected)return;
     unmount();
-    root.innerHTML=`<div id="dt-wheel"><div class="dtw-app"><div class="dtw-hero"><img src="/static/art/home.webp" alt="Альф в клубе DT TEAM"><div class="dtw-hero-copy"><span>DT TEAM / ИГРЫ</span><h1>Игры DT</h1><p>1 € после вывода = 1 балл DT</p></div></div><div class="games-balance">Общий баланс <strong id="dtw-balance">${data.balance==null?'Сохранён':data.balance+' баллов'}</strong></div><nav class="dtw-tabs" aria-label="Разделы акции">${[['rope','Трос Альфа'],['wheel','Колесо'],['bonuses','Бонусы'],['history','История']].map(([id,label])=>`<button data-wheel-tab="${id}" aria-selected="${id===tab}">${label}${id==='bonuses'?` <span>${data.coupons?.length||0}</span>`:''}</button>`).join('')}</nav><section class="dtw-view" id="dtw-content"></section></div></div>`;
+    root.innerHTML=`<div id="dt-wheel"><div class="dtw-app"><div class="dtw-hero"><img src="/static/art/home.webp" alt="Альф в клубе DT TEAM"><div class="dtw-hero-copy"><span>DT TEAM / ИГРЫ</span><h1>Игры DT</h1><p>1 € после вывода = 1 балл DT</p></div></div><div class="games-balance">Общий баланс <strong id="dtw-balance">${data.balance==null?'Сохранён':data.balance+' баллов'}</strong></div><nav class="dtw-tabs" aria-label="Разделы акции">${[['rope','Трос Альфа'],['wheel','Колесо'],['bonuses','Бонусы'],['history','История']].map(([id,label])=>`<button data-wheel-tab="${id}" ${(id==='wheel'||id==='rope')&&id!==ctx.game?'data-nav="'+id+'"':''} aria-selected="${id===tab}">${label}${id==='bonuses'?` <span>${data.coupons?.length||0}</span>`:''}</button>`).join('')}</nav><section class="dtw-view" id="dtw-content"></section></div></div>`;
     const view=$('content');
     if(tab==='rope'&&(data.enabled||data.open_run)){
       ropeView=window.mountDTRope(view,{...ctx,balanceChanged(value){

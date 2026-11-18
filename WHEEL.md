@@ -2,7 +2,7 @@
 
 Admin → Игры DT · Колесо и трос → Включить акцию / Выключить акцию. The migration starts
 OFF. This release does not activate the promotion or send a broadcast.
-The Mini App shows Игры DT next to the wallet. Both games use the same points.
+The Mini App shows separate Колесо and Трос buttons next to the wallet. Each opens its game without charging. Both games use the same points.
 The admin game screen includes a paginated list of players and their individual
 attempts, prizes, failures, pending runs and spent points.
 

@@ -27,6 +27,10 @@
     <circle cx="12" cy="7.5" r="4"/>
     <path d="M3.5 21v-1.4c0-3.2 3.8-5.8 8.5-5.8s8.5 2.6 8.5 5.8V21"/>
   </svg>`;
+  const ropeIcon = `<svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M2.5 8.5 21.5 3"/><circle cx="12" cy="7.4" r="2.7"/>
+    <path d="M12 10.1v3.3m-1.2 0h2.4l3 5.8a1 1 0 0 1-.9 1.5H8.7a1 1 0 0 1-.9-1.5z"/>
+  </svg>`;
   const wheelIcon = `<svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
     <path d="M8.1 4.8a8.6 8.6 0 1 0 7.8 0"/><path d="M9.6 2.2h4.8L12 7.3z" fill="currentColor" stroke-width=".8"/>
     <path d="m5.1 8.1 5.6 3.9m2.6 0 5.6-3.9M5 17.7l5.7-4m2.6 0 5.7 4M12 14.5v6.2"/><circle cx="12" cy="12.9" r="1.6"/>
@@ -108,11 +112,12 @@
       {id: 'my_paypals', label: 'PayPal', icon: paypalIcon},
       {id: 'wallet', label: 'Кошелёк', icon: walletIcon},
     ];
-    if (data.user.status === 'approved' && (data.wheel?.enabled || data.wheel?.open_run)) {
-      tabs.push({id: 'wheel', label: 'Игры DT', icon: wheelIcon});
+    if (data.user.status === 'approved') {
+      if(data.wheel?.enabled)tabs.push({id:'wheel',label:'Колесо',icon:wheelIcon});
+      if(data.wheel?.enabled||data.wheel?.open_run)tabs.push({id:'rope',label:'Трос',icon:ropeIcon});
     }
     tabs.push({id: 'profile', label: 'Кабинет', icon: profileIcon});
-    if (data.user.admin) tabs.push({id: 'admin_home', label: 'Управление', icon: '⚙'});
+    if (data.user.admin) tabs.push({id: 'admin_home', label: tabs.length>=6?'Админ':'Управление', icon: '⚙'});
 
     nav.style.setProperty('--tabs', tabs.length);
     nav.innerHTML = tabs.map(({id, label, icon}) => {
@@ -135,7 +140,7 @@
       screen.innerHTML='<section class="entry"><img src="/static/art/support.webp" alt="Альф на связи"><div class="entry-copy"><span>DT TEAM</span><h1>Доступ<br>закрыт.</h1><p>Обратитесь в поддержку.</p><a class="entry-action" href="https://t.me/profitgeld">Написать поддержке ↗</a></div></section>';nav.hidden=true;return;
     }
     if(data.route==='home'&&data.summary){screen.innerHTML=homeHTML(data);}
-    else if(data.route==='wheel'){screen.innerHTML='<div id="wheel-root"></div>';window.DTWheel.mount(document.getElementById('wheel-root'),data.wheel,{request,busy,isBusy:()=>inFlight,notice:showNotice,userId:data.user.id,haptic:()=>tg?.HapticFeedback?.notificationOccurred?.('success'),updated:refreshUpdates});}
+    else if(data.route==='wheel'||data.route==='rope'){screen.innerHTML='<div id="wheel-root"></div>';window.DTWheel.mount(document.getElementById('wheel-root'),data.wheel,{game:data.route,request,busy,isBusy:()=>inFlight,notice:showNotice,userId:data.user.id,haptic:()=>tg?.HapticFeedback?.notificationOccurred?.('success'),updated:refreshUpdates});}
     else{
       const messages=data.messages||[], first=messages.find(m=>m.html)||messages[0];
       const lines=plain(first?.html).split('\n').filter(x=>x.trim());
@@ -189,7 +194,7 @@
         renderNavigation(current);
       }
       if(current.route==='home'&&!inFlight&&JSON.stringify([current.summary,current.work])!==JSON.stringify([updates.summary,updates.work])){current.summary=updates.summary;current.work=updates.work;screen.innerHTML=homeHTML(current);}
-      if(current.route==='wheel'&&!inFlight)window.DTWheel?.refresh(updates.wheel);
+      if(['rope','wheel'].includes(current.route)&&!inFlight)window.DTWheel?.refresh(updates.wheel);
       if(current.wallet&&!inFlight){
         const points=document.getElementById('wallet-game-points');
         if(points&&updates.wheel.balance!=null)points.textContent=updates.wheel.balance;
@@ -235,7 +240,7 @@
     if(current.form||current.journey){poll();return;}
     const refreshButton=current.messages.flatMap(m=>m.rows.flat()).find(b=>b.action&&/обновить/i.test(b.label));
     if(refreshButton){act({action:refreshButton.action});return;}
-    if(['home','paypal_request','my_paypals','wallet','profile','support','dt_payments','admin_home','wheel'].includes(current.route))act({nav:current.route});
+    if(['home','paypal_request','my_paypals','wallet','profile','support','dt_payments','admin_home','wheel','rope'].includes(current.route))act({nav:current.route});
     else poll();
   });
   document.getElementById('back').addEventListener('click',goBack);

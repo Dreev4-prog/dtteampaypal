@@ -369,6 +369,10 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get('/api/games/statistics')).status,401)
         await self.login(1)
         self.assertEqual((await self.client.get('/api/games/statistics',headers=self.headers)).status,403)
+        await self.act(nav='rope')
+        self.assertEqual((self.view['route'], self.view['section'], self.view['wheel']['balance']), ('rope','rope',250))
+        await self.act(nav='wheel')
+        self.assertEqual((self.view['route'], self.view['wheel']['balance']), ('wheel',250))
         for _ in range(2):
             data=await (await self.client.get('/api/rope',headers=self.headers)).json()
             self.assertEqual(data['balance'],250)

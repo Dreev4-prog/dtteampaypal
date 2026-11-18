@@ -36,3 +36,7 @@
   #navigation:has(> button:nth-child(6)) { padding-inline: 2px; }
   #navigation:has(> button:nth-child(6)) button { font-size: 9px; }
 }
+
+#navigation:has([data-nav="rope"]){padding-inline:min(1.25vw,8px)}
+#navigation:has([data-nav="rope"]) button{min-height:58px;justify-content:center;padding-block:6px;white-space:nowrap;font-size:10px}
+@media(max-width:360px){#navigation:has(>button:nth-child(7)){padding-inline:0}}
