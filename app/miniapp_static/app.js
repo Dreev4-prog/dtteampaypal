@@ -23,11 +23,15 @@
     <path d="M20.5 10V8a2 2 0 0 0-2-2H5.8a2.3 2.3 0 0 0-2.3 2.3v10.1a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-2.1"/>
     <path d="M21 10.4h-4.1a2.8 2.8 0 0 0 0 5.6H21z"/><circle cx="17.3" cy="13.2" r=".85" fill="currentColor" stroke="none"/>
   </svg>`;
+  const profileIcon = `<svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true" focusable="false">
+    <circle cx="12" cy="7.5" r="4"/>
+    <path d="M3.5 21v-1.4c0-3.2 3.8-5.8 8.5-5.8s8.5 2.6 8.5 5.8V21"/>
+  </svg>`;
   const wheelIcon = `<svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
     <path d="M8.1 4.8a8.6 8.6 0 1 0 7.8 0"/><path d="M9.6 2.2h4.8L12 7.3z" fill="currentColor" stroke-width=".8"/>
     <path d="m5.1 8.1 5.6 3.9m2.6 0 5.6-3.9M5 17.7l5.7-4m2.6 0 5.7 4M12 14.5v6.2"/><circle cx="12" cy="12.9" r="1.6"/>
   </svg>`;
-  const symbol = label => /выплат|кошел|баланс/i.test(label)?walletIcon:/поиск|найти/i.test(label)?'⌕':/назад|главно|меню/i.test(label)?'‹':/удал|отмен|отказ/i.test(label)?'×':/время|ждём|24|дат|истор/i.test(label)?'◷':/пользов|кабинет|участ/i.test(label)?'♙':/поддерж|сообщ|контент/i.test(label)?'✉':/добав|созда/i.test(label)?'+':'↗';
+  const symbol = label => /выплат|кошел|баланс/i.test(label)?walletIcon:/поиск|найти/i.test(label)?'⌕':/назад|главно|меню/i.test(label)?'‹':/удал|отмен|отказ/i.test(label)?'×':/время|ждём|24|дат|истор/i.test(label)?'◷':/пользов|кабинет|участ/i.test(label)?profileIcon:/поддерж|сообщ|контент/i.test(label)?'✉':/добав|созда/i.test(label)?'+':'↗';
 
   async function request(path, body) {
     const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),20000);
@@ -108,7 +112,7 @@
       const count = data.wheel.available;
       tabs.push({id: 'wheel', label: 'Колесо', icon: wheelIcon, count});
     }
-    tabs.push({id: 'profile', label: 'Кабинет', icon: '♙'});
+    tabs.push({id: 'profile', label: 'Кабинет', icon: profileIcon});
     if (data.user.admin) tabs.push({id: 'admin_home', label: 'Управление', icon: '⚙'});
 
     nav.style.setProperty('--tabs', tabs.length);
