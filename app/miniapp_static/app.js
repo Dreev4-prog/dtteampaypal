@@ -12,6 +12,12 @@
   const plain = html => new DOMParser().parseFromString(html || '', 'text/html').body.textContent || '';
   const clean = label => label.replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu,'').trim() || (/⬅|◀/.test(label)?'Предыдущая':/➡|▶/.test(label)?'Следующая':/🗑/.test(label)?'Удалить':label);
   const art = banner => ({paypal:'paypal',issued:'paypal',database:'paypal',requests:'check',payments:'check',support:'support',profile:'support',broadcast:'support',links:'support'}[banner] || 'home');
+  // PayPal's double-P mark uses the tab color for its idle and selected states.
+  const paypalIcon = `<svg class="menu-icon" viewBox="2 2 47 47" fill="currentColor" aria-hidden="true" focusable="false">
+    <path d="M38.914 13.35c0 5.574-5.144 12.15-12.927 12.15H18.49l-.368 2.322L16.373 39H7.056l5.605-36h15.095c5.083 0 9.082 2.833 10.555 6.77a9.687 9.687 0 0 1 .603 3.58z"/>
+    <path opacity=".72" d="M44.284 23.7A12.894 12.894 0 0 1 31.53 34.5h-5.206L24.157 48H14.89l1.483-9 1.75-11.178.367-2.322h7.497c7.773 0 12.927-6.576 12.927-12.15 3.825 1.974 6.055 5.963 5.37 10.35z"/>
+    <path fill="#211d22" opacity=".55" d="M38.914 13.35C37.31 12.511 35.365 12 33.248 12h-12.64L18.49 25.5h7.497c7.773 0 12.927-6.576 12.927-12.15z"/>
+  </svg>`;
   const walletIcon = `<svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
     <path d="M4 7.5V6.4c0-.9.6-1.7 1.5-1.9l11-2.4c.8-.2 1.5.4 1.5 1.2V6"/>
     <path d="M20.5 10V8a2 2 0 0 0-2-2H5.8a2.3 2.3 0 0 0-2.3 2.3v10.1a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-2.1"/>
@@ -95,7 +101,7 @@
   function renderNavigation(data) {
     const tabs = [
       {id: 'home', label: 'Главная', icon: '⌂'},
-      {id: 'my_paypals', label: 'PayPal', icon: '▱'},
+      {id: 'my_paypals', label: 'PayPal', icon: paypalIcon},
       {id: 'wallet', label: 'Кошелёк', icon: walletIcon},
     ];
     if (data.user.status === 'approved' && data.wheel?.enabled) {
