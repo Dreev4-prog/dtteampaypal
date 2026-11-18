@@ -130,6 +130,16 @@ async def runtime():
 
 async def preview():
     app, engine, bot, dp, fake = await runtime()
+    # Explicit local-only fixture switch; never imported by production.
+    if os.environ.get("WHEEL_PREVIEW") == "1":
+        from app import wheel
+        await wheel.set_enabled(True, 999, 0)
+        async with db.SessionLocal() as session, session.begin():
+            req = db.Request(user_id=1, amount=600, status="waiting_check")
+            session.add(req)
+            await session.flush()
+        await db.confirm_payment(req.id, 999)
+        await db.mark_paypal_withdrawn(req.id, 999)
 
     @web.middleware
     async def local_index(request, handler):
@@ -146,7 +156,7 @@ async def preview():
     app.router.add_get("/test-telegram.js", telegram_fixture)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    await web.TCPSite(runner, "127.0.0.1", 8773).start()
+    await web.TCPSite(runner, "127.0.0.1", int(os.environ.get("PREVIEW_PORT", "8773"))).start()
     print("Test preview: http://127.0.0.1:8773/app (SQLite + fake Telegram only)", flush=True)
     try:
         await asyncio.Event().wait()

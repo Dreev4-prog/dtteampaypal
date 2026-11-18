@@ -27,7 +27,7 @@
     return data;
   }
   function showNotice(text){clearTimeout(noticeTimer);notice.hidden=!text;notice.textContent=text||'';if(text){tg?.HapticFeedback?.notificationOccurred?.(/ошиб|не удалось|недоступ|отказ|прервал/i.test(text)?'warning':'success');if(/^✅|данные обновлены/i.test(text))noticeTimer=setTimeout(()=>showNotice(''),5000);}}
-  function busy(value){inFlight=value;document.getElementById('progress').hidden=!value;document.querySelectorAll('button,input,textarea').forEach(e=>e.disabled=value);}
+  function busy(value){inFlight=value;document.getElementById('progress').hidden=!value;document.querySelectorAll('button,input,textarea').forEach(e=>e.disabled=value);window.DTWheel?.updateControls();}
   function releaseMedia(){objectURLs.forEach(url=>URL.revokeObjectURL(url));objectURLs=[];}
   async function loadMedia(data){
     const version=data.version;
@@ -74,13 +74,13 @@
   }
   function homeHTML(data){
     const summary=data.summary;
-    return `<section class="entry"><img src="/static/art/home.webp" alt="Альф в чёрном костюме на троне"><div class="entry-copy"><span>${data.work?'РАБОТА ОТКРЫТА':'STOP WORK'}</span><h1>Для<br>своих.</h1></div><button class="home-cta" data-nav="paypal_request">Получить PayPal <span>↗</span></button></section><section class="membership"><div class="member-line"><span>Личный кабинет</span><b>${escape(data.user.name)} / DT TEAM</b></div><div class="balance-label">Доступно к выплате</div><div class="balance">${amount(summary.available)}<span>USDT</span><button aria-label="Открыть кошелёк" data-nav="wallet">↗</button></div><button class="held" data-nav="wallet"><span>◷ Ждём вывод с PayPal</span><strong>${amount(summary.held)} USDT ↗</strong></button></section><section class="home-list"><h2>Мои PayPal / ${String(summary.working).padStart(2,'0')}</h2><button data-nav="my_paypals">PayPal в работе и вся история <span>Смотреть →</span></button><button data-nav="dt_payments">DT Payments <span>↗</span></button><button data-nav="support">Поддержка <span>↗</span></button>${data.user.admin?'<button data-nav="admin_home">Администрирование <span>↗</span></button>':''}</section>`;
+    return `<section class="entry"><img src="/static/art/home.webp" alt="Альф в чёрном костюме на троне"><div class="entry-copy"><span>${data.work?'РАБОТА ОТКРЫТА':'STOP WORK'}</span><h1>Для<br>своих.</h1></div><button class="home-cta" data-nav="paypal_request">Получить PayPal <span>↗</span></button></section><section class="membership"><div class="member-line"><span>Личный кабинет</span><b>${escape(data.user.name)} / DT TEAM</b></div><div class="balance-label">Доступно к выплате</div><div class="balance">${amount(summary.available)}<span>USDT</span><button aria-label="Открыть кошелёк" data-nav="wallet">↗</button></div><button class="held" data-nav="wallet"><span>◷ Ждём вывод с PayPal</span><strong>${amount(summary.held)} USDT ↗</strong></button></section>${data.wheel?.enabled?`<button class="wheel-entry" data-nav="wheel"><div><strong>DT Колесо</strong><small>${data.wheel.available?`Доступно вращений: ${data.wheel.available}`:`Каждые 150 € — новое вращение`}</small></div><span>↗</span></button>`:''}<section class="home-list"><h2>Мои PayPal / ${String(summary.working).padStart(2,'0')}</h2><button data-nav="my_paypals">PayPal в работе и вся история <span>Смотреть →</span></button><button data-nav="dt_payments">DT Payments <span>↗</span></button><button data-nav="support">Поддержка <span>↗</span></button>${data.user.admin?'<button data-nav="admin_home">Администрирование <span>↗</span></button>':''}</section>`;
   }
   function copyHTML(message,data){
     const html=message.html||'';
     if(data.payouts)return `<p class="admin-summary">Выберите участника для выплаты. Его доступные начисления объединятся в один чек.</p><details class="details"><summary>Общая статистика выплат</summary><div class="copy">${html}</div></details>`;
     if(data.dashboard){const d=data.dashboard;return `<div class="admin-state">${data.work?'Работа открыта':'STOP WORK'} <span>· AUTO ${d.auto_issue?'вкл.':'выкл.'}</span></div><p class="admin-summary">Очередь: ${d.queue} · На проверке: ${d.waiting_check}</p><details class="details"><summary>Сводка по клубу</summary><div class="copy">${html}</div></details>`;}
-    if(data.wallet){const w=data.wallet;return `<div class="wallet-card"><div class="balance-label">Доступно к выплате</div><div class="balance">${amount(w.available)}<span>USDT</span></div></div><div class="wallet-held">Ждём вывод с PayPal<strong>${amount(w.held)} USDT</strong></div><div class="wallet-line">Способ выплаты<strong>${w.method==='xrocket'?'xRocket':'CryptoBot'}</strong></div><div class="wallet-line">Выплачено всего<strong>${amount(w.paid)} USDT</strong></div><div class="wallet-line">Выплат за всё время<strong>${w.count_paid}</strong></div><details class="details"><summary>Подробности баланса</summary><div class="copy">${html}</div></details>`;}
+    if(data.wallet){const w=data.wallet;return `<div class="wallet-card"><div class="balance-label">Доступно к выплате</div><div class="balance">${amount(w.available)}<span>USDT</span></div></div><div class="wallet-held">Ждём вывод с PayPal<strong>${amount(w.held)} USDT</strong></div><div class="wallet-line">Способ выплаты<strong>${w.method==='xrocket'?'xRocket':'CryptoBot'}</strong></div><div class="wallet-line">Выплачено всего<strong>${amount(w.paid)} USDT</strong></div><div class="wallet-line">Выплат за всё время<strong>${w.count_paid}</strong></div>${w.wheel_next_bonus?`<div class="wallet-held">DT Колесо · к следующей оплате<strong>+${w.wheel_next_bonus}%</strong><small>Бонусов в очереди: ${w.wheel_bonus_count}</small></div>`:''}<details class="details"><summary>Подробности баланса</summary><div class="copy">${html}</div></details>`;}
     return `<div class="copy">${html.replace(/^━+\n/gm,'').replace(/\n━+$/gm,'')}</div>`;
   }
   function render(data){
@@ -96,6 +96,7 @@
       screen.innerHTML='<section class="entry"><img src="/static/art/support.webp" alt="Альф на связи"><div class="entry-copy"><span>DT TEAM</span><h1>Доступ<br>закрыт.</h1><p>Обратитесь в поддержку.</p><a class="entry-action" href="https://t.me/profitgeld">Написать поддержке ↗</a></div></section>';nav.hidden=true;return;
     }
     if(data.route==='home'&&data.summary){screen.innerHTML=homeHTML(data);}
+    else if(data.route==='wheel'){screen.innerHTML='<div id="wheel-root"></div>';window.DTWheel.mount(document.getElementById('wheel-root'),data.wheel,{request,busy,isBusy:()=>inFlight,notice:showNotice,userId:data.user.id,haptic:()=>tg?.HapticFeedback?.notificationOccurred?.('success'),updated:refreshUpdates});}
     else{
       const messages=data.messages||[], first=messages.find(m=>m.html)||messages[0];
       const lines=plain(first?.html).split('\n').filter(x=>x.trim());
@@ -141,7 +142,8 @@
       events=updates.events;knownEvents=new Set(events.map(event=>event.id));updateBadge();
       if(fresh.length){liveAlert.textContent=fresh.length===1?`${fresh[0].title} · Открыть`:`Новых событий: ${fresh.length} · Открыть`;liveAlert.hidden=false;tg?.HapticFeedback?.notificationOccurred?.('success');clearTimeout(alertTimer);alertTimer=setTimeout(()=>liveAlert.hidden=true,9000);}
       if(eventPanel.open){drawEvents();markRead();}
-      if(current.route==='home'&&!inFlight&&JSON.stringify([current.summary,current.work])!==JSON.stringify([updates.summary,updates.work])){current.summary=updates.summary;current.work=updates.work;screen.innerHTML=homeHTML(current);}
+      if(current.route==='home'&&!inFlight&&JSON.stringify([current.summary,current.work,current.wheel])!==JSON.stringify([updates.summary,updates.work,updates.wheel])){current.summary=updates.summary;current.work=updates.work;current.wheel=updates.wheel;screen.innerHTML=homeHTML(current);}
+      if(current.route==='wheel'&&!inFlight)window.DTWheel?.refresh(updates.wheel);
       if(current.wallet&&!inFlight){current.wallet.available=updates.summary.available;current.wallet.held=updates.summary.held;const card=screen.querySelector('.wallet-card .balance'),held=screen.querySelector('.wallet-held strong');if(card)card.innerHTML=`${amount(updates.summary.available)}<span>USDT</span>`;if(held)held.textContent=amount(updates.summary.held)+' USDT';}
     }catch(error){if(error.status===401){showNotice(error.message);token='';}}
     finally{updating=false;if(token)updateTimer=setTimeout(refreshUpdates,12000);}
@@ -184,7 +186,7 @@
     if(current.form||current.journey){poll();return;}
     const refreshButton=current.messages.flatMap(m=>m.rows.flat()).find(b=>b.action&&/обновить/i.test(b.label));
     if(refreshButton){act({action:refreshButton.action});return;}
-    if(['home','paypal_request','my_paypals','wallet','profile','support','dt_payments','admin_home'].includes(current.route))act({nav:current.route});
+    if(['home','paypal_request','my_paypals','wallet','profile','support','dt_payments','admin_home','wheel'].includes(current.route))act({nav:current.route});
     else poll();
   });
   document.getElementById('back').addEventListener('click',goBack);

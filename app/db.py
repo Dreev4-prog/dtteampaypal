@@ -6,7 +6,7 @@ import secrets
 from typing import Awaitable, Callable, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, select, text, func, or_, and_
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, CheckConstraint, Index, select, text, func, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -108,6 +108,7 @@ class Request(Base):
     happy_hours_percent: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     happy_hours_locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     happy_hours_applied: Mapped[int] = mapped_column(Integer, default=0)
+    wheel_bonus_percent: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     collection_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -162,10 +163,14 @@ class PaypalReturn(Base):
 
 class BalanceEntry(Base):
     __tablename__ = "balance_entries"
+    __table_args__ = (CheckConstraint(
+        "(request_id IS NOT NULL AND wheel_spin_id IS NULL) OR "
+        "(request_id IS NULL AND wheel_spin_id IS NOT NULL)", name="ck_balance_origin"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
-    request_id: Mapped[int] = mapped_column(Integer, ForeignKey("requests.id"), unique=True, index=True)
+    request_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("requests.id"), unique=True, index=True, nullable=True)
+    wheel_spin_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("wheel_spins.id"), unique=True, nullable=True)
     amount: Mapped[float] = mapped_column(Numeric(12, 2))
     status: Mapped[str] = mapped_column(String(20), default="available", index=True)
     payout_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
@@ -183,6 +188,57 @@ class ManualPayout(Base):
     admin_id: Mapped[int] = mapped_column(BigInteger)
     source_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, server_default=func.now())
+
+
+class WheelCampaign(Base):
+    """One persistent promotion. Pausing never resets its prizes or balances."""
+    __tablename__ = "wheel_campaign"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    changed_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    jackpot_spin_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+
+class WheelPeriod(Base):
+    __tablename__ = "wheel_periods"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    started_by: Mapped[int] = mapped_column(BigInteger)
+    ended_by: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+
+class WheelPayment(Base):
+    """Eligibility is recorded only in the payment-confirmation transaction."""
+    __tablename__ = "wheel_payments"
+    request_id: Mapped[int] = mapped_column(Integer, ForeignKey("requests.id"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
+    period_id: Mapped[int] = mapped_column(Integer, ForeignKey("wheel_periods.id"))
+    amount: Mapped[int] = mapped_column(Integer)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime)
+    credited_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    cancelled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class WheelSpin(Base):
+    __tablename__ = "wheel_spins"
+    __table_args__ = (
+        UniqueConstraint("user_id", "nonce", name="uq_wheel_user_nonce"),
+        Index("ux_wheel_single_jackpot", "prize", unique=True,
+              postgresql_where=text("prize = 'jackpot'"), sqlite_where=text("prize = 'jackpot'")),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
+    nonce: Mapped[str] = mapped_column(String(80))
+    prize: Mapped[str] = mapped_column(String(16))
+    points: Mapped[int] = mapped_column(Integer, default=0)
+    cash: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    used_request_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("requests.id"), unique=True, nullable=True)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class HappyHoursCampaign(Base):
@@ -260,6 +316,8 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        from app.wheel import migrate
+        await migrate(conn)
         await _migrate_paypal_warmup(conn)
 
         # create_all не добавляет новые столбцы в уже существующие таблицы.
@@ -1660,6 +1718,8 @@ async def mark_paypal_withdrawn(request_id: int, admin_id: int) -> tuple[Request
             req.paypal_withdrawn_at = now
             req.paypal_withdrawn_by = admin_id
             req.updated_at = now
+            from app.wheel import on_withdrawal
+            await on_withdrawal(session, req)
         await session.refresh(req)
         return req, "done"
 
@@ -1685,6 +1745,10 @@ async def wait_paypal_withdrawal(request_id: int, expected_count: int) -> tuple[
 
 async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
     async with SessionLocal() as session:
+        user_id = await session.scalar(select(Request.user_id).where(Request.id == request_id))
+        if user_id is None:
+            return None
+        await session.get(User, user_id, with_for_update=True)
         req = await session.get(Request, request_id, with_for_update=True)
         if req is None or req.status != "waiting_check":
             return None
@@ -1692,10 +1756,11 @@ async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
         if percent is None:
             return None
         req.status = "withdrawal_pending"
+        from app.wheel import on_confirmation
+        percent = await on_confirmation(session, req, percent)
         req.payout_percent = percent
         req.payout_amount = round(req.amount * percent / 100, 2)
         req.happy_hours_applied = 1 if is_happy else 0
-        req.payment_confirmed_at = datetime.utcnow()
         req.payment_confirmed_by = admin_id
         req.updated_at = datetime.utcnow()
         existing_entry = await session.scalar(select(BalanceEntry).where(BalanceEntry.request_id == req.id))
@@ -1718,6 +1783,10 @@ async def confirm_working_payment(request_id: int, admin_id: int) -> Request | N
     created for the request. Repeated callback presses cannot duplicate it.
     """
     async with SessionLocal() as session:
+        user_id = await session.scalar(select(Request.user_id).where(Request.id == request_id))
+        if user_id is None:
+            return None
+        await session.get(User, user_id, with_for_update=True)
         req = await session.get(Request, request_id, with_for_update=True)
         if req is None or req.status != "paypal_issued":
             return None
@@ -1726,10 +1795,11 @@ async def confirm_working_payment(request_id: int, admin_id: int) -> Request | N
             return None
         now = datetime.utcnow()
         req.status = "withdrawal_pending"
+        from app.wheel import on_confirmation
+        percent = await on_confirmation(session, req, percent)
         req.payout_percent = percent
         req.payout_amount = round(req.amount * percent / 100, 2)
         req.happy_hours_applied = 0
-        req.payment_confirmed_at = now
         req.payment_confirmed_by = admin_id
         req.updated_at = now
         existing_entry = await session.scalar(
@@ -1817,6 +1887,8 @@ async def refund_confirmed_payment(request_id: int, admin_id: int) -> tuple[Requ
             req.payment_refunded_at = now
             req.payment_refunded_by = admin_id
             req.updated_at = now
+            from app.wheel import on_refund
+            await on_refund(session, req)
         await session.refresh(req)
         return req, "refunded"
 
@@ -1964,6 +2036,11 @@ async def get_effective_rate_for_request(
         if req is None:
             return None, None, False
         percent, is_happy = await _get_effective_request_rate(session, req)
+        if percent is not None and req.status == "waiting_check":
+            coupon = await session.scalar(select(WheelSpin.points).where(
+                WheelSpin.user_id == req.user_id, WheelSpin.points > 0,
+                WheelSpin.used_request_id.is_(None)).order_by(WheelSpin.id).limit(1))
+            percent += coupon or 0
         payout = round(req.amount * percent / 100, 2) if percent is not None else None
         return percent, payout, is_happy
 
@@ -3614,7 +3691,12 @@ async def get_user_balance(user_id: int) -> dict:
             select(ManualPayout).where(ManualPayout.user_id == user_id).order_by(ManualPayout.id.desc()).limit(1)
         )
         method = await session.scalar(select(User.payout_method).where(User.id == user_id)) or "cryptobot"
+        coupon_points = list(await session.scalars(select(WheelSpin.points).where(
+            WheelSpin.user_id == user_id, WheelSpin.points > 0, WheelSpin.used_request_id.is_(None)
+        ).order_by(WheelSpin.id)))
         return {
+            "wheel_next_bonus": coupon_points[0] if coupon_points else 0,
+            "wheel_bonus_count": len(coupon_points),
             "available": available, "held": held, "paid": paid, "count_available": count_available,
             "count_paid": count_paid, "last": last, "method": method,
         }
@@ -3678,12 +3760,20 @@ async def complete_manual_payout(
                 return None
             if expected_provider is not None and (user.payout_method or "cryptobot") != expected_provider:
                 return None
-            request_ids = [entry.request_id for entry in entries]
+            request_ids = [entry.request_id for entry in entries if entry.request_id is not None]
+            bonus_entries = [entry for entry in entries if entry.request_id is None]
+            # Cash prizes share the wallet, snapshot and provider routing, but
+            # are not fabricated PayPal requests. Validate their origin too.
+            for bonus in bonus_entries:
+                spin = await session.get(WheelSpin, bonus.wheel_spin_id) if bonus.wheel_spin_id else None
+                if (spin is None or spin.user_id != user_id or spin.cash <= 0
+                        or Decimal(str(bonus.amount)) != Decimal(spin.cash)):
+                    return None
             requests = list(await session.scalars(
                 select(Request).where(Request.id.in_(request_ids)).order_by(Request.id).with_for_update()
             ))
-            if len(requests) != len(entries) or any(
-                req.status != "payout_pending" or req.paypal_withdrawn_at is None
+            if len(requests) != len(request_ids) or any(
+                req.user_id != user_id or req.status != "payout_pending" or req.paypal_withdrawn_at is None
                 or req.payout_at is not None for req in requests
             ):
                 return None

@@ -3829,7 +3829,8 @@ async def paypal_withdraw_done_handler(callback: CallbackQuery) -> None:
             f"➕ Баланс к выплате пополнен на <b>{float(req.payout_amount or 0):.2f} USDT</b>\n\n"
             f"💰 Всего доступно к выплате: <b>{balance['available']:.2f} USDT</b>\n"
             f"💸 Способ выплаты: <b>{provider}</b>\n\n"
-            "Ожидайте выплату от администрации.",
+            "Ожидайте выплату от администрации."
+            + (f"\n\n🎡 DT Колесо: +{req._wheel_added} вращ. Доступно: {req._wheel_progress['available']}. Откройте Mini App." if getattr(req, "_wheel_added", 0) > 0 else ""),
             reply_markup=back_home(),
         )
     except Exception:
@@ -4459,6 +4460,9 @@ async def admin_confirm(callback: CallbackQuery) -> None:
 
 async def _notify_confirmed_payment(bot, req, *, photo: bool = True) -> bool:
     tag = await get_paypal_tag(req.paypal_tag_id) if req.paypal_tag_id else None
+    from app.wheel import payment_note
+    wheel_note = await payment_note(req.id)
+    bonus_note = f"\n🎡 Бонус DT Колеса: +{req.wheel_bonus_percent}% к этой оплате." if req.wheel_bonus_percent else ""
     text = (
         f"✅ <b>Оплата подтверждена · заявка #{req.id}</b>\n\n"
         f"💳 PayPal: <code>{escape(tag.tag) if tag else '—'}</code>\n"
@@ -4466,10 +4470,10 @@ async def _notify_confirmed_payment(bot, req, *, photo: bool = True) -> bool:
         f"{'🔥 Happy Hours' if req.happy_hours_applied else '📊 Ваш процент'}: <b>{req.payout_percent}%</b>\n"
         f"💰 Ваше начисление: <b>{float(req.payout_amount or 0):.2f} USDT</b>\n\n"
         "⏳ Средства ожидают вывода с PayPal. После успешного вывода "
-        "начисление поступит на ваш баланс к выплате."
+        "начисление поступит на ваш баланс к выплате." + bonus_note + wheel_note
     )
     try:
-        if photo:
+        if photo and len(text.encode("utf-16-le")) // 2 <= 1024:
             await bot.send_photo(req.user_id, photo=FSInputFile(BANNERS["issued"]), caption=text, reply_markup=back_home())
         else:
             await bot.send_message(req.user_id, text, reply_markup=back_home())
@@ -7487,6 +7491,9 @@ async def wallet_handler(callback: CallbackQuery) -> None:
         f"📦 Количество выплат: <b>{data['count_paid']}</b>\n"
         f"📅 Последняя выплата: <b>{last_text}</b>"
     )
+    if data["wheel_next_bonus"]:
+        text += (f"\n\n🎡 DT Колесо: <b>+{data['wheel_next_bonus']}%</b> к следующей подтверждённой оплате. "
+                 f"Бонусов в очереди: <b>{data['wheel_bonus_count']}</b>.")
     await render_screen(callback, "profile", text, wallet_menu())
     await callback.answer()
 
@@ -7632,7 +7639,8 @@ async def payout_user_handler(callback: CallbackQuery, state: FSMContext) -> Non
     if data["entries"]:
         lines.extend(["", "<b>Начисления:</b>"])
         for e in data["entries"][:15]:
-            lines.append(f"• Заявка #{e.request_id} · {float(e.amount):.2f} USDT")
+            label = f"Заявка #{e.request_id}" if e.request_id else f"DT Колесо · приз #{e.wheel_spin_id}"
+            lines.append(f"• {label} · {float(e.amount):.2f} USDT")
     await replace_photo_with_text(callback, "\n".join(lines), payout_user_menu(user_id, data["total"] > 0))
     await callback.answer()
 
@@ -7714,3 +7722,74 @@ async def manual_payout_check_handler(message: Message, state: FSMContext) -> No
         f"Способ: <b>{provider}</b>\n\n"
         "Начисления из чека списаны. Связанные заявки перенесены в категорию «Выплачено»."
     )
+
+
+async def show_wheel_admin(callback):
+    from app import wheel
+    data = await wheel.state(callback.from_user.id, admin=True)
+    stats = data["statistics"]
+    status = "ВКЛЮЧЕНА" if data["enabled"] else "ВЫКЛЮЧЕНА"
+    text = (
+        f"🎡 <b>DT КОЛЕСО · {status}</b>\n\n"
+        "1 вращение за каждые 150 € оплат, подтверждённых во время акции. "
+        "Прогресс начисляется после вывода с PayPal. Старые подтверждения не участвуют.\n\n"
+        "При отключении колесо скрыто от работников, новые подтверждения не участвуют. "
+        "Уже участвующие оплаты засчитываются после вывода; вращения и бонусы сохраняются.\n\n"
+        "+1%, +2%, +4%, +5%, +10% — к следующей подтверждённой оплате, по одному бонусу. "
+        "Денежные призы: 20 и 500 USDT, через обычный центр выплат.\n"
+        f"Главный приз: {'разыгран' if data['jackpot_claimed'] else '1 × 500 $ доступен'}.\n\n"
+        f"Участников: <b>{stats['participants']}</b> · Вращений: <b>{stats['spins']}</b>\n"
+        f"Начислено денежных призов: <b>{stats['cash']} USDT</b>"
+    )
+    rows = [[InlineKeyboardButton(
+        text="⏹ Выключить акцию" if data["enabled"] else "▶️ Включить акцию",
+        callback_data=f"wheel_toggle:{0 if data['enabled'] else 1}:{data['revision']}")]]
+    if data["enabled"]:
+        rows.append([InlineKeyboardButton(text="🎡 Открыть колесо", callback_data="wheel")])
+    rows.extend([[InlineKeyboardButton(text="🔄 Обновить", callback_data="wheel_admin")],
+                 [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")]])
+    await render_screen(callback, "admin", text, InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data == "wheel_admin")
+async def wheel_admin_handler(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await show_wheel_admin(callback)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("wheel_toggle:"))
+async def wheel_toggle_handler(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    from app import wheel
+    try:
+        _, enabled, revision = callback.data.split(":")
+        if enabled not in {"0", "1"}:
+            raise ValueError()
+        result = await wheel.set_enabled(enabled == "1", callback.from_user.id, int(revision))
+    except ValueError:
+        await callback.answer("Обновите экран", show_alert=True)
+        return
+    await state.clear()
+    await show_wheel_admin(callback)
+    await callback.answer("Экран устарел. Проверьте состояние акции." if result == "stale" else "Состояние акции сохранено")
+
+
+@router.callback_query(F.data == "wheel")
+async def wheel_home_handler(callback: CallbackQuery, state: FSMContext):
+    if not await has_access(callback):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    from app import wheel
+    data = await wheel.summary(callback.from_user.id)
+    await state.clear()
+    text = (f"🎡 <b>DT КОЛЕСО</b>\n\nДоступно вращений: {data.get('available', 0)}. "
+            "Откройте колесо в Mini App." if data["enabled"] else
+            "🎡 Акция сейчас выключена. Заработанные бонусы сохранены.")
+    await render_screen(callback, "home", text, main_menu())
+    await callback.answer()

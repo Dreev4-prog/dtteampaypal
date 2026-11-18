@@ -18,14 +18,14 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Chat, Message, Updat
 from sqlalchemy import text
 
 from app.config import settings
-from app import db
+from app import db, wheel
 from app.miniapp_auth import validate_init_data
 from app.miniapp_transport import WebTransport, public_records, web_context, media_bytes
 
 STATIC = Path(__file__).resolve().parent / "miniapp_static"
 TTL = 8 * 3600
 MAX_PHOTO = 8 * 1024 * 1024
-NAVIGATION = {"home", "paypal_request", "request_back", "my_paypals", "wallet", "profile", "support", "dt_payments", "admin_home"}
+NAVIGATION = {"home", "paypal_request", "request_back", "my_paypals", "wallet", "profile", "support", "dt_payments", "admin_home", "wheel"}
 
 
 @dataclass
@@ -139,10 +139,41 @@ class MiniApp:
             from app.miniapp_events import recent_events
             session.updates = {"events": await recent_events(session.user.id, admin),
                                "summary": await db.get_user_home_summary(session.user.id),
-                               "work": await db.is_work_enabled()}
+                               "work": await db.is_work_enabled(),
+                               "wheel": await wheel.summary(session.user.id)}
             session.updates["summary"] = {k: float(v) for k, v in session.updates["summary"].items()}
             session.updates_at = time.time()
         return web.json_response(session.updates)
+
+    async def wheel_access(self, request):
+        session = self.session(request)
+        user, _ = await self.identity(session)
+        if not user or user.status != "approved":
+            raise web.HTTPForbidden(text="Доступ к акции закрыт.")
+        return session
+
+    async def get_wheel(self, request):
+        session = await self.wheel_access(request)
+        return web.json_response(await wheel.state(session.user.id))
+
+    async def spin_wheel(self, request):
+        session = await self.wheel_access(request)
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"request_id"}:
+            raise web.HTTPBadRequest(text="Недействительный запрос вращения.")
+        hits = [t for t in session.hits if time.time() - t < 60]
+        if len(hits) >= 90:
+            raise web.HTTPTooManyRequests(text="Слишком много действий. Подождите немного.")
+        session.hits = hits + [time.time()]
+        async with self.lock(session.user.id):
+            # A replacement WebView may have revoked this session while waiting.
+            self.session(request)
+            try:
+                result = await wheel.spin(session.user.id, body.get("request_id"))
+            except ValueError as exc:
+                raise web.HTTPConflict(text=str(exc)) from exc
+            session.updates_at = 0
+            return web.json_response({"result": result, "wheel": await wheel.state(session.user.id)})
 
     async def action(self, request):
         session = self.session(request)
@@ -296,7 +327,10 @@ class MiniApp:
                 "messages": public_records(session), "notices": session.notices,
                 "form": form_description(form_state, state_data),
                 "journey": journey_description(form_state, state_data),
+                "wheel": await wheel.summary(session.user.id) if approved or admin else {"enabled": False},
             }
+            if session.route == "wheel" and (approved or admin):
+                session.response["wheel"] = await wheel.state(session.user.id)
             if admin and session.route.startswith("payouts_v22"):
                 totals = await db.get_payout_dashboard_counts()
                 session.response["payouts"] = {key: float(totals.get(key, 0)) for key in ("cryptobot_total", "xrocket_total")}
@@ -304,7 +338,7 @@ class MiniApp:
                 session.response["dashboard"] = await db.get_dashboard_summary()
             if approved and session.route in {"wallet", "my_balance"}:
                 balance = await db.get_user_balance(session.user.id)
-                session.response["wallet"] = {key: balance[key] for key in ("available", "held", "paid", "count_paid", "method")}
+                session.response["wallet"] = {key: balance[key] for key in ("available", "held", "paid", "count_paid", "method", "wheel_next_bonus", "wheel_bonus_count")}
             keep_ids = {record["id"] for record in session.display}
             session.messages = {key: value for key, value in session.messages.items() if key in keep_ids}
             media_ids = {item["id"] for record in session.display for item in (record.get("photo"), record.get("document")) if item}
@@ -468,6 +502,8 @@ def create_app(bot, dispatcher):
     app.router.add_get("/api/state", service.get_state)
     app.router.add_get("/api/updates", service.get_updates)
     app.router.add_post("/api/action", service.action)
+    app.router.add_get("/api/wheel", service.get_wheel)
+    app.router.add_post("/api/wheel/spin", service.spin_wheel)
     app.router.add_get("/api/media/{media_id}", service.media)
 
     async def health(request):

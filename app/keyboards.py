@@ -195,6 +195,7 @@ def admin_main_menu(
             InlineKeyboardButton(text=work_label, callback_data="work_control"),
         ],
         [InlineKeyboardButton(text="🔥 HAPPY HOURS", callback_data="happy_hours_menu")],
+        [InlineKeyboardButton(text="🎡 DT КОЛЕСО", callback_data="wheel_admin")],
         [InlineKeyboardButton(text="📅 АВТОПОСТЫ", callback_data="ap:list:0")],
         [InlineKeyboardButton(text="🔍 ОБЩИЙ ПОИСК", callback_data="global_search")],
         [InlineKeyboardButton(text="👤 ПОЛЬЗОВАТЕЛЬ ПО ID / @USERNAME", callback_data="member_tag_search")],

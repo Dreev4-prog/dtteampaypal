@@ -58,4 +58,22 @@ async def recent_events(user_id, admin=False):
             if not own:
                 body = f"ID {payout.user_id} · " + body
             add(f"paid:{payout.id}", payout.created_at, "Выплата завершена", body, "wallet" if own else "admin_home", "История выплат" if own else "Открыть управление", "success")
+    async with db.SessionLocal() as session:
+        campaign = await session.get(db.WheelCampaign, 1)
+        wheel_on = bool(campaign and campaign.enabled)
+        spins = select(db.WheelSpin)
+        if not admin:
+            spins = spins.where(db.WheelSpin.user_id == user_id)
+        for spin in await session.scalars(spins.order_by(db.WheelSpin.id.desc()).limit(20)):
+            own = spin.user_id == user_id
+            reward = f"{spin.cash} USDT зачислены в кошелёк" if spin.cash else f"+{spin.points}% к следующей подтверждённой оплате"
+            add(f"wheel:{spin.id}", spin.created_at, "Приз DT Колеса", reward if own else f"ID {spin.user_id} · {reward}",
+                "wheel" if own and wheel_on else "wallet" if own else "admin_home",
+                "Открыть колесо" if own and wheel_on else "Открыть кошелёк" if own else "Управление", "success")
+        for payment in await session.scalars(select(db.WheelPayment).where(
+                db.WheelPayment.user_id == user_id, db.WheelPayment.credited_at.is_not(None),
+                db.WheelPayment.cancelled_at.is_(None)).order_by(db.WheelPayment.credited_at.desc()).limit(15)):
+            add(f"wheel-progress:{payment.request_id}", payment.credited_at, "Прогресс DT Колеса пополнен",
+                f"Засчитано {payment.amount} €. Каждые 150 € дают одно вращение.",
+                "wheel" if wheel_on else "wallet", "Открыть колесо" if wheel_on else "Открыть кошелёк", "success")
     return sorted(events, key=lambda e: (e["at"], e["id"]), reverse=True)[:60]

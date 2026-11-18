@@ -331,6 +331,73 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await db.get_user_balance(1))['available'],105)
         self.assertEqual((await db.get_request(1)).status,'payment_refunded')
 
+    async def test_wheel_admin_activation_visibility_and_stale_toggle(self):
+        from app import wheel
+        await self.login(1)
+        self.assertFalse(self.view['wheel']['enabled'])
+        await self.act(nav='wheel')
+        self.assertFalse(self.view['wheel']['enabled'])
+        self.assertIn('выключена',self.text())
+        await self.login(999)
+        await self.act(nav='admin_home')
+        await self.act(action=self.button('DT КОЛЕСО'))
+        self.assertIn('ВЫКЛЮЧЕНА',self.text())
+        await self.act(action=self.button('Включить акцию'))
+        self.assertTrue((await wheel.state(1))['enabled'])
+        self.assertIn('ВКЛЮЧЕНА',self.text())
+        await self.login(1)
+        self.assertTrue(self.view['wheel']['enabled'])
+        self.assertEqual(self.view['wheel']['available'],0)  # historical fixture payments excluded
+        await self.act(nav='wheel')
+        self.assertEqual(self.view['wheel']['history'],[])
+        await self.login(999)
+        await self.act(nav='admin_home')
+        await self.act(action=self.button('DT КОЛЕСО'))
+        await self.act(action=self.button('Выключить акцию'))
+        await self.login(1)
+        self.assertFalse(self.view['wheel']['enabled'])
+
+    async def test_wheel_api_cash_credit_replay_ownership_and_disabled_access(self):
+        from app import wheel
+        await wheel.set_enabled(True,999,0)
+        async with db.SessionLocal() as s, s.begin():
+            req=db.Request(user_id=1,amount=150,status='waiting_check')
+            s.add(req);await s.flush()
+        await db.confirm_payment(req.id,999)
+        await db.mark_paypal_withdrawn(req.id,999)
+        await self.login(1)
+        body={'request_id':'wheel-api-retry-nonce-123'}
+        with patch.object(wheel,'choose_prize',return_value='cash'):
+            response=await self.client.post('/api/wheel/spin',headers=self.headers,json=body)
+        self.assertEqual(response.status,200)
+        first=await response.json()
+        self.assertEqual(first['result']['cash'],20)
+        balance=(await db.get_user_balance(1))['available']
+        # Reopening invalidates the old UI session, but the DB request ID survives.
+        await self.login(1)
+        response=await self.client.post('/api/wheel/spin',headers=self.headers,json=body)
+        self.assertEqual((await response.json())['result']['id'],first['result']['id'])
+        self.assertEqual((await db.get_user_balance(1))['available'],balance)
+        response=await self.client.post('/api/wheel/spin',headers=self.headers,json={**body,'user_id':2})
+        self.assertEqual(response.status,400)
+        await self.login(2)
+        response=await self.client.get('/api/wheel',headers=self.headers)
+        self.assertEqual((await response.json())['history'],[])
+        response=await self.client.post('/api/wheel/spin',headers=self.headers,json=body)
+        self.assertEqual(response.status,409)
+        await self.login(3)
+        self.assertEqual((await self.client.get('/api/wheel',headers=self.headers)).status,403)
+        self.assertEqual((await self.client.post('/api/wheel/spin',headers=self.headers,json=body)).status,403)
+        self.assertEqual((await self.client.get('/api/wheel')).status,401)
+        await self.login(1)
+        await wheel.set_enabled(False,999,1)
+        self.assertEqual((await self.client.post('/api/wheel/spin',headers=self.headers,json={'request_id':'new-disabled-nonce-123'})).status,409)
+        response=await self.client.post('/api/wheel/spin',headers=self.headers,json=body)
+        self.assertEqual((await response.json())['result']['id'],first['result']['id'])
+        response=await self.client.get('/api/updates',headers=self.headers)
+        events=(await response.json())['events']
+        self.assertTrue(any(e['title']=='Приз DT Колеса' and '20 USDT' in e['body'] for e in events))
+
 
 if __name__=='__main__':
     unittest.main()
