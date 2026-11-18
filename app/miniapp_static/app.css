@@ -6,3 +6,33 @@
 /* Task-focused screens keep the controls near the user's thumb. */
 #dt-app{padding-top:var(--safe-top,0px)}.brand>.brand-name{font-size:11px;letter-spacing:.22em;line-height:1.4}.brand #back{margin:0 3px 0 -9px;width:34px;border-color:transparent;background:transparent;font-size:32px;flex-shrink:0}.brand #back[hidden]{display:none}.brand #refresh{margin-left:auto;flex-shrink:0}.cover.compact{height:150px}.cover.compact .cover-copy{padding:17px 22px}.cover.compact h1{font-size:31px;margin:20px 0 9px}.cover.compact small{display:none}.journey{margin:-3px 0 23px;padding-bottom:18px;border-bottom:1px solid var(--line)}.journey-steps{display:flex;justify-content:space-between;gap:8px}.journey-steps>span{display:flex;align-items:center;gap:6px;color:#87818b;font-size:10px}.journey-steps b{display:grid;place-items:center;width:22px;height:22px;border:1px solid #4c434c;border-radius:50%;font-weight:500}.journey-steps [aria-current]{color:#f0dfb9}.journey-steps [aria-current] b{background:#cfb784;color:#201b18;border-color:#cfb784}.journey-steps .done{color:#c3aa7d}.journey p{margin:12px 0 -5px;font-size:12px;color:#c6b395}.quick-amounts{display:flex;gap:8px;margin-top:10px}.quick-amounts button{min-height:42px;padding:8px 18px;border:1px solid #51473c;border-radius:6px;background:#29252a;color:#dfca9f;font-size:12px}.form .file-picker{position:relative;display:flex;justify-content:center;align-items:center;min-height:66px;padding:16px;border:1px dashed #8c7653;border-radius:8px;color:#e3d0ab;background:#2a2529;font-size:14px;cursor:pointer}.file-picker input[type=file]{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}#photo-preview{position:relative;margin:12px 0;padding:10px;border:1px solid var(--line);border-radius:8px}#photo-preview img{display:block;width:100%;max-height:230px;object-fit:contain}#photo-preview span{display:block;font-size:11px;overflow-wrap:anywhere;margin-top:8px}#photo-preview button{background:none;border:0;color:#d5ba87;padding:10px 0;min-height:44px;font-size:12px}.selection-label{display:block;color:#c8af7b;font-size:10px;margin-top:3px}#notice{position:fixed;z-index:25;top:calc(12px + var(--safe-top,0px));left:50%;transform:translateX(-50%);width:calc(100% - 32px);max-width:610px;max-height:34dvh;overflow:auto;margin:0;border:1px solid #6c5940;border-radius:10px;box-shadow:0 8px 30px #0009;padding-right:38px}#notice:after{content:'×';position:absolute;right:14px;top:10px;font-size:23px;color:#c4ad88}#notice[hidden]{display:none}.keyboard-open #navigation{display:none}.keyboard-open #dt-app{padding-bottom:24px}.form{scroll-margin-top:18px}.action .label{min-width:0}.provider-totals strong{overflow-wrap:anywhere}.balance{flex-wrap:wrap}.balance button{flex-shrink:0}.wallet-held{flex-wrap:wrap}.row:has(>.action:nth-child(3)) .symbol,.row:has(>.action:nth-child(3)) .arrow{display:none}.row:has(>.action:nth-child(3)) .action{justify-content:center;text-align:center}.row:has(>.action:nth-child(4)){grid-template-columns:repeat(2,minmax(0,1fr))}@media(max-width:350px){.journey-steps>span{font-size:9px;gap:4px}.cover.compact h1{font-size:29px}.brand{padding-inline:18px}#navigation button{font-size:9px}.quick-amounts button{flex:1;padding-inline:8px}}
 .brand{gap:8px;padding-inline:16px}.brand #back{width:28px;margin-left:-4px;margin-right:2px}.brand .brand-name{font-size:10px;letter-spacing:.2em}.brand .brand-name span{font-size:8px;letter-spacing:.16em}.brand #refresh,.brand #notifications{width:38px;height:40px;flex-shrink:0}.brand #notifications{position:relative;margin-left:auto;display:grid;place-items:center}.brand #notifications[hidden]{display:none}.brand #refresh{margin-left:0}.brand:has(#notifications[hidden]) #refresh{margin-left:auto}#notification-count{position:absolute;right:-5px;top:-5px;display:grid;place-items:center;min-width:18px;height:18px;padding:0 4px;border-radius:10px;background:#d6ba81;color:#201b15;font-size:10px;letter-spacing:0;border:2px solid #151217}#notification-count[hidden]{display:none}#live-alert{position:fixed;z-index:22;bottom:calc(82px + var(--safe-bottom));left:50%;transform:translateX(-50%);width:calc(100% - 32px);max-width:610px;padding:17px 18px;background:#ded0b2;color:#27201a;border:1px solid #f4e1b8;border-radius:10px;font-size:13px;text-align:left;box-shadow:0 8px 30px #0009}#live-alert[hidden]{display:none}#notification-panel{width:100%;max-width:650px;max-height:88dvh;margin:auto auto 0;padding:24px 20px calc(24px + var(--safe-bottom));border:1px solid #665943;border-bottom:0;border-radius:22px 22px 0 0;background:#17151a;color:var(--ink);overscroll-behavior:contain}#notification-panel::backdrop{background:#000a;backdrop-filter:blur(5px)}#notification-panel header{display:flex;justify-content:space-between;align-items:center;gap:16px}#notification-panel header span{font-size:9px;letter-spacing:.2em;color:#c0a87b}#notification-panel h2{font:35px Club,Georgia,serif;margin:6px 0}#close-notifications{width:44px;height:44px;background:#29242a;color:#d3bd98;border:1px solid #534737;border-radius:50%;font-size:26px;flex-shrink:0}.notification-help{font-size:11px;color:#aaa0a5;line-height:1.6;margin:9px 0 22px}.event{padding:18px 16px;margin-bottom:12px;border:1px solid #3b343e;border-radius:10px;background:linear-gradient(130deg,#25212a,#1b191f)}.event.unread{border-left:3px solid #c9ad78}.event-top{display:flex;justify-content:space-between;align-items:center;gap:12px}.event-top span{color:#dcc18c;font-size:19px}.event time{font-size:10px;color:#aaa0a5}.event h3{font-size:14px;font-weight:600;line-height:1.5;margin:9px 0}.event p{font-size:12px;color:#bbb2b8;line-height:1.65;overflow-wrap:anywhere}.event button{background:none;border:0;color:#dec493;padding:10px 0;min-height:44px;text-align:left;font-size:12px}.empty-events{text-align:center;padding:30px 16px 50px;color:#aea3aa}.empty-events>span{font-size:35px;color:#c6ac7c}.empty-events h3{font-size:16px;color:#e9dfd0}.empty-events p{font-size:13px;line-height:1.6}.keyboard-open #live-alert{bottom:12px}
+
+.menu-icon {
+  display: block;
+  width: 22px;
+  height: 22px;
+}
+.balance button[data-nav="wallet"] { display: grid; place-items: center; }
+#navigation .tab-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+}
+#navigation .spin-count {
+  position: absolute;
+  top: -5px;
+  left: 17px;
+  min-width: 13px;
+  padding: 1px 3px;
+  border-radius: 8px;
+  background: #d8bb87;
+  color: #261c10;
+  font: 700 9px/12px Team, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 370px) {
+  #navigation:has(> button:nth-child(6)) { padding-inline: 2px; }
+  #navigation:has(> button:nth-child(6)) button { font-size: 9px; }
+}

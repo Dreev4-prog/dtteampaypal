@@ -2,7 +2,7 @@
 
 Admin → DT КОЛЕСО → Включить акцию / Выключить акцию. The migration starts
 OFF. This release does not activate the promotion or send a broadcast.
-The worker's Mini App home displays its wheel entry only while enabled.
+The Mini App shows the Wheel tab next to Wallet in the bottom bar only while the promotion is enabled. Its badge shows the participant’s available spins.
 The existing bot menu rows remain unchanged except for the new admin row.
 
 ## Eligibility and rewards

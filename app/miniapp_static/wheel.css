@@ -52,5 +52,3 @@
 #dt-wheel .dtw-history-item small{display:block;font-size:10px;color:#b1a4ab;margin-top:5px;line-height:1.6}
 #dt-wheel .dtw-list-note{font-size:12px;line-height:1.7;color:#b1a4ab;margin:16px 0}
 #dt-wheel .dtw-result p{margin-bottom:0}
-.wheel-entry{display:flex;align-items:center;justify-content:space-between;gap:15px;margin:0 22px 22px;width:calc(100% - 44px);padding:18px;color:#ecd1a3;background:linear-gradient(110deg,#382925,#17151b);border:1px solid #85643d;border-radius:9px;text-align:left}
-.wheel-entry strong{font:32px/1 Club,serif}.wheel-entry small{display:block;font:10px/1.7 Team,sans-serif;color:#bba997;margin-top:5px}.wheel-entry>span{font-size:24px}

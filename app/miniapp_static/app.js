@@ -12,7 +12,16 @@
   const plain = html => new DOMParser().parseFromString(html || '', 'text/html').body.textContent || '';
   const clean = label => label.replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu,'').trim() || (/⬅|◀/.test(label)?'Предыдущая':/➡|▶/.test(label)?'Следующая':/🗑/.test(label)?'Удалить':label);
   const art = banner => ({paypal:'paypal',issued:'paypal',database:'paypal',requests:'check',payments:'check',support:'support',profile:'support',broadcast:'support',links:'support'}[banner] || 'home');
-  const symbol = label => /выплат|кошел|баланс/i.test(label)?'◈':/поиск|найти/i.test(label)?'⌕':/назад|главно|меню/i.test(label)?'‹':/удал|отмен|отказ/i.test(label)?'×':/время|ждём|24|дат|истор/i.test(label)?'◷':/пользов|кабинет|участ/i.test(label)?'♙':/поддерж|сообщ|контент/i.test(label)?'✉':/добав|созда/i.test(label)?'+':'↗';
+  const walletIcon = `<svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M4 7.5V6.4c0-.9.6-1.7 1.5-1.9l11-2.4c.8-.2 1.5.4 1.5 1.2V6"/>
+    <path d="M20.5 10V8a2 2 0 0 0-2-2H5.8a2.3 2.3 0 0 0-2.3 2.3v10.1a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-2.1"/>
+    <path d="M21 10.4h-4.1a2.8 2.8 0 0 0 0 5.6H21z"/><circle cx="17.3" cy="13.2" r=".85" fill="currentColor" stroke="none"/>
+  </svg>`;
+  const wheelIcon = `<svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M8.1 4.8a8.6 8.6 0 1 0 7.8 0"/><path d="M9.6 2.2h4.8L12 7.3z" fill="currentColor" stroke-width=".8"/>
+    <path d="m5.1 8.1 5.6 3.9m2.6 0 5.6-3.9M5 17.7l5.7-4m2.6 0 5.7 4M12 14.5v6.2"/><circle cx="12" cy="12.9" r="1.6"/>
+  </svg>`;
+  const symbol = label => /выплат|кошел|баланс/i.test(label)?walletIcon:/поиск|найти/i.test(label)?'⌕':/назад|главно|меню/i.test(label)?'‹':/удал|отмен|отказ/i.test(label)?'×':/время|ждём|24|дат|истор/i.test(label)?'◷':/пользов|кабинет|участ/i.test(label)?'♙':/поддерж|сообщ|контент/i.test(label)?'✉':/добав|созда/i.test(label)?'+':'↗';
 
   async function request(path, body) {
     const controller=new AbortController(), timeout=setTimeout(()=>controller.abort(),20000);
@@ -74,7 +83,7 @@
   }
   function homeHTML(data){
     const summary=data.summary;
-    return `<section class="entry"><img src="/static/art/home.webp" alt="Альф в чёрном костюме на троне"><div class="entry-copy"><span>${data.work?'РАБОТА ОТКРЫТА':'STOP WORK'}</span><h1>Для<br>своих.</h1></div><button class="home-cta" data-nav="paypal_request">Получить PayPal <span>↗</span></button></section><section class="membership"><div class="member-line"><span>Личный кабинет</span><b>${escape(data.user.name)} / DT TEAM</b></div><div class="balance-label">Доступно к выплате</div><div class="balance">${amount(summary.available)}<span>USDT</span><button aria-label="Открыть кошелёк" data-nav="wallet">↗</button></div><button class="held" data-nav="wallet"><span>◷ Ждём вывод с PayPal</span><strong>${amount(summary.held)} USDT ↗</strong></button></section>${data.wheel?.enabled?`<button class="wheel-entry" data-nav="wheel"><div><strong>DT Колесо</strong><small>${data.wheel.available?`Доступно вращений: ${data.wheel.available}`:`Каждые 150 € — новое вращение`}</small></div><span>↗</span></button>`:''}<section class="home-list"><h2>Мои PayPal / ${String(summary.working).padStart(2,'0')}</h2><button data-nav="my_paypals">PayPal в работе и вся история <span>Смотреть →</span></button><button data-nav="dt_payments">DT Payments <span>↗</span></button><button data-nav="support">Поддержка <span>↗</span></button>${data.user.admin?'<button data-nav="admin_home">Администрирование <span>↗</span></button>':''}</section>`;
+    return `<section class="entry"><img src="/static/art/home.webp" alt="Альф в чёрном костюме на троне"><div class="entry-copy"><span>${data.work?'РАБОТА ОТКРЫТА':'STOP WORK'}</span><h1>Для<br>своих.</h1></div><button class="home-cta" data-nav="paypal_request">Получить PayPal <span>↗</span></button></section><section class="membership"><div class="member-line"><span>Личный кабинет</span><b>${escape(data.user.name)} / DT TEAM</b></div><div class="balance-label">Доступно к выплате</div><div class="balance">${amount(summary.available)}<span>USDT</span><button aria-label="Открыть кошелёк" data-nav="wallet">${walletIcon}</button></div><button class="held" data-nav="wallet"><span>◷ Ждём вывод с PayPal</span><strong>${amount(summary.held)} USDT ↗</strong></button></section><section class="home-list"><h2>Мои PayPal / ${String(summary.working).padStart(2,'0')}</h2><button data-nav="my_paypals">PayPal в работе и вся история <span>Смотреть →</span></button><button data-nav="dt_payments">DT Payments <span>↗</span></button><button data-nav="support">Поддержка <span>↗</span></button>${data.user.admin?'<button data-nav="admin_home">Администрирование <span>↗</span></button>':''}</section>`;
   }
   function copyHTML(message,data){
     const html=message.html||'';
@@ -83,6 +92,28 @@
     if(data.wallet){const w=data.wallet;return `<div class="wallet-card"><div class="balance-label">Доступно к выплате</div><div class="balance">${amount(w.available)}<span>USDT</span></div></div><div class="wallet-held">Ждём вывод с PayPal<strong>${amount(w.held)} USDT</strong></div><div class="wallet-line">Способ выплаты<strong>${w.method==='xrocket'?'xRocket':'CryptoBot'}</strong></div><div class="wallet-line">Выплачено всего<strong>${amount(w.paid)} USDT</strong></div><div class="wallet-line">Выплат за всё время<strong>${w.count_paid}</strong></div>${w.wheel_next_bonus?`<div class="wallet-held">DT Колесо · к следующей оплате<strong>+${w.wheel_next_bonus}%</strong><small>Бонусов в очереди: ${w.wheel_bonus_count}</small></div>`:''}<details class="details"><summary>Подробности баланса</summary><div class="copy">${html}</div></details>`;}
     return `<div class="copy">${html.replace(/^━+\n/gm,'').replace(/\n━+$/gm,'')}</div>`;
   }
+  function renderNavigation(data) {
+    const tabs = [
+      {id: 'home', label: 'Главная', icon: '⌂'},
+      {id: 'my_paypals', label: 'PayPal', icon: '▱'},
+      {id: 'wallet', label: 'Кошелёк', icon: walletIcon},
+    ];
+    if (data.user.status === 'approved' && data.wheel?.enabled) {
+      const count = data.wheel.available;
+      tabs.push({id: 'wheel', label: 'Колесо', icon: wheelIcon, count});
+    }
+    tabs.push({id: 'profile', label: 'Кабинет', icon: '♙'});
+    if (data.user.admin) tabs.push({id: 'admin_home', label: 'Управление', icon: '⚙'});
+
+    nav.style.setProperty('--tabs', tabs.length);
+    nav.innerHTML = tabs.map(({id, label, icon, count}) => {
+      const active = data.section === id ? 'aria-current="page"' : '';
+      const badge = count > 0 ? `<small class="spin-count" aria-hidden="true">${count > 99 ? '99+' : count}</small>` : '';
+      const name = count > 0 ? ` aria-label="${label}, доступно вращений: ${count}"` : '';
+      return `<button data-nav="${id}" ${active}${name}><span class="tab-icon" aria-hidden="true">${icon}${badge}</span>${label}</button>`;
+    }).join('');
+  }
+
   function render(data){
     const changed=!current||data.version!==current.version||data.user?.status!==current.user?.status;
     const draft=current?.form?.key===data.form?.key?document.getElementById('text-input')?.value:null;
@@ -112,10 +143,7 @@
     paintPhoto();
     document.getElementById('back').hidden=data.route==='home';
     nav.hidden=false;
-    const tabs=[['home','⌂','Главная'],['my_paypals','▱','PayPal'],['wallet','◈','Кошелёк'],['profile','♙','Кабинет']];
-    if(data.user.admin)tabs.push(['admin_home','⚙','Управление']);
-    nav.style.setProperty('--tabs',tabs.length);
-    nav.innerHTML=tabs.map(([id,icon,label])=>`<button data-nav="${id}" ${data.section===id?'aria-current="page"':''}><span aria-hidden="true">${icon}</span>${label}</button>`).join('');
+    renderNavigation(data);
     tg?.BackButton?.[data.route==='home'?'hide':'show']();
     busy(Boolean(data.busy));
     screen.classList.remove('screen-enter');requestAnimationFrame(()=>screen.classList.add('screen-enter'));
@@ -137,12 +165,19 @@
     if(!token||updating||document.hidden||!(current?.user.admin||current?.user.status==='approved'))return;
     updating=true;
     try{
+      const initialView = current;
       const updates=await request('/api/updates');
+      if (initialView !== current) return;
       const fresh=knownEvents?updates.events.filter(event=>!knownEvents.has(event.id)&&!readEvents.has(event.id)):[];
       events=updates.events;knownEvents=new Set(events.map(event=>event.id));updateBadge();
       if(fresh.length){liveAlert.textContent=fresh.length===1?`${fresh[0].title} · Открыть`:`Новых событий: ${fresh.length} · Открыть`;liveAlert.hidden=false;tg?.HapticFeedback?.notificationOccurred?.('success');clearTimeout(alertTimer);alertTimer=setTimeout(()=>liveAlert.hidden=true,9000);}
       if(eventPanel.open){drawEvents();markRead();}
-      if(current.route==='home'&&!inFlight&&JSON.stringify([current.summary,current.work,current.wheel])!==JSON.stringify([updates.summary,updates.work,updates.wheel])){current.summary=updates.summary;current.work=updates.work;current.wheel=updates.wheel;screen.innerHTML=homeHTML(current);}
+      if (!inFlight && (current.wheel?.enabled !== updates.wheel.enabled ||
+                        current.wheel?.available !== updates.wheel.available)) {
+        current.wheel = {...current.wheel, ...updates.wheel};
+        renderNavigation(current);
+      }
+      if(current.route==='home'&&!inFlight&&JSON.stringify([current.summary,current.work])!==JSON.stringify([updates.summary,updates.work])){current.summary=updates.summary;current.work=updates.work;screen.innerHTML=homeHTML(current);}
       if(current.route==='wheel'&&!inFlight)window.DTWheel?.refresh(updates.wheel);
       if(current.wallet&&!inFlight){current.wallet.available=updates.summary.available;current.wallet.held=updates.summary.held;const card=screen.querySelector('.wallet-card .balance'),held=screen.querySelector('.wallet-held strong');if(card)card.innerHTML=`${amount(updates.summary.available)}<span>USDT</span>`;if(held)held.textContent=amount(updates.summary.held)+' USDT';}
     }catch(error){if(error.status===401){showNotice(error.message);token='';}}
