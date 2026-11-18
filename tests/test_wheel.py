@@ -14,7 +14,7 @@ os.environ.setdefault("BOT_TOKEN", "123456:TEST_ONLY_NO_NETWORK")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@127.0.0.1/test")
 from sqlalchemy import select, func, event, text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from app import db, wheel
+from app import db, wheel, rope, game_stats
 
 POSTGRES = os.environ.get("WHEEL_TEST_POSTGRES") == "1"
 LOCAL_PG = "postgresql+asyncpg://wheel_test@127.0.0.1:55439/postgres"
@@ -64,6 +64,83 @@ class WheelTests(unittest.IsolatedAsyncioTestCase):
         self.nonce += 1
         with patch.object(wheel, 'choose_prize', return_value=prize):
             return await wheel.spin(uid, nonce or f'test-wheel-nonce-{self.nonce}')
+
+    async def rope_start(self, nonce="paid-rope-request-0001", previous=0):
+        await rope.play(1,dict(action="start",request_id=nonce,previous_id=previous),datetime.utcnow())
+        return (await rope.state(1))['run']
+
+    async def rope_action(self, run, action, at=None):
+        await rope.play(1,dict(action=action,id=run['id'],version=run['version']),at or datetime.utcnow())
+        return (await rope.state(1))['run']
+
+    async def jump(self,run,seconds):
+        at=datetime.utcnow()
+        armed=await self.rope_action(run,"arm",at)
+        return await self.rope_action(armed,"release",at+timedelta(seconds=seconds))
+
+    async def test_two_games_one_balance_fifo_single_combined_reward_refund_and_stats(self):
+        await self.toggle(True)
+        payment=await self.earn(250)
+        run=await self.rope_start()
+        self.assertEqual(await self.rope_start(),run)
+        self.assertEqual((await wheel.state(1))['balance'],150)
+        await self.spin("two")
+        self.assertEqual((await rope.state(1))['balance'],0)
+        for level,seconds in enumerate((1.10,1.01,1.045,.992)):
+            run=await self.jump(run,seconds)
+            self.assertEqual((run['state'],run['level']),('landed',level))
+            if level<3:
+                run=await self.rope_action(run,'next')
+        await self.toggle(False)
+        self.assertTrue((await wheel.summary(1))['open_run'])
+        bank=await self.rope_action(run,'bank')
+        self.assertEqual(await self.rope_action(run,'bank'),bank)
+        self.assertEqual(bank['points'],12)
+        a=await self.confirm(100); b=await self.confirm(100,direct=True); c=await self.confirm(100)
+        self.assertEqual([a.payout_percent,b.payout_percent,c.payout_percent],[72,82,70])
+        self.assertEqual((await db.refund_confirmed_payment(b.id,999))[1],'refunded')
+        self.assertEqual((await db.get_user_balance(1))['wheel_next_bonus'],12)
+        self.assertEqual((await self.confirm(100)).payout_percent,82)
+        self.assertEqual((await db.get_user_balance(1))['wheel_bonus_count'],0)
+        await self.toggle(True)
+        await db.refund_confirmed_payment(payment.id,999)
+        self.assertEqual((await wheel.state(1))['debt'],250)
+        stats=(await game_stats.report(uid=1))['stats']
+        self.assertEqual((stats['spins'],stats['runs'],stats['banked'],stats['awards'],stats['spent']),(1,1,1,2,250))
+
+    async def test_partial_claim_loss_on_next_roof_and_pause(self):
+        await self.toggle(True)
+        await self.earn(200)
+        run=await self.jump(await self.rope_start(),1.1)
+        run=await self.jump(await self.rope_action(run,'next'),1.01)
+        bank=await self.rope_action(run,'bank')
+        self.assertEqual(bank['points'],3)
+        run=await self.rope_start('paid-rope-request-0002',bank['id'])
+        run=await self.jump(run,1.1)
+        run=await self.jump(await self.rope_action(run,'next'),.05)
+        self.assertEqual((run['state'],run['points']),('lost',0))
+        self.assertEqual((await db.get_user_balance(1))['wheel_bonus_count'],1)
+        self.assertEqual((await game_stats.report(uid=1))['stats']['failed'],1)
+        await self.toggle(False)
+        with self.assertRaises(ValueError):
+            await self.rope_start('paid-rope-request-0003',run['id'])
+        await self.toggle(True)
+        with self.assertRaises(ValueError):
+            await self.rope_start('paid-rope-request-0003',run['id'])
+
+    @unittest.skipUnless(POSTGRES,'requires dedicated local PostgreSQL')
+    async def test_cross_game_concurrent_debit_and_claim(self):
+        await self.toggle(True)
+        await self.earn(150)
+        result=await asyncio.gather(self.rope_start(),self.spin('one'),return_exceptions=True)
+        self.assertEqual(sum(isinstance(v,ValueError) for v in result),1)
+        balance=await wheel.state(1)
+        self.assertIn(balance['balance'],(0,50))
+        await self.earn(100)
+        run=await self.rope_start('paid-rope-request-0002')
+        run=await self.jump(run,1.10)
+        await asyncio.gather(*(self.rope_action(run,'bank') for _ in range(5)))
+        self.assertEqual((await game_stats.report(uid=1))['stats']['banked'],1)
 
     async def test_default_off_and_old_confirmations_excluded_even_if_withdrawn_after_launch(self):
         self.assertEqual(await wheel.state(1), {'enabled':False})

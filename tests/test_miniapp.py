@@ -340,7 +340,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('выключена',self.text())
         await self.login(999)
         await self.act(nav='admin_home')
-        await self.act(action=self.button('DT КОЛЕСО'))
+        await self.act(action=self.button('Игры DT'))
         self.assertIn('ВЫКЛЮЧЕНА',self.text())
         await self.act(action=self.button('Включить акцию'))
         self.assertTrue((await wheel.state(1))['enabled'])
@@ -352,10 +352,40 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.view['wheel']['history'],[])
         await self.login(999)
         await self.act(nav='admin_home')
-        await self.act(action=self.button('DT КОЛЕСО'))
+        await self.act(action=self.button('Игры DT'))
         await self.act(action=self.button('Выключить акцию'))
         await self.login(1)
         self.assertFalse(self.view['wheel']['enabled'])
+
+    async def test_games_reports_private_and_rope_only_debits_on_start(self):
+        from app import wheel
+        await wheel.set_enabled(True,999,0)
+        async with db.SessionLocal() as session, session.begin():
+            req=db.Request(user_id=1,amount=250,status="waiting_check")
+            session.add(req)
+            await session.flush()
+        await db.confirm_payment(req.id,999)
+        await db.mark_paypal_withdrawn(req.id,999)
+        self.assertEqual((await self.client.get('/api/games/statistics')).status,401)
+        await self.login(1)
+        self.assertEqual((await self.client.get('/api/games/statistics',headers=self.headers)).status,403)
+        for _ in range(2):
+            data=await (await self.client.get('/api/rope',headers=self.headers)).json()
+            self.assertEqual(data['balance'],250)
+        body={'action':'start','request_id':'paid-rope-request-123','previous_id':0}
+        for _ in range(2):
+            data=await (await self.client.post('/api/rope',headers=self.headers,json=body)).json()
+            self.assertEqual(data['balance'],150)
+        self.assertEqual((await self.client.post('/api/rope',headers=self.headers,json={
+            'action':'bank','id':data['run']['id'],'version':0,'points':12})).status,409)
+        await self.login(2)
+        self.assertEqual((await self.client.post('/api/rope',headers=self.headers,json={
+            'action':'arm','id':data['run']['id'],'version':0})).status,409)
+        await self.login(999)
+        result=await (await self.client.get('/api/games/statistics',headers=self.headers)).json()
+        self.assertEqual((result['rows'][0]['uid'],result['stats']['spent']),(1,100))
+        result=await (await self.client.get('/api/games/statistics?uid=1',headers=self.headers)).json()
+        self.assertEqual(result['rows'][0]['status'],'ready')
 
     async def test_wheel_api_cash_credit_replay_ownership_and_disabled_access(self):
         from app import wheel

@@ -99,7 +99,7 @@
     const html=message.html||'';
     if(data.payouts)return `<p class="admin-summary">Выберите участника для выплаты. Его доступные начисления объединятся в один чек.</p><details class="details"><summary>Общая статистика выплат</summary><div class="copy">${html}</div></details>`;
     if(data.dashboard){const d=data.dashboard;return `<div class="admin-state">${data.work?'Работа открыта':'STOP WORK'} <span>· AUTO ${d.auto_issue?'вкл.':'выкл.'}</span></div><p class="admin-summary">Очередь: ${d.queue} · На проверке: ${d.waiting_check}</p><details class="details"><summary>Сводка по клубу</summary><div class="copy">${html}</div></details>`;}
-    if(data.wallet){const w=data.wallet;return `<div class="wallet-card"><div class="balance-label">Доступно к выплате</div><div class="balance">${amount(w.available)}<span>USDT</span></div></div><div class="wallet-held">Ждём вывод с PayPal<strong>${amount(w.held)} USDT</strong></div><div class="wallet-line">Способ выплаты<strong>${w.method==='xrocket'?'xRocket':'CryptoBot'}</strong></div><div class="wallet-line">Выплачено всего<strong>${amount(w.paid)} USDT</strong></div><div class="wallet-line">Выплат за всё время<strong>${w.count_paid}</strong></div>${w.wheel_next_bonus?`<div class="wallet-held">DT Колесо · к следующей оплате<strong>+${w.wheel_next_bonus}%</strong><small>Бонусов в очереди: ${w.wheel_bonus_count}</small></div>`:''}<details class="details"><summary>Подробности баланса</summary><div class="copy">${html}</div></details>`;}
+    if(data.wallet){const w=data.wallet;return `<div class="wallet-card"><div class="balance-label">Доступно к выплате</div><div class="balance">${amount(w.available)}<span>USDT</span></div></div><div class="wallet-held">Ждём вывод с PayPal<strong>${amount(w.held)} USDT</strong></div><div class="wallet-line">Игровые баллы DT<strong id="wallet-game-points">${w.game_points??0}</strong></div><div class="wallet-line">Способ выплаты<strong>${w.method==='xrocket'?'xRocket':'CryptoBot'}</strong></div><div class="wallet-line">Выплачено всего<strong>${amount(w.paid)} USDT</strong></div><div class="wallet-line">Выплат за всё время<strong>${w.count_paid}</strong></div>${w.wheel_next_bonus?`<div class="wallet-held">Игры DT · к следующей оплате<strong>+${w.wheel_next_bonus}%</strong><small>Бонусов в очереди: ${w.wheel_bonus_count}</small></div>`:''}<details class="details"><summary>Подробности баланса</summary><div class="copy">${html}</div></details>`;}
     return `<div class="copy">${html.replace(/^━+\n/gm,'').replace(/\n━+$/gm,'')}</div>`;
   }
   function renderNavigation(data) {
@@ -108,19 +108,16 @@
       {id: 'my_paypals', label: 'PayPal', icon: paypalIcon},
       {id: 'wallet', label: 'Кошелёк', icon: walletIcon},
     ];
-    if (data.user.status === 'approved' && data.wheel?.enabled) {
-      const count = data.wheel.available;
-      tabs.push({id: 'wheel', label: 'Колесо', icon: wheelIcon, count});
+    if (data.user.status === 'approved' && (data.wheel?.enabled || data.wheel?.open_run)) {
+      tabs.push({id: 'wheel', label: 'Игры DT', icon: wheelIcon});
     }
     tabs.push({id: 'profile', label: 'Кабинет', icon: profileIcon});
     if (data.user.admin) tabs.push({id: 'admin_home', label: 'Управление', icon: '⚙'});
 
     nav.style.setProperty('--tabs', tabs.length);
-    nav.innerHTML = tabs.map(({id, label, icon, count}) => {
+    nav.innerHTML = tabs.map(({id, label, icon}) => {
       const active = data.section === id ? 'aria-current="page"' : '';
-      const badge = count > 0 ? `<small class="spin-count" aria-hidden="true">${count > 99 ? '99+' : count}</small>` : '';
-      const name = count > 0 ? ` aria-label="${label}, доступно вращений: ${count}"` : '';
-      return `<button data-nav="${id}" ${active}${name}><span class="tab-icon" aria-hidden="true">${icon}${badge}</span>${label}</button>`;
+      return `<button data-nav="${id}" ${active}><span class="tab-icon" aria-hidden="true">${icon}</span>${label}</button>`;
     }).join('');
   }
 
@@ -131,6 +128,7 @@
     current=data;busy(Boolean(data.busy));
     document.getElementById('notifications').hidden=!(data.user.admin||data.user.status==='approved');
     if(!changed)return;
+    window.DTWheel?.unmount();
     releaseMedia();
     showNotice((data.notices||[]).join('\n'));
     if(['blocked','rejected'].includes(data.user.status)&&!data.user.admin){
@@ -148,6 +146,9 @@
       if(title.length>35)title=({paypal:'Получить PayPal',requests:'Мои PayPal',profile:'Кабинет',payments:'Оплаты',admin:'Управление',database:'База PayPal',support:'Поддержка',broadcast:'Контент'}[banner]||'DT TEAM');
       const provider=data.payouts?`<div class="provider-totals"><div>CryptoBot<strong>${amount(data.payouts.cryptobot_total)}</strong><small>USDT к выплате</small></div><div>xRocket<strong>${amount(data.payouts.xrocket_total)}</strong><small>USDT к выплате</small></div></div>`:'';
       screen.innerHTML=`<section class="cover ${data.form||data.journey?'compact':''}"><img src="/static/art/${art(data.wallet?'home':banner)}.webp" alt="Альф · DT TEAM"><div class="cover-copy"><span>DT TEAM / PRIVATE CLUB</span><h1>${escape(title)}</h1><small>${data.user.admin?'Управление клубом':'Личный кабинет'}</small></div></section><section class="content">${journeyHTML(data.journey)}${provider}${messages.map((m,i)=>`<article class="message">${m.photo&&!m.photo.is_banner?`<img class="proof" data-media="${escape(m.photo.id)}" alt="Изображение из бота">`:''}${copyHTML(m,data)}${m.document?`<a class="download" data-media="${escape(m.document.id)}" download="${escape(m.document.filename)}">↓ ${escape(m.document.filename)}</a>`:''}${i===messages.length-1?formHTML(data.form):''}${rows(m)}</article>`).join('')}${messages.length?'':formHTML(data.form)}</section>`;
+    }
+    if(data.user.admin&&(data.route==='wheel_admin'||data.route.startsWith('wheel_toggle:'))){
+      const panel=document.createElement('section');screen.append(panel);window.mountDTGameStats(panel,request);
     }
     const input=document.getElementById('text-input');if(input&&draft!=null)input.value=draft;
     paintPhoto();
@@ -183,13 +184,16 @@
       if(fresh.length){liveAlert.textContent=fresh.length===1?`${fresh[0].title} · Открыть`:`Новых событий: ${fresh.length} · Открыть`;liveAlert.hidden=false;tg?.HapticFeedback?.notificationOccurred?.('success');clearTimeout(alertTimer);alertTimer=setTimeout(()=>liveAlert.hidden=true,9000);}
       if(eventPanel.open){drawEvents();markRead();}
       if (!inFlight && (current.wheel?.enabled !== updates.wheel.enabled ||
-                        current.wheel?.available !== updates.wheel.available)) {
+                        current.wheel?.balance !== updates.wheel.balance || current.wheel?.open_run !== updates.wheel.open_run)) {
         current.wheel = {...current.wheel, ...updates.wheel};
         renderNavigation(current);
       }
       if(current.route==='home'&&!inFlight&&JSON.stringify([current.summary,current.work])!==JSON.stringify([updates.summary,updates.work])){current.summary=updates.summary;current.work=updates.work;screen.innerHTML=homeHTML(current);}
       if(current.route==='wheel'&&!inFlight)window.DTWheel?.refresh(updates.wheel);
-      if(current.wallet&&!inFlight){current.wallet.available=updates.summary.available;current.wallet.held=updates.summary.held;const card=screen.querySelector('.wallet-card .balance'),held=screen.querySelector('.wallet-held strong');if(card)card.innerHTML=`${amount(updates.summary.available)}<span>USDT</span>`;if(held)held.textContent=amount(updates.summary.held)+' USDT';}
+      if(current.wallet&&!inFlight){
+        const points=document.getElementById('wallet-game-points');
+        if(points&&updates.wheel.balance!=null)points.textContent=updates.wheel.balance;
+        current.wallet.available=updates.summary.available;current.wallet.held=updates.summary.held;const card=screen.querySelector('.wallet-card .balance'),held=screen.querySelector('.wallet-held strong');if(card)card.innerHTML=`${amount(updates.summary.available)}<span>USDT</span>`;if(held)held.textContent=amount(updates.summary.held)+' USDT';}
     }catch(error){if(error.status===401){showNotice(error.message);token='';}}
     finally{updating=false;if(token)updateTimer=setTimeout(refreshUpdates,12000);}
   }

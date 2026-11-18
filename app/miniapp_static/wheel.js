@@ -4,6 +4,8 @@
   const prizes={one:{points:1},two:{points:2},four:{points:4},five:{points:5},ten:{points:10},cash:{cash:20},jackpot:{cash:500}};
   Object.values(prizes).forEach(p=>p.name=p.cash?`${p.cash} $`:`+${p.points}%`);
   let root=null,ctx=null,data=null,tab='wheel',spinning=false,lastResult=null,rotation=0,sectors=[],rotor=null,pending=null;
+  let ropeView=null;
+  function unmount(){ropeView?.destroy();ropeView=null;}
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const date=v=>new Date(v).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
   const $=id=>root.querySelector('#dtw-'+id);
@@ -11,19 +13,34 @@
   function saveNonce(nonce){pending=nonce;try{if(nonce)localStorage.setItem(key(),nonce);else localStorage.removeItem(key());}catch{}}
   function buildSectors(keep){const s=[...ordinary];if(!data.jackpot_claimed||keep==='jackpot')s.splice(5,0,'jackpot');return s;}
   function mount(container,value,context){
-    root=container;ctx=context;data=value;tab='wheel';spinning=false;lastResult=null;rotation=0;
+    unmount();root=container;ctx=context;data=value;tab=value.open_run?'rope':'wheel';spinning=false;lastResult=null;rotation=0;
     try{pending=localStorage.getItem(key());}catch{pending=null;}
     paint();
-    root.onclick=event=>{
+    root.onclick=async event=>{
       const button=event.target.closest('button');if(!button||spinning)return;
-      if(button.dataset.wheelTab){tab=button.dataset.wheelTab;paint();}
+      if(button.dataset.wheelTab){
+        const wanted=button.dataset.wheelTab;
+        if(wanted===tab)return;
+        tab=wanted;paint();
+        if(wanted!=='rope'){
+          try{const fresh=await ctx.request('/api/wheel');if(root===container&&tab===wanted&&!spinning){data=fresh;paint();}}catch(e){ctx.notice(e.message);}
+        }
+      }
       else if(button.id==='dtw-spin')spin();
     };
   }
   function paint(){
     if(!root?.isConnected)return;
-    root.innerHTML=`<div id="dt-wheel"><div class="dtw-app"><div class="dtw-hero"><img src="/static/art/home.webp" alt="Альф в клубе DT TEAM"><div class="dtw-hero-copy"><span>DT TEAM / BONUS WEEK</span><h1>Твой ход.<br>Твой бонус.</h1><p>Каждые 150 € — новое вращение</p></div></div><nav class="dtw-tabs" aria-label="Разделы акции">${[['wheel','Колесо'],['bonuses','Мои бонусы'],['history','История']].map(([id,label])=>`<button data-wheel-tab="${id}" aria-selected="${id===tab}">${label}${id==='bonuses'?` <span>${data.coupons?.length||0}</span>`:''}</button>`).join('')}</nav><section class="dtw-view" id="dtw-content"></section></div></div>`;
+    unmount();
+    root.innerHTML=`<div id="dt-wheel"><div class="dtw-app"><div class="dtw-hero"><img src="/static/art/home.webp" alt="Альф в клубе DT TEAM"><div class="dtw-hero-copy"><span>DT TEAM / ИГРЫ</span><h1>Игры DT</h1><p>1 € после вывода = 1 балл DT</p></div></div><div class="games-balance">Общий баланс <strong id="dtw-balance">${data.balance==null?'Сохранён':data.balance+' баллов'}</strong></div><nav class="dtw-tabs" aria-label="Разделы акции">${[['rope','Трос Альфа'],['wheel','Колесо'],['bonuses','Бонусы'],['history','История']].map(([id,label])=>`<button data-wheel-tab="${id}" aria-selected="${id===tab}">${label}${id==='bonuses'?` <span>${data.coupons?.length||0}</span>`:''}</button>`).join('')}</nav><section class="dtw-view" id="dtw-content"></section></div></div>`;
     const view=$('content');
+    if(tab==='rope'&&(data.enabled||data.open_run)){
+      ropeView=window.mountDTRope(view,{...ctx,balanceChanged(value){
+        data.balance=value.balance;data.available=Math.floor(value.balance/150);
+        data.open_run=['ready','swing','landed'].includes(value.run?.state);
+        const badge=$('balance');if(badge)badge.textContent=value.balance+' баллов';
+      }});return;
+    }
     if(!data.enabled){view.innerHTML='<h2 class="dtw-tab-heading">Акция на паузе</h2><p class="dtw-list-note">Вращения и заработанные бонусы сохранены. Прибавка применится к следующей подтверждённой оплате.</p>'+(pending?'<button id="dtw-spin" class="dtw-primary">Проверить последнее вращение</button>':'')+(lastResult?resultHTML(lastResult):'');return;}
     if(tab==='bonuses'){
       view.innerHTML=`<h2 class="dtw-tab-heading">Твои бонусы</h2><p class="dtw-list-note">Бонусы применяются автоматически к следующим подтверждённым оплатам: по одному, в порядке получения. Например, 70% + 5% = 75%.</p>${data.coupons.length?data.coupons.map((p,i)=>`<div class="dtw-history-item"><strong>+${p.points}%</strong><div>${i===0?'К следующей оплате':`В очереди · ${i+1}`}<small>${date(p.at)} МСК</small></div></div>`).join(''):'<p class="dtw-list-note">Здесь появятся твои процентные бонусы.</p>'}<button class="dtw-primary" data-nav="wallet">Денежные призы в кошельке ↗</button>`;return;
@@ -31,12 +48,17 @@
     if(tab==='history'){
       view.innerHTML=`<h2 class="dtw-tab-heading">История призов</h2><p class="dtw-list-note">Всего вращений: ${data.used}. Последние 50 результатов · время по Москве.</p>${data.history.length?data.history.map(p=>`<div class="dtw-history-item"><strong>${p.cash?`${p.cash} $`:`+${p.points}%`}</strong><div>${p.cash?'Начислено в кошелёк':p.used_request_id?`Применён · заявка #${p.used_request_id}`:'Ожидает следующую оплату'}<small>${date(p.at)} · №${p.id}</small></div></div>`).join(''):'<p class="dtw-list-note">Первый приз уже ждёт твоего вращения.</p>'}`;return;
     }
-    view.innerHTML=`<div class="dtw-jackpot"><div><span>ГЛАВНЫЙ ПРИЗ</span><strong>500 <small>$</small></strong></div><div class="dtw-jackpot-note"><b>${data.jackpot_claimed?'ПРИЗ РАЗЫГРАН':'ОДИН НА ВСЮ АКЦИЮ'}</b><span>${data.jackpot_claimed?'Остальные бонусы доступны':'Твой большой сюрприз'}</span></div></div><div class="dtw-progress-caption"><span>До следующего вращения</span><strong>${data.progress} / 150 €</strong></div><div class="dtw-progress" role="progressbar" aria-label="Прогресс до следующего вращения" aria-valuemin="0" aria-valuemax="150" aria-valuenow="${data.progress}"><div id="dtw-progress-fill" style="width:${data.progress/1.5}%"></div></div><div class="dtw-progress-bottom"><span>Осталось ${data.remaining} €</span><span>${data.waiting?`${data.waiting} € ждут вывода`:''}</span></div>${data.debt?`<p class="dtw-list-note">После возврата оплаты следующие ${data.debt} € восстановят ранее использованный прогресс.</p>`:''}<div class="dtw-ticket-row"><span>1 вращение за каждые 150 €</span><span class="dtw-ticket">Доступно: ${data.available}</span></div><div class="dtw-wheel-space"><div class="dtw-pointer" aria-hidden="true"></div><div class="dtw-wheel-rim"><svg id="dtw-wheel" role="img"></svg><div class="dtw-wheel-center"><div class="dtw-center-portrait"><img src="/static/art/home.webp" alt=""><span>DT TEAM</span></div></div><div class="dtw-wheel-glass" aria-hidden="true"></div></div><div class="dtw-celebration" id="dtw-celebration" aria-hidden="true"></div><div class="dtw-wheel-shadow"></div></div><button id="dtw-spin" class="dtw-primary"></button><p class="dtw-spin-hint">Только оплаты, подтверждённые при включённой акции и выведенные с PayPal.</p><div id="dtw-outcome" aria-live="polite">${lastResult?resultHTML(lastResult):''}</div>${data.coupons.length?`<div class="dtw-active-bonus"><strong>+${data.coupons[0].points}%</strong><p>К следующей подтверждённой оплате<small>Бонусов в очереди: ${data.coupons.length}</small></p></div>`:''}<details class="dtw-rules"><summary>Призы и правила <span>＋</span></summary><p>+1%, +2%, +4%, +5%, +10%, 20 $ и один главный приз 500 $. Денежные призы начисляются в USDT: 20 $ = 20 USDT, 500 $ = 500 USDT.</p><p>Каждые 150 € оплат, подтверждённых во время включённой акции, дают вращение после вывода с PayPal. Старые подтверждения и оплаты, подтверждённые на паузе, не участвуют. Суммы складываются; остаток сохраняется.</p><p>Процентный бонус прибавляется к ставке следующей подтверждённой оплаты. Бонусы применяются по одному, в порядке получения, включая Happy Hours. При возврате оплаты использованный процентный бонус возвращается в очередь.</p><p>Возвращённые оплаты исключаются из прогресса. Уже полученные призы остаются, а недостающий прогресс покрывается следующими оплатами.</p><p>Во время паузы вращения недоступны. Оплаты, подтверждённые до паузы в рамках акции, сохраняют право на прогресс после вывода. Бонусы и вращения не сгорают.</p></details>`;
+    view.innerHTML=`<div class="dtw-jackpot"><div><span>ГЛАВНЫЙ ПРИЗ</span><strong>500 <small>$</small></strong></div><div class="dtw-jackpot-note"><b>${data.jackpot_claimed?'ПРИЗ РАЗЫГРАН':'ОДИН НА ВСЮ АКЦИЮ'}</b><span>${data.jackpot_claimed?'Остальные бонусы доступны':'Твой большой сюрприз'}</span></div></div><div class="dtw-ticket-row"><span>Одно вращение</span><strong>150 баллов</strong></div>${data.waiting?`<p class="dtw-list-note">${data.waiting} € ждут вывода.</p>`:''}${data.debt?`<p class="dtw-list-note">После возврата оплаты следующие ${data.debt} баллов покроют ранее потраченный остаток.</p>`:''}<div class="dtw-wheel-space"><div class="dtw-pointer" aria-hidden="true"></div><div class="dtw-wheel-rim"><svg id="dtw-wheel" role="img"></svg><div class="dtw-wheel-center"><div class="dtw-center-portrait"><img src="/static/art/home.webp" alt=""><span>DT TEAM</span></div></div><div class="dtw-wheel-glass" aria-hidden="true"></div></div><div class="dtw-celebration" id="dtw-celebration" aria-hidden="true"></div><div class="dtw-wheel-shadow"></div></div><button id="dtw-spin" class="dtw-primary"></button><p class="dtw-spin-hint">Только оплаты, подтверждённые при включённой акции и выведенные с PayPal.</p><div id="dtw-outcome" aria-live="polite">${lastResult?resultHTML(lastResult):''}</div>${data.coupons.length?`<div class="dtw-active-bonus"><strong>+${data.coupons[0].points}%</strong><p>К следующей подтверждённой оплате<small>Бонусов в очереди: ${data.coupons.length}</small></p></div>`:''}<details class="dtw-rules"><summary>Призы и правила <span>＋</span></summary><p>+1%, +2%, +4%, +5%, +10%, 20 $ и один главный приз 500 $. Денежные призы начисляются в USDT: 20 $ = 20 USDT, 500 $ = 500 USDT.</p><p>1 € подтверждённой во время акции и выведенной оплаты даёт 1 балл. При старте забега списывается 100 баллов, при вращении — 150. Старые подтверждения и оплаты, подтверждённые на паузе, не участвуют. Суммы складываются; остаток сохраняется.</p><p>Процентный бонус прибавляется к ставке следующей подтверждённой оплаты. Бонусы применяются по одному, в порядке получения, включая Happy Hours. При возврате оплаты использованный процентный бонус возвращается в очередь.</p><p>Возвращённые оплаты исключаются из прогресса. Уже полученные призы остаются, а недостающий прогресс покрывается следующими оплатами.</p><p>Во время паузы вращения недоступны. Оплаты, подтверждённые до паузы в рамках акции, сохраняют право на прогресс после вывода. Баллы и бонусы сохраняются.</p></details>`;
     drawWheel();updateControls();
   }
   function resultHTML(p){return `<section class="dtw-result"><div class="dtw-result-kicker">${p.prize==='jackpot'?'ГЛАВНЫЙ ПРИЗ ТВОЙ':'ТВОЙ ПРИЗ'}</div><div class="dtw-result-value">${p.cash?`${p.cash} $`:`+${p.points}%`}</div><h2>${p.cash?'Баланс пополнен':'Бонус сохранён'}</h2><p>${p.cash?`${p.cash} USDT уже доступны в кошельке.`:`+${p.points}% применятся к следующей подтверждённой оплате в порядке очереди.`}</p></section>`;}
-  function updateControls(){if(!root?.isConnected)return;const b=$('spin');if(!b)return;b.disabled=spinning||ctx.isBusy()||(!pending&&(!data.enabled||data.available<1));b.textContent=spinning?'Твой приз уже выбран…':pending?'Проверить последнее вращение':data.available>0?'Крутить колесо ↗':`Ещё ${data.remaining||150} € до вращения`;}
-  async function refresh(value){if(!root?.isConnected||spinning||ctx.isBusy())return;if(JSON.stringify([value.enabled,value.qualified,value.used,value.waiting,value.revision])!==JSON.stringify([data.enabled,data.qualified,data.used,data.waiting,data.revision])){try{data=await ctx.request('/api/wheel');paint();}catch(e){ctx.notice(e.message);}}}
+  function updateControls(){if(!root?.isConnected)return;const b=$('spin');if(!b)return;b.disabled=spinning||ctx.isBusy()||(!pending&&(!data.enabled||data.available<1));b.textContent=spinning?'Твой приз уже выбран…':pending?'Проверить последнее вращение':data.available>0?'Крутить за 150 баллов':`Ещё ${data.remaining||150} баллов до вращения`;}
+  async function refresh(value){if(!root?.isConnected||spinning||ctx.isBusy())return;
+    if(tab==='rope'&&ropeView){
+      Object.assign(data,value);const badge=$('balance');if(badge&&value.balance!=null)badge.textContent=value.balance+' баллов';
+      ropeView.refresh(value);return;
+    }
+    if(JSON.stringify([value.enabled,value.balance,value.qualified,value.used,value.waiting,value.revision])!==JSON.stringify([data.enabled,data.balance,data.qualified,data.used,data.waiting,data.revision])){try{data=await ctx.request('/api/wheel');paint();}catch(e){ctx.notice(e.message);}}}
   async function spin(){
     if(spinning||ctx.isBusy()||(!pending&&(!data.enabled||data.available<1)))return;
     spinning=true;ctx.busy(true);updateControls();ctx.notice('');
@@ -91,5 +113,5 @@
     svg.append(node('circle',{cx:c,cy:c,r:r+1,fill:'none',stroke:'#e7c58a','stroke-opacity':.7,'stroke-width':1}));
     svg.setAttribute('aria-label',desc.textContent);
   }
-  window.DTWheel={mount,updateControls,refresh,isSpinning:()=>spinning};
+  window.DTWheel={mount,unmount,updateControls,refresh,isSpinning:()=>spinning};
 })();

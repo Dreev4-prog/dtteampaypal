@@ -6,7 +6,7 @@ import secrets
 from typing import Awaitable, Callable, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, CheckConstraint, Index, select, text, func, or_, and_
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Float, Integer, Numeric, String, UniqueConstraint, CheckConstraint, Index, select, text, func, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -239,6 +239,31 @@ class WheelSpin(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     used_request_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("requests.id"), unique=True, nullable=True)
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class RopeRun(Base):
+    __tablename__ = "rope_runs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "nonce", name="uq_rope_user_nonce"),
+        Index("ux_rope_open_run", "user_id", unique=True,
+              postgresql_where=text("state IN ('ready','swing','landed')"),
+              sqlite_where=text("state IN ('ready','swing','landed')")),
+        CheckConstraint("level BETWEEN 0 AND 3 AND points IN (0,1,3,7,12)", name="ck_rope_reward"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
+    nonce: Mapped[str] = mapped_column(String(80))
+    cost: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(10), default="ready")
+    level: Mapped[int] = mapped_column(Integer, default=0)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    swing_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    landing_x: Mapped[Optional[float]] = mapped_column(Float)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    points: Mapped[int] = mapped_column(Integer, default=0)
+    used_request_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("requests.id"), unique=True)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
 
 class HappyHoursCampaign(Base):
@@ -2037,10 +2062,9 @@ async def get_effective_rate_for_request(
             return None, None, False
         percent, is_happy = await _get_effective_request_rate(session, req)
         if percent is not None and req.status == "waiting_check":
-            coupon = await session.scalar(select(WheelSpin.points).where(
-                WheelSpin.user_id == req.user_id, WheelSpin.points > 0,
-                WheelSpin.used_request_id.is_(None)).order_by(WheelSpin.id).limit(1))
-            percent += coupon or 0
+            from app.wheel import coupons_query
+            coupon = (await session.execute(coupons_query(req.user_id).limit(1))).mappings().first()
+            percent += coupon["points"] if coupon else 0
         payout = round(req.amount * percent / 100, 2) if percent is not None else None
         return percent, payout, is_happy
 
@@ -3691,9 +3715,8 @@ async def get_user_balance(user_id: int) -> dict:
             select(ManualPayout).where(ManualPayout.user_id == user_id).order_by(ManualPayout.id.desc()).limit(1)
         )
         method = await session.scalar(select(User.payout_method).where(User.id == user_id)) or "cryptobot"
-        coupon_points = list(await session.scalars(select(WheelSpin.points).where(
-            WheelSpin.user_id == user_id, WheelSpin.points > 0, WheelSpin.used_request_id.is_(None)
-        ).order_by(WheelSpin.id)))
+        from app.wheel import coupons_query
+        coupon_points = [row.points for row in await session.execute(coupons_query(user_id))]
         return {
             "wheel_next_bonus": coupon_points[0] if coupon_points else 0,
             "wheel_bonus_count": len(coupon_points),

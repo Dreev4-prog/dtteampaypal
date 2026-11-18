@@ -1,9 +1,10 @@
-# DT Wheel
+# DT games
 
-Admin → DT КОЛЕСО → Включить акцию / Выключить акцию. The migration starts
+Admin → Игры DT · Колесо и трос → Включить акцию / Выключить акцию. The migration starts
 OFF. This release does not activate the promotion or send a broadcast.
-The Mini App shows the Wheel tab next to Wallet in the bottom bar only while the promotion is enabled. Its badge shows the participant’s available spins.
-The existing bot menu rows remain unchanged except for the new admin row.
+The Mini App shows Игры DT next to the wallet. Both games use the same points.
+The admin game screen includes a paginated list of players and their individual
+attempts, prizes, failures, pending runs and spent points.
 
 ## Eligibility and rewards
 
@@ -11,11 +12,14 @@ The existing bot menu rows remain unchanged except for the new admin row.
   standard and direct issued-PayPal confirmation paths use it. Issuance can
   predate launch; confirmation cannot. No historical payments are backfilled.
 - Eligible principal EUR counts only when PayPal withdrawal is recorded. Each
-  cumulative €150 earns one spin; remainder carries. 24-hour waits do not count.
-- Turning OFF blocks new eligible confirmations and spins, preserving progress,
+  €1 earns one point. A wheel spin costs 150, a rooftop run costs 100. 24-hour waits do not count.
+- Turning OFF blocks new eligible confirmations and new games, preserving progress,
   prizes and the single global jackpot. Payments already confirmed during an
   active period still count when subsequently withdrawn, including during a pause.
-- +1/+2/+4/+5/+10 are percentage points added to the effective next confirmed
+- A paid run can finish during a pause. Each successful roof can be banked as
+  a single coupon of +1/+3/+7/+12 points, or risked on the next roof. A miss
+  ends that run. Opening a game, retrying, resuming or advancing costs nothing.
+- Wheel +1/+2/+4/+5/+10 are percentage points added to the effective next confirmed
   payment (including Happy Hours), one FIFO coupon per payment, without stacking.
   Earned coupons continue to apply during a pause and are visible in the wallet.
 - Cash rewards shown as $20/$500 credit 20/500 USDT to the existing balance ledger.
@@ -61,7 +65,17 @@ explicit local SQLite/fake Telegram preview with four fictitious spins. These
 switches are confined to the test fixture; it is excluded from the Docker image.
 No production endpoint accepts test identity, simulated payments or forced prizes.
 
-## Backup and recovery
+## Shared-balance release and recovery
+
+Pre-rope code: `4ac2170f0e5ec7b4fa90872d3b78a70ebf3d2905`.
+Railway deployment: `1ac1058f-91ad-41ab-b660-2df61aed4500`.
+The additive rope_runs table owns paid attempts and their rewards. Historic
+wheel draws still count at 150 points; qualified payments retain their remainder.
+After any paid run, keep the shared-accounting and coupon logic during a UI
+rollback. Rolling back the entire backend would ignore run debits and queued
+rope coupons. Disable the campaign for new starts when investigating.
+
+## Earlier wheel release and recovery
 
 Pre-wheel code: commit 042bbc65a81c2f7494ddb7216a9a30d22e7d0aa9, branch
 `backup/before-wheel-20261118`. Prior Railway deployment:

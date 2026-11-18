@@ -18,7 +18,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Chat, Message, Updat
 from sqlalchemy import text
 
 from app.config import settings
-from app import db, wheel
+from app import db, wheel, rope, game_stats
 from app.miniapp_auth import validate_init_data
 from app.miniapp_transport import WebTransport, public_records, web_context, media_bytes
 
@@ -174,6 +174,36 @@ class MiniApp:
                 raise web.HTTPConflict(text=str(exc)) from exc
             session.updates_at = 0
             return web.json_response({"result": result, "wheel": await wheel.state(session.user.id)})
+
+    async def rope_game(self, request):
+        received = datetime.utcnow()
+        session = await self.wheel_access(request)
+        if request.method == "POST":
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise web.HTTPBadRequest(text="Ожидается действие игры.")
+            hits = [t for t in session.hits if time.time() - t < 60]
+            if len(hits) >= 90:
+                raise web.HTTPTooManyRequests(text="Подождите немного.")
+            session.hits = hits + [time.time()]
+            async with self.lock(session.user.id):
+                self.session(request)
+                try:
+                    await rope.play(session.user.id, body, received)
+                except ValueError as exc:
+                    raise web.HTTPConflict(text=str(exc)) from exc
+                session.updates_at = 0
+        return web.json_response(await rope.state(session.user.id))
+
+    async def game_statistics(self, request):
+        session = self.session(request)
+        if session.user.id not in settings.admin_ids:
+            raise web.HTTPForbidden(text="Нет доступа к статистике.")
+        page = int(request.query.get("page", "0"))
+        uid = int(request.query["uid"]) if "uid" in request.query else None
+        if not 0 <= page <= 100000000 or (uid is not None and not 0 < uid < 2**63):
+            raise web.HTTPBadRequest(text="Недействительная страница или ID.")
+        return web.json_response(await game_stats.report(page, uid))
 
     async def action(self, request):
         session = self.session(request)
@@ -339,6 +369,11 @@ class MiniApp:
             if approved and session.route in {"wallet", "my_balance"}:
                 balance = await db.get_user_balance(session.user.id)
                 session.response["wallet"] = {key: balance[key] for key in ("available", "held", "paid", "count_paid", "method", "wheel_next_bonus", "wheel_bonus_count")}
+                points = session.response["wheel"].get("balance")
+                if points is None:
+                    async with db.SessionLocal() as ledger:
+                        points = (await wheel.totals(ledger, session.user.id))["balance"]
+                session.response["wallet"]["game_points"] = points
             keep_ids = {record["id"] for record in session.display}
             session.messages = {key: value for key, value in session.messages.items() if key in keep_ids}
             media_ids = {item["id"] for record in session.display for item in (record.get("photo"), record.get("document")) if item}
@@ -502,6 +537,9 @@ def create_app(bot, dispatcher):
     app.router.add_get("/api/state", service.get_state)
     app.router.add_get("/api/updates", service.get_updates)
     app.router.add_post("/api/action", service.action)
+    app.router.add_get("/api/rope", service.rope_game)
+    app.router.add_post("/api/rope", service.rope_game)
+    app.router.add_get("/api/games/statistics", service.game_statistics)
     app.router.add_get("/api/wheel", service.get_wheel)
     app.router.add_post("/api/wheel/spin", service.spin_wheel)
     app.router.add_get("/api/media/{media_id}", service.media)

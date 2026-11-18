@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import secrets
 
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func, text, literal, union_all
 from app import db
 
 THRESHOLD = 150
@@ -78,6 +78,17 @@ async def set_enabled(enabled: bool, admin_id: int, expected_revision: int):
     return "changed"
 
 
+def coupons_query(user_id):
+    parts = []
+    for model, source, when in ((db.WheelSpin, "wheel", db.WheelSpin.created_at),
+                                (db.RopeRun, "rope", db.RopeRun.finished_at)):
+        parts.append(select(model.id.label("id"), literal(source).label("source"),
+                            model.points.label("points"), when.label("at")).where(
+            model.user_id == user_id, model.points > 0, model.used_request_id.is_(None)))
+    pool = union_all(*parts).subquery()
+    return select(pool).order_by(pool.c.at, pool.c.source, pool.c.id)
+
+
 async def on_confirmation(session, req, base_percent):
     """Called with user + request locks, before the held balance is inserted."""
     row = await campaign(session, lock=True)
@@ -91,27 +102,29 @@ async def on_confirmation(session, req, base_percent):
             raise RuntimeError("Active wheel has no activation period")
         session.add(db.WheelPayment(request_id=req.id, user_id=req.user_id, period_id=period.id,
                                    amount=req.amount, confirmed_at=now))
-    coupon = await session.scalar(select(db.WheelSpin).where(
-        db.WheelSpin.user_id == req.user_id, db.WheelSpin.points > 0,
-        db.WheelSpin.used_request_id.is_(None)).order_by(db.WheelSpin.id).limit(1).with_for_update())
-    req.wheel_bonus_percent = coupon.points if coupon else 0
-    if coupon:
+    first = (await session.execute(coupons_query(req.user_id).limit(1))).mappings().first()
+    req.wheel_bonus_percent = first["points"] if first else 0
+    if first:
+        model = db.RopeRun if first["source"] == "rope" else db.WheelSpin
+        coupon = await session.get(model, first["id"], with_for_update=True)
         coupon.used_request_id, coupon.used_at = req.id, now
     return base_percent + req.wheel_bonus_percent
 
 
 async def totals(session, user_id):
-    qualified = int(await session.scalar(select(func.coalesce(func.sum(db.WheelPayment.amount), 0)).where(
-        db.WheelPayment.user_id == user_id, db.WheelPayment.credited_at.is_not(None),
-        db.WheelPayment.cancelled_at.is_(None))) or 0)
-    used = int(await session.scalar(select(func.count(db.WheelSpin.id)).where(db.WheelSpin.user_id == user_id)) or 0)
-    waiting = int(await session.scalar(select(func.coalesce(func.sum(db.WheelPayment.amount), 0)).where(
-        db.WheelPayment.user_id == user_id, db.WheelPayment.credited_at.is_(None),
-        db.WheelPayment.cancelled_at.is_(None))) or 0)
-    # A refund can create negative earned progress after spins have been used.
-    # Keep awarded prizes; new qualifying turnover first covers that shortfall.
-    unspent = qualified - used * THRESHOLD
-    return dict(qualified=qualified, used=used, available=max(0, unspent // THRESHOLD),
+    payment = db.WheelPayment
+    def principal(credited):
+        return select(func.coalesce(func.sum(payment.amount), 0)).where(payment.user_id == user_id,
+                payment.cancelled_at.is_(None), credited).scalar_subquery()
+
+    spins = select(func.count(db.WheelSpin.id)).where(db.WheelSpin.user_id == user_id)
+    runs = select(func.coalesce(func.sum(db.RopeRun.cost), 0)).where(db.RopeRun.user_id == user_id)
+    qualified, waiting, used, rope_spent = (await session.execute(select(
+        principal(payment.credited_at.is_not(None)), principal(payment.credited_at.is_(None)),
+        spins.scalar_subquery(), runs.scalar_subquery()))).one()
+    # After a refund, later qualifying payments cover previously spent points first.
+    unspent = qualified - used * THRESHOLD - rope_spent
+    return dict(qualified=qualified, balance=max(0, unspent), rope_spent=rope_spent, used=used, available=max(0, unspent // THRESHOLD),
                 progress=max(0, unspent) % THRESHOLD, debt=max(0, -unspent), waiting=waiting,
                 remaining=THRESHOLD - max(0, unspent) % THRESHOLD + max(0, -unspent))
 
@@ -120,11 +133,10 @@ async def on_withdrawal(session, req):
     payment = await session.get(db.WheelPayment, req.id)
     if payment is None or payment.credited_at or payment.cancelled_at:
         return
-    before = await totals(session, req.user_id)
     payment.credited_at = req.paypal_withdrawn_at
     await session.flush()
     after = await totals(session, req.user_id)
-    req._wheel_added = after["available"] - before["available"]
+    req._dt_credit = payment.amount
     req._wheel_progress = after
 
 
@@ -133,9 +145,10 @@ async def on_refund(session, req):
     if payment:
         payment.cancelled_at = req.payment_refunded_at
     # A returned payment must not burn an earned next-payment coupon.
-    coupon = await session.scalar(select(db.WheelSpin).where(db.WheelSpin.used_request_id == req.id).with_for_update())
-    if coupon:
-        coupon.used_request_id = coupon.used_at = None
+    for model in (db.WheelSpin, db.RopeRun):
+        coupon = await session.scalar(select(model).where(model.used_request_id == req.id).with_for_update())
+        if coupon:
+            coupon.used_request_id = coupon.used_at = None
 
 
 def choose_prize(jackpot_claimed):
@@ -158,7 +171,7 @@ async def spin(user_id, nonce):
         if not row.enabled:
             raise ValueError("Акция сейчас выключена. Заработанные бонусы сохранены.")
         balance = await totals(session, user_id)
-        if balance["available"] < 1:
+        if balance["balance"] < THRESHOLD:
             raise ValueError("Пока нет доступных вращений.")
         key = choose_prize(row.jackpot_spin_id is not None)
         points, cash = PRIZES[key]
@@ -174,19 +187,25 @@ async def spin(user_id, nonce):
         return spin_record(prize)
 
 
+async def has_open_run(session, user_id):
+    return bool(await session.scalar(select(db.RopeRun.id).where(db.RopeRun.user_id == user_id,
+                db.RopeRun.state.in_(("ready", "swing", "landed"))).limit(1)))
+
+
 async def state(user_id, *, admin=False):
     async with db.SessionLocal() as session:
         row = await campaign(session)
-        if not row.enabled and not admin:
+        open_run = await has_open_run(session, user_id)
+        if not row.enabled and not admin and not open_run:
             return {"enabled": False}
         result = dict(enabled=bool(row.enabled), revision=row.revision, started_at=stamp(row.started_at),
                       changed_at=stamp(row.changed_at), jackpot_claimed=row.jackpot_spin_id is not None,
-                      threshold=THRESHOLD, **await totals(session, user_id))
+                      threshold=THRESHOLD, open_run=open_run, **await totals(session, user_id))
         history = list(await session.scalars(select(db.WheelSpin).where(db.WheelSpin.user_id == user_id)
                                              .order_by(db.WheelSpin.id.desc()).limit(50)))
-        coupons = list(await session.scalars(select(db.WheelSpin).where(db.WheelSpin.user_id == user_id,
-                         db.WheelSpin.points > 0, db.WheelSpin.used_request_id.is_(None)).order_by(db.WheelSpin.id)))
-        result.update(history=[spin_record(v) for v in history], coupons=[spin_record(v) for v in coupons])
+        coupons = [dict(id=v.id, points=v.points, source=v.source, at=stamp(v.at))
+                   for v in await session.execute(coupons_query(user_id))]
+        result.update(history=[spin_record(v) for v in history], coupons=coupons)
         if admin:
             result["statistics"] = dict(
                 spins=int(await session.scalar(select(func.count(db.WheelSpin.id))) or 0),
@@ -200,12 +219,13 @@ async def payment_note(request_id):
         payment = await session.get(db.WheelPayment, request_id)
         if payment is None:
             return ""
-        return f"\n\n🎡 DT Колесо: {payment.amount} € участвуют в акции. Прогресс засчитается после вывода с PayPal."
+        return f"\n\n🪙 Игры DT: после вывода с PayPal будет начислено {payment.amount} баллов."
 
 
 async def summary(user_id):
     async with db.SessionLocal() as session:
         row = await campaign(session)
-        if not row.enabled:
+        open_run = await has_open_run(session, user_id)
+        if not row.enabled and not open_run:
             return {"enabled": False}
-        return {"enabled": True, "revision": row.revision, **await totals(session, user_id)}
+        return {"enabled": bool(row.enabled), "open_run": open_run, "revision": row.revision, **await totals(session, user_id)}

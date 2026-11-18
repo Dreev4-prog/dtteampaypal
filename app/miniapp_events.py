@@ -70,10 +70,15 @@ async def recent_events(user_id, admin=False):
             add(f"wheel:{spin.id}", spin.created_at, "Приз DT Колеса", reward if own else f"ID {spin.user_id} · {reward}",
                 "wheel" if own and wheel_on else "wallet" if own else "admin_home",
                 "Открыть колесо" if own and wheel_on else "Открыть кошелёк" if own else "Управление", "success")
+        runs = select(db.RopeRun).where(db.RopeRun.user_id == user_id, db.RopeRun.state == "banked")
+        for run in await session.scalars(runs.order_by(db.RopeRun.finished_at.desc()).limit(15)):
+            add(f"rope:{run.id}", run.finished_at, "Бонус «Троса Альфа»",
+                f"+{run.points}% на одну следующую подтверждённую оплату в порядке очереди.",
+                "wallet", "Открыть кошелёк", "success")
         for payment in await session.scalars(select(db.WheelPayment).where(
                 db.WheelPayment.user_id == user_id, db.WheelPayment.credited_at.is_not(None),
                 db.WheelPayment.cancelled_at.is_(None)).order_by(db.WheelPayment.credited_at.desc()).limit(15)):
-            add(f"wheel-progress:{payment.request_id}", payment.credited_at, "Прогресс DT Колеса пополнен",
-                f"Засчитано {payment.amount} €. Каждые 150 € дают одно вращение.",
+            add(f"wheel-progress:{payment.request_id}", payment.credited_at, "Начислены баллы DT",
+                f"+{payment.amount} баллов на общий игровой баланс.",
                 "wheel" if wheel_on else "wallet", "Открыть колесо" if wheel_on else "Открыть кошелёк", "success")
     return sorted(events, key=lambda e: (e["at"], e["id"]), reverse=True)[:60]

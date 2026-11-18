@@ -3830,7 +3830,7 @@ async def paypal_withdraw_done_handler(callback: CallbackQuery) -> None:
             f"💰 Всего доступно к выплате: <b>{balance['available']:.2f} USDT</b>\n"
             f"💸 Способ выплаты: <b>{provider}</b>\n\n"
             "Ожидайте выплату от администрации."
-            + (f"\n\n🎡 DT Колесо: +{req._wheel_added} вращ. Доступно: {req._wheel_progress['available']}. Откройте Mini App." if getattr(req, "_wheel_added", 0) > 0 else ""),
+            + (f"\n\n🪙 Игры DT: +{req._dt_credit} баллов. Доступно: {req._wheel_progress['balance']}." if getattr(req, "_dt_credit", 0) > 0 else ""),
             reply_markup=back_home(),
         )
     except Exception:
@@ -4462,7 +4462,7 @@ async def _notify_confirmed_payment(bot, req, *, photo: bool = True) -> bool:
     tag = await get_paypal_tag(req.paypal_tag_id) if req.paypal_tag_id else None
     from app.wheel import payment_note
     wheel_note = await payment_note(req.id)
-    bonus_note = f"\n🎡 Бонус DT Колеса: +{req.wheel_bonus_percent}% к этой оплате." if req.wheel_bonus_percent else ""
+    bonus_note = f"\n🎡 Игровой бонус DT: +{req.wheel_bonus_percent}% к этой оплате." if req.wheel_bonus_percent else ""
     text = (
         f"✅ <b>Оплата подтверждена · заявка #{req.id}</b>\n\n"
         f"💳 PayPal: <code>{escape(tag.tag) if tag else '—'}</code>\n"
@@ -7492,7 +7492,7 @@ async def wallet_handler(callback: CallbackQuery) -> None:
         f"📅 Последняя выплата: <b>{last_text}</b>"
     )
     if data["wheel_next_bonus"]:
-        text += (f"\n\n🎡 DT Колесо: <b>+{data['wheel_next_bonus']}%</b> к следующей подтверждённой оплате. "
+        text += (f"\n\n🎮 Игры DT: <b>+{data['wheel_next_bonus']}%</b> к следующей подтверждённой оплате. "
                  f"Бонусов в очереди: <b>{data['wheel_bonus_count']}</b>.")
     await render_screen(callback, "profile", text, wallet_menu())
     await callback.answer()
@@ -7730,12 +7730,12 @@ async def show_wheel_admin(callback):
     stats = data["statistics"]
     status = "ВКЛЮЧЕНА" if data["enabled"] else "ВЫКЛЮЧЕНА"
     text = (
-        f"🎡 <b>DT КОЛЕСО · {status}</b>\n\n"
-        "1 вращение за каждые 150 € оплат, подтверждённых во время акции. "
+        f"🎡 <b>ИГРЫ DT · {status}</b>\n\n"
+        "1 € = 1 балл. Трос — 100 баллов, колесо — 150. Учитываются оплаты, подтверждённые во время акции. "
         "Прогресс начисляется после вывода с PayPal. Старые подтверждения не участвуют.\n\n"
-        "При отключении колесо скрыто от работников, новые подтверждения не участвуют. "
-        "Уже участвующие оплаты засчитываются после вывода; вращения и бонусы сохраняются.\n\n"
-        "+1%, +2%, +4%, +5%, +10% — к следующей подтверждённой оплате, по одному бонусу. "
+        "При паузе новые игры закрыты. Начатый забег можно завершить. "
+        "Уже участвующие оплаты засчитываются после вывода; баллы и бонусы сохраняются.\n\n"
+        "Трос даёт один бонус +1%, +3%, +7% или +12%. Бонусы обеих игр идут по одному на оплату. "
         "Денежные призы: 20 и 500 USDT, через обычный центр выплат.\n"
         f"Главный приз: {'разыгран' if data['jackpot_claimed'] else '1 × 500 $ доступен'}.\n\n"
         f"Участников: <b>{stats['participants']}</b> · Вращений: <b>{stats['spins']}</b>\n"
@@ -7788,8 +7788,8 @@ async def wheel_home_handler(callback: CallbackQuery, state: FSMContext):
     from app import wheel
     data = await wheel.summary(callback.from_user.id)
     await state.clear()
-    text = (f"🎡 <b>DT КОЛЕСО</b>\n\nДоступно вращений: {data.get('available', 0)}. "
-            "Откройте колесо в Mini App." if data["enabled"] else
+    text = (f"🎡 <b>DT КОЛЕСО</b>\n\nОбщий баланс: {data.get('balance', 0)} баллов. "
+            "Откройте игры в Mini App." if data["enabled"] else
             "🎡 Акция сейчас выключена. Заработанные бонусы сохранены.")
     await render_screen(callback, "home", text, main_menu())
     await callback.answer()
