@@ -93,8 +93,9 @@ async def runtime():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(db.Base.metadata.create_all)
-        from app.wheel import grant_admin_trials
-        await grant_admin_trials(conn, settings.admin_ids)
+        from app import rope, wheel
+        await wheel.grant_admin_trials(conn, settings.admin_ids)
+        await rope.grant_admin_trials(conn, settings.admin_ids)
     db.SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
     async with db.SessionLocal() as session:
         session.add_all([db.User(id=1, username="demo_member", status="approved", payout_method="cryptobot"),

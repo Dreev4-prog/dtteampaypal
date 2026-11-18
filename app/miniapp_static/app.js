@@ -140,7 +140,7 @@
       screen.innerHTML='<section class="entry"><img src="/static/art/support.webp" alt="Альф на связи"><div class="entry-copy"><span>DT TEAM</span><h1>Доступ<br>закрыт.</h1><p>Обратитесь в поддержку.</p><a class="entry-action" href="https://t.me/profitgeld">Написать поддержке ↗</a></div></section>';nav.hidden=true;return;
     }
     if(data.route==='home'&&data.summary){screen.innerHTML=homeHTML(data);}
-    else if(['wheel','rope','wheel_test'].includes(data.route)){screen.innerHTML='<div id="wheel-root"></div>';window.DTWheel.mount(document.getElementById('wheel-root'),data.route==='wheel_test'?data.trials:data.wheel,{game:data.route,admin:data.user.admin,request,busy,isBusy:()=>inFlight,notice:showNotice,userId:data.user.id,haptic:()=>tg?.HapticFeedback?.notificationOccurred?.('success'),updated:refreshUpdates});}
+    else if(['wheel','rope','wheel_test','rope_test'].includes(data.route)){screen.innerHTML='<div id="wheel-root"></div>';window.DTWheel.mount(document.getElementById('wheel-root'),data.route==='wheel_test'?data.trials:data.wheel,{game:data.route,admin:data.user.admin,request,busy,isBusy:()=>inFlight,notice:showNotice,userId:data.user.id,haptic:()=>tg?.HapticFeedback?.notificationOccurred?.('success'),updated:refreshUpdates});}
     else{
       const messages=data.messages||[], first=messages.find(m=>m.html)||messages[0];
       const lines=plain(first?.html).split('\n').filter(x=>x.trim());
@@ -154,7 +154,7 @@
     }
     if(data.user.admin && (['admin_home','wheel_admin'].includes(data.route) || data.route.startsWith('wheel_toggle:'))){
       const content=screen.querySelector('.content');
-      content?.insertAdjacentHTML('afterbegin','<button class="action" data-nav="wheel_test"><span class="symbol" aria-hidden="true">⟳</span><span class="label">Тестовые вращения</span><span class="arrow" aria-hidden="true">›</span></button>');
+      content?.insertAdjacentHTML('afterbegin','<button class="action" data-nav="wheel_test"><span class="symbol" aria-hidden="true">⟳</span><span class="label">Тестовые вращения</span><span class="arrow" aria-hidden="true">›</span></button><button class="action" data-nav="rope_test"><span class="symbol" aria-hidden="true">↗</span><span class="label">Тестовые забеги · Трос Альфа</span><span class="arrow" aria-hidden="true">›</span></button>');
     }
     if(data.user.admin&&(data.route==='wheel_admin'||data.route.startsWith('wheel_toggle:'))){
       const panel=document.createElement('section');screen.append(panel);window.mountDTGameStats(panel,request);
@@ -244,7 +244,7 @@
     if(current.form||current.journey){poll();return;}
     const refreshButton=current.messages.flatMap(m=>m.rows.flat()).find(b=>b.action&&/обновить/i.test(b.label));
     if(refreshButton){act({action:refreshButton.action});return;}
-    if(['home','paypal_request','my_paypals','wallet','profile','support','dt_payments','admin_home','wheel','rope','wheel_test'].includes(current.route))act({nav:current.route});
+    if(['home','paypal_request','my_paypals','wallet','profile','support','dt_payments','admin_home','wheel','rope','wheel_test','rope_test'].includes(current.route))act({nav:current.route});
     else poll();
   });
   document.getElementById('back').addEventListener('click',goBack);

@@ -1,47 +1,71 @@
 window.mountDTRope = function (container, api) {
+  const trial=Boolean(api.trial);
+  const endpoint=trial?'/api/rope/test':'/api/rope';
   const markup = `<div id="dt-alf-rope"><article class="arcade"><header class="mast">
-    <img class="portrait" src="/static/art/home.webp" alt=""><div class="signature"><b>DT TEAM</b><span></span> ARCADE</div><h2>Трос <em>Альфа</em></h2></header>
+    <img class="portrait" src="/static/art/home.webp" alt=""><div class="signature"><b>${trial?'ТЕСТОВЫЙ ЗАБЕГ':'DT TEAM'}</b><span></span>${trial?'<strong data-ui="quota" aria-live="polite"></strong>':'ARCADE'}</div><h2>Трос <em>Альфа</em></h2></header>
     <div class="mission"><span data-ui="place"></span><strong data-ui="prize"></strong></div>
     <canvas width="840" height="484" aria-label="Альф на тросе. Цель — золотая полоса на крыше справа."></canvas>
     <div class="game-body"><div class="coupons" data-ui="marks"></div>
     <div class="message" aria-live="polite"><h3 data-ui="headline"></h3><p data-ui="hint"></p></div>
     <div class="actions"><button class="gold" data-ui="hold" hidden>Зажать трос</button>
     <button class="secondary" data-ui="bank" hidden></button><button class="gold" data-ui="next" hidden></button></div>
-    <details><summary>Мои забеги <small data-ui="summary"></small></summary><div class="stats"><table>
+    <details><summary>${trial?'Мои тестовые забеги':'Мои забеги'} <small data-ui="summary"></small></summary><div class="stats"><table>
     <thead><tr><th>Крыша</th><th>Дошёл</th><th>Срыв</th><th>Забрал</th></tr></thead><tbody></tbody></table></div></details></div></article></div>`;
   container.innerHTML=markup;
   const ui=Object.fromEntries([...container.querySelectorAll('[data-ui]')].map(e=>[e.dataset.ui,e]));
   const canvas=container.querySelector('canvas'), names=['Гранд-отель','Кинотеатр «Луна»','Часовая башня','Балкон клуба DT'];
   const lifetime=new AbortController(), opts={signal:lifetime.signal};
-  const pendingKey='dt-rope-start-'+api.userId;
+  const pendingKey=(trial?'dt-trial-rope-start-':'dt-rope-start-')+api.userId;
   let data,scene,input=null,arm=null,waiting=false,flying=false;
   const active=()=>container.isConnected&&!lifetime.signal.aborted;
   const sum=a=>a.reduce((n,m)=>n+m,0);
   function apply(value){
     if(!active())return;
+    const enteringTrial=trial&&(!data||data.run?.id!==value.run?.id);
     data=value;
     if(!scene)scene=window.createRopeScene(canvas,data.levels);
     scene.show(data.run);
-    api.balanceChanged(data);
+    api.balanceChanged?.(data);
     display();
+    if(enteringTrial)requestAnimationFrame(()=>{
+      if(!active())return;
+      const actions=container.querySelector('.actions').getBoundingClientRect();
+      const navigation=document.getElementById('navigation');
+      const bottom=navigation&&!navigation.hidden?navigation.getBoundingClientRect().top:window.innerHeight;
+      if(actions.bottom>bottom-12)window.scrollBy(0,actions.bottom-bottom+12);
+    });
+  }
+  function canStart(){
+    return trial?data.remaining>0:data.enabled&&data.balance>=data.price;
+  }
+  function startLabel(){
+    if(trial)return data.remaining?'Начать бесплатный забег':'Тестовые забеги закончились';
+    if(!data.enabled)return 'Акция на паузе';
+    if(data.balance<data.price)return 'Не хватает '+(data.price-data.balance)+' баллов';
+    return 'Начать забег за '+data.price+' баллов';
   }
   function display(){
     if(!data||!active())return;
     const r=data.run, i=r?.level??0, mode=r?.state??'lobby', bonus=data.levels[i].bonus;
     const ready=['ready','swing'].includes(mode),landed=mode==='landed',ended=!ready&&!landed;
     const count=landed||mode==='banked'?i+1:ready?i:0;
+    if(trial)ui.quota.textContent='Осталось '+data.remaining+' из '+data.total;
     ui.place.textContent=(i+1)+' / 4 · '+names[i];ui.prize.textContent='До +'+bonus+'%';
     ui.marks.innerHTML=data.levels.map((l,k)=>`<span class="${k<count?'taken':k===i?'target':''}">${k<count?'✓ ':''}+${l.bonus-(k?data.levels[k-1].bonus:0)}%</span>`).join('');
     ui.hold.hidden=!ready;ui.bank.hidden=!landed;ui.next.hidden=ready||(landed&&i===3);
-    ui.hold.disabled=flying||waiting;ui.bank.disabled=waiting;ui.next.disabled=waiting||(ended&&(!data.enabled||data.balance<data.price));
+    const busy=waiting||api.isBusy();
+    ui.hold.disabled=flying||busy;ui.bank.disabled=busy;ui.next.disabled=busy||(ended&&!canStart());
     ui.hold.textContent=flying?'Альф в полёте…':input!==null?'Отпусти для прыжка':'Зажать трос';
-    ui.bank.textContent='Забрать +'+bonus+'%';
-    ui.next.textContent=landed?'Дальше до +'+(data.levels[i+1]?.bonus??12)+'%':!data.enabled?'Акция на паузе':data.balance<data.price?'Не хватает '+(data.price-data.balance)+' баллов':'Начать забег за '+data.price+' баллов';
+    ui.bank.textContent=(trial?'Завершить с +':'Забрать +')+bonus+'%';
+    ui.next.textContent=landed?'Дальше до +'+(data.levels[i+1]?.bonus??12)+'%':startLabel();
     let title='Четыре крыши — до +12%',hint='Забери прибавку после любой крыши. Она пойдёт одним бонусом на следующую подтверждённую оплату.';
+    if(trial)hint='Одна попытка за старт. Баллы сохраняются, проценты считаются только в тренировке.';
     if(ready){title='Впереди '+names[i];hint='Зажми кнопку или пробел и отпусти на разгоне. Цель — золотая площадка справа.';}
     if(landed){title='На крыше! Собрано +'+bonus+'%';hint=i===3?'Забери один бонус на следующую оплату.':'Забери бонус или рискни им на следующей крыше.';}
     if(mode==='lost'){title=i?'Срыв. Потерян бонус +'+data.levels[i-1].bonus+'%':'Прыжок не удался';hint=r.landing_x<data.levels[i].left?'Альф не долетел до площадки.':'Альф перелетел площадку.';}
     if(mode==='banked'){title='Бонус +'+bonus+'% сохранён';hint='В очередь добавлена одна прибавка к следующей подтверждённой оплате.';}
+    if(trial&&landed)hint=i===3?'Все четыре крыши пройдены. Зафиксируй результат.':'Сохрани тренировочный результат или переходи на следующую крышу.';
+    if(trial&&mode==='banked'){title='Тестовый результат +'+bonus+'%';hint='Забег завершён. Результат сохранён в истории тренировок.';}
     ui.headline.textContent=title;ui.hint.textContent=hint;
     const {banked,lost}=data.stats;
     ui.summary.textContent='Финишей '+banked[3]+' / '+(sum(banked)+sum(lost));
@@ -50,21 +74,21 @@ window.mountDTRope = function (container, api) {
   async function recover(err){
     if(!active())return;
     api.notice(err.message);
-    try{apply(await api.request('/api/rope'));}catch(e){if(active())api.notice(e.message);}
+    try{apply(await api.request(endpoint));}catch(e){if(active())api.notice(e.message);}
   }
   async function choice(action){
     if(!active()||waiting||input!==null||flying||!data)return;
     const r=data.run;
     let body;
     if(action==='start'){
-      if(!data.enabled||data.balance<data.price||['ready','swing','landed'].includes(r?.state))return;
+      if(!canStart()||['ready','swing','landed'].includes(r?.state))return;
       let nonce;try{const saved=JSON.parse(localStorage.getItem(pendingKey));if(saved?.previous_id===(r?.id??0))nonce=saved.request_id;}catch{}
       body={action,previous_id:r?.id??0,request_id:nonce||crypto.randomUUID()};
       try{localStorage.setItem(pendingKey,JSON.stringify(body));}catch{}
     }else{if(r?.state!=='landed')return;body={action,id:r.id,version:r.version};}
     waiting=true;display();
     try{
-      const value=await api.request('/api/rope',body);
+      const value=await api.request(endpoint,body);
       if(action==='start'){try{localStorage.removeItem(pendingKey);}catch{}}
       apply(value);
     }catch(e){await recover(e);}finally{waiting=false;display();}
@@ -75,7 +99,7 @@ window.mountDTRope = function (container, api) {
     const r=data?.run;
     if(!active()||input!==null||waiting||flying||!['ready','swing'].includes(r?.state))return;
     input=source;scene.hold();display();
-    arm=api.request('/api/rope',{action:'arm',id:r.id,version:r.version}).then(value=>{
+    arm=api.request(endpoint,{action:'arm',id:r.id,version:r.version}).then(value=>{
       if(value.run?.state!=='swing'||value.run.id!==r.id||value.run.version!==r.version+1)throw Error('Состояние забега изменилось.');
       if(active())data=value;
       return value.run;
@@ -87,7 +111,7 @@ window.mountDTRope = function (container, api) {
     try{
       const r=await arm;
       if(r){
-        const [value]=await Promise.all([api.request('/api/rope',{action:'release',id:r.id,version:r.version}),new Promise(done=>setTimeout(done,550))]);
+        const [value]=await Promise.all([api.request(endpoint,{action:'release',id:r.id,version:r.version}),new Promise(done=>setTimeout(done,550))]);
         apply(value);if(active()&&value.run?.state==='landed')api.haptic();
       }
     }catch(e){await recover(e);}finally{flying=false;display();}
@@ -113,8 +137,8 @@ window.mountDTRope = function (container, api) {
   window.addEventListener('blur',cancel,opts);
   document.addEventListener('visibilitychange',()=>{if(document.hidden)cancel();},opts);
   ui.headline.textContent='Загружаем забег…';
-  api.request('/api/rope').then(apply).catch(recover);
-  return {destroy(){lifetime.abort();scene?.destroy();},refresh(value){
+  api.request(endpoint).then(apply).catch(recover);
+  return {updateControls:display,destroy(){lifetime.abort();scene?.destroy();},refresh(value){
     if(data&&input===null&&!flying&&!waiting){data.enabled=value.enabled;data.balance=value.balance??data.balance;display();}
   }};
 };

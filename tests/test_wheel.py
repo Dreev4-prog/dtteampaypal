@@ -78,6 +78,61 @@ class WheelTests(unittest.IsolatedAsyncioTestCase):
         armed=await self.rope_action(run,"arm",at)
         return await self.rope_action(armed,"release",at+timedelta(seconds=seconds))
 
+    async def test_rope_trials_use_three_personal_starts_and_never_pay(self):
+        async with self.engine.begin() as conn:
+            await rope.grant_admin_trials(conn, [1, 999])
+            await wheel.grant_admin_trials(conn, [1, 999])
+        await wheel.admin_trials(1, 'independent-test-wheel')
+        live_before = await wheel.state(1, admin=True)
+        async def move(run, action, at):
+            return await rope.admin_trials(1, dict(id=run['id'], version=run['version'], action=action), at)
+        previous_id = 0
+        for i in range(3):
+            start = dict(action="start", request_id=f"test-rope-start-{i:02}", previous_id=previous_id)
+            state = await rope.admin_trials(1, start)
+            self.assertEqual(state, await rope.admin_trials(1, start))
+            self.assertEqual(state['remaining'], 2-i)
+            run = state['run']
+            previous_id = run['id']
+            with self.assertRaises(ValueError):
+                await rope.admin_trials(999, dict(id=run['id'], version=0, action='arm'), datetime.utcnow())
+            for level, seconds in enumerate((1.10, 1.01, 1.045, .992) if i == 2 else (.06,)):
+                now = datetime.utcnow()
+                armed = await move(run, 'arm', now)
+                self.assertEqual(armed, await rope.admin_trials(1))
+                landed = await move(armed['run'], 'release', now+timedelta(seconds=seconds))
+                self.assertEqual(landed, await move(armed['run'], 'release', now+timedelta(seconds=seconds)))
+                self.assertEqual(landed['remaining'], 2-i)
+                if i != 2:
+                    self.assertEqual(landed['run']['state'], 'lost')
+                    break
+                self.assertEqual(landed['run']['state'], 'landed')
+                if level < 3:
+                    run = (await move(landed['run'], 'next', now))['run']
+                else:
+                    result = await move(landed['run'], 'bank', now)
+                    self.assertEqual(result['run']['points'], 12)
+                    self.assertEqual(result['stats'], {'lost':[2,0,0,0], 'banked':[0,0,0,1]})
+        async with self.engine.begin() as conn:
+            await rope.grant_admin_trials(conn, [1, 999, 1000])
+        with self.assertRaises(ValueError):
+            await rope.admin_trials(1, dict(action='start', request_id='extra-trial-rope-run', previous_id=previous_id))
+        self.assertEqual((await rope.admin_trials(999))['remaining'], 3)
+        self.assertEqual((await rope.admin_trials(1000))['total'], 0)
+        self.assertEqual((await wheel.admin_trials(1))['wheel']['remaining'], 2)
+        self.assertEqual(await wheel.state(1, admin=True), live_before)
+        self.assertEqual((await game_stats.report(uid=1))['stats']['runs'], 0)
+        self.assertEqual((await self.confirm()).wheel_bonus_percent, 0)
+
+    @unittest.skipUnless(POSTGRES, 'requires dedicated local PostgreSQL')
+    async def test_parallel_starts_only_consume_one_rope_trial(self):
+        async with self.engine.begin() as conn:
+            await rope.grant_admin_trials(conn, [1])
+        starts = await asyncio.gather(*(rope.admin_trials(1, dict(action='start', previous_id=0,
+            request_id=f'concurrent-trial-rope-{i}')) for i in range(12)))
+        self.assertTrue(all(s == starts[0] for s in starts))
+        self.assertEqual(starts[0]['remaining'], 2)
+
     async def test_one_off_trials_are_personal_and_have_no_ledger_effects(self):
         async with self.engine.begin() as conn:
             await wheel.grant_admin_trials(conn, [1, 999])

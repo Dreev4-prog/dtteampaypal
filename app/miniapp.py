@@ -25,7 +25,7 @@ from app.miniapp_transport import WebTransport, public_records, web_context, med
 STATIC = Path(__file__).resolve().parent / "miniapp_static"
 TTL = 8 * 3600
 MAX_PHOTO = 8 * 1024 * 1024
-NAVIGATION = {"home", "paypal_request", "request_back", "my_paypals", "wallet", "profile", "support", "dt_payments", "admin_home", "wheel", "rope", "wheel_test"}
+NAVIGATION = {"home", "paypal_request", "request_back", "my_paypals", "wallet", "profile", "support", "dt_payments", "admin_home", "wheel", "rope", "wheel_test", "rope_test"}
 
 
 @dataclass
@@ -193,8 +193,19 @@ class MiniApp:
             return web.json_response(result)
 
     async def rope_game(self, request):
+        return await self.handle_rope(request, trial=False)
+
+    async def rope_test(self, request):
+        return await self.handle_rope(request, trial=True)
+
+    async def handle_rope(self, request, *, trial):
         received = datetime.utcnow()
-        session = await self.wheel_access(request)
+        if trial:
+            session = self.session(request)
+            if session.user.id not in settings.admin_ids:
+                raise web.HTTPForbidden(text="Тестовые забеги доступны только администраторам.")
+        else:
+            session = await self.wheel_access(request)
         if request.method == "POST":
             body = await request.json()
             if not isinstance(body, dict):
@@ -206,10 +217,14 @@ class MiniApp:
             async with self.lock(session.user.id):
                 self.session(request)
                 try:
+                    if trial:
+                        return web.json_response(await rope.admin_trials(session.user.id, body, received))
                     await rope.play(session.user.id, body, received)
                 except ValueError as exc:
                     raise web.HTTPConflict(text=str(exc)) from exc
                 session.updates_at = 0
+        if trial:
+            return web.json_response(await rope.admin_trials(session.user.id))
         return web.json_response(await rope.state(session.user.id))
 
     async def game_statistics(self, request):
@@ -229,7 +244,7 @@ class MiniApp:
             raise web.HTTPBadRequest(text="Ожидается объект запроса.")
         user, admin = await self.identity(session)
         callback = session.actions.get(body.get("action"), (None, ""))[1]
-        if body.get("nav") in ("admin_home", "wheel_test") and not admin:
+        if body.get("nav") in ("admin_home", "wheel_test", "rope_test") and not admin:
             raise web.HTTPForbidden(text="Нет доступа к управлению.")
         if not admin and (not user or user.status != "approved"):
             if body.get("nav") not in {"home", "support"} and callback != "membership_apply":
@@ -296,7 +311,7 @@ class MiniApp:
         user, admin = await self.identity(session)
         approved = user is not None and user.status == "approved"
         nav = body.get("nav")
-        if nav in {"admin_home", "wheel_test"} and not admin:
+        if nav in {"admin_home", "wheel_test", "rope_test"} and not admin:
             raise web.HTTPForbidden(text="Нет доступа.")
         if not approved and not admin and nav not in {"home", "support"}:
             # Membership apply is the sole non-navigation callback permitted.
@@ -323,7 +338,7 @@ class MiniApp:
                     await state.set_state(PaypalRequestForm.amount)
                     message = self.incoming(session, text=str(value))
                     await self.dp.feed_update(self.bot, Update(update_id=abs(message.message_id), message=message))
-            elif nav == "wheel_test":
+            elif nav in {"wheel_test", "rope_test"}:
                 await state.clear()
                 session.route, session.section = nav, "admin_home"
                 session.display = []
@@ -561,6 +576,8 @@ def create_app(bot, dispatcher):
     app.router.add_get("/api/state", service.get_state)
     app.router.add_get("/api/updates", service.get_updates)
     app.router.add_post("/api/action", service.action)
+    app.router.add_get("/api/rope/test", service.rope_test)
+    app.router.add_post("/api/rope/test", service.rope_test)
     app.router.add_get("/api/rope", service.rope_game)
     app.router.add_post("/api/rope", service.rope_game)
     app.router.add_get("/api/games/statistics", service.game_statistics)

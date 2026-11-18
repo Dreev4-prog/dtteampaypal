@@ -253,7 +253,30 @@ class WheelSpin(Base):
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
-class RopeRun(Base):
+class RopeProgress:
+    state: Mapped[str] = mapped_column(String(10), default="ready")
+    level: Mapped[int] = mapped_column(Integer, default=0)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    swing_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    landing_x: Mapped[Optional[float]] = mapped_column(Float)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    points: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class AdminRopeTrial(RopeProgress, Base):
+    __tablename__ = "admin_rope_trials"
+    __table_args__ = (
+        UniqueConstraint("admin_id", "slot", name="uq_admin_rope_slot"),
+        UniqueConstraint("admin_id", "nonce", name="uq_admin_rope_nonce"),
+        CheckConstraint("slot BETWEEN 1 AND 3", name="ck_admin_rope_slot"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    admin_id: Mapped[int] = mapped_column(BigInteger)
+    slot: Mapped[int] = mapped_column(Integer)
+    nonce: Mapped[Optional[str]] = mapped_column(String(80))
+
+
+class RopeRun(RopeProgress, Base):
     __tablename__ = "rope_runs"
     __table_args__ = (
         UniqueConstraint("user_id", "nonce", name="uq_rope_user_nonce"),
@@ -266,14 +289,7 @@ class RopeRun(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), index=True)
     nonce: Mapped[str] = mapped_column(String(80))
     cost: Mapped[int] = mapped_column(Integer)
-    state: Mapped[str] = mapped_column(String(10), default="ready")
-    level: Mapped[int] = mapped_column(Integer, default=0)
-    version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    swing_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    landing_x: Mapped[Optional[float]] = mapped_column(Float)
-    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    points: Mapped[int] = mapped_column(Integer, default=0)
     used_request_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("requests.id"), unique=True)
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
@@ -350,11 +366,29 @@ engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
+async def grant_three_admin_trials(conn, admin_ids, marker, table):
+    if not admin_ids:
+        return False
+    first = await conn.scalar(text("""
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (:marker, 'granted', CURRENT_TIMESTAMP)
+        ON CONFLICT (key) DO NOTHING RETURNING key
+    """), {"marker": marker})
+    if not first:
+        return False
+    await conn.execute(table.insert(), [
+        {"admin_id": uid, "slot": slot} for uid in sorted(admin_ids) for slot in range(1, 4)
+    ])
+    return True
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         from app.wheel import migrate
         await migrate(conn)
+        from app.rope import grant_admin_trials
+        await grant_admin_trials(conn, settings.admin_ids)
         await _migrate_paypal_warmup(conn)
 
         # create_all не добавляет новые столбцы в уже существующие таблицы.

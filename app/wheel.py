@@ -43,17 +43,7 @@ async def migrate(conn):
 
 async def grant_admin_trials(conn, admin_ids):
     """Issue this one-off grant to the configured admins in the startup transaction."""
-    if not admin_ids:
-        return
-    first = await conn.scalar(text("""
-        INSERT INTO app_settings (key, value, updated_at)
-        VALUES ('admin_wheel_trials_nov_2026', 'granted', CURRENT_TIMESTAMP)
-        ON CONFLICT (key) DO NOTHING RETURNING key
-    """))
-    if first:
-        await conn.execute(db.AdminWheelTrial.__table__.insert(), [
-            {"admin_id": uid, "slot": slot} for uid in sorted(admin_ids) for slot in range(1, 4)
-        ])
+    if await db.grant_three_admin_trials(conn, admin_ids, "admin_wheel_trials_nov_2026", db.AdminWheelTrial.__table__):
         logging.getLogger(__name__).info("Issued 3 test spins each to %d admins", len(admin_ids))
 
 

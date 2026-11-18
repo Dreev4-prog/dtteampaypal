@@ -1,4 +1,5 @@
 """Paid rooftop runs. Each durable run is a single debit; only the server decides landings."""
+import logging
 import math
 from datetime import datetime
 
@@ -10,6 +11,7 @@ COST = 100
 LEVELS = ((315, 346, 2.05), (330, 359, 2.20), (340, 360, 2.35), (347, 367, 2.50))
 BONUS = (1, 3, 7, 12)
 OPEN = ("ready", "swing", "landed")
+LEVEL_CONFIG = [dict(left=l, right=r, speed=s, bonus=b) for (l, r, s), b in zip(LEVELS, BONUS)]
 
 
 def landing(level, seconds):
@@ -46,22 +48,31 @@ async def state(uid):
             stats[status][level] = count
         return dict(run=record(await latest(session, uid)), enabled=bool(row.enabled), stats=stats,
                     balance=(await wheel.totals(session, uid))["balance"], price=COST,
-                    levels=[dict(left=l,right=r,speed=s,bonus=b) for (l,r,s),b in zip(LEVELS,BONUS)])
+                    levels=LEVEL_CONFIG)
 
 
-async def play(uid, body, received):
+def validate_action(body):
     action = body.get("action")
     expected = {"action", "request_id", "previous_id"} if action == "start" else {"action", "id", "version"}
     if set(body) != expected or action not in ("start", "arm", "release", "next", "bank"):
         raise ValueError("Недействительное действие игры.")
+    if action == "start":
+        nonce = body["request_id"]
+        if not isinstance(nonce, str) or not 16 <= len(nonce) <= 80 or type(body["previous_id"]) is not int:
+            raise ValueError("Недействительный запрос старта.")
+    elif type(body["id"]) is not int or type(body["version"]) is not int:
+        raise ValueError("Недействительный номер забега.")
+    return action
+
+
+async def play(uid, body, received):
+    action = validate_action(body)
     async with db.SessionLocal() as session, session.begin():
         user = await session.get(db.User, uid, with_for_update=True)
         if not user or user.status != "approved":
             raise ValueError("Доступ к акции закрыт.")
         if action == "start":
             nonce = body["request_id"]
-            if not isinstance(nonce, str) or not 16 <= len(nonce) <= 80 or type(body["previous_id"]) is not int:
-                raise ValueError("Недействительный запрос старта.")
             prior = await session.scalar(select(db.RopeRun.id).where(
                 db.RopeRun.user_id == uid, db.RopeRun.nonce == nonce))
             current = await latest(session, uid)
@@ -75,26 +86,64 @@ async def play(uid, body, received):
                 raise ValueError("Для забега нужно 100 баллов.")
             session.add(db.RopeRun(user_id=uid, nonce=nonce, cost=COST))
             return
-        if type(body["id"]) is not int or type(body["version"]) is not int:
-            raise ValueError("Недействительный номер забега.")
         run = await session.scalar(select(db.RopeRun).where(db.RopeRun.id == body["id"],
                                    db.RopeRun.user_id == uid).with_for_update())
-        if not run:
-            raise ValueError("Забег не найден.")
-        if run.version != body["version"]:
-            return  # A retry observes the committed result without repeating the action.
-        if action == "arm" and run.state in ("ready", "swing"):
-            run.swing_at, run.state = received, "swing"
-        elif action == "release" and run.state == "swing":
-            x, ok = landing(run.level, (received - run.swing_at).total_seconds())
-            run.landing_x, run.state = x, "landed" if ok else "lost"
-            if not ok:
-                run.finished_at = datetime.utcnow()
-        elif action == "next" and run.state == "landed" and run.level < 3:
-            run.level += 1
-            run.state, run.landing_x = "ready", None
-        elif action == "bank" and run.state == "landed":
-            run.points, run.finished_at, run.state = BONUS[run.level], datetime.utcnow(), "banked"
-        else:
-            raise ValueError("Это действие уже недоступно.")
-        run.version += 1
+        advance(run, action, body["version"], received)
+
+
+def advance(run, action, version, received):
+    if not run:
+        raise ValueError("Забег не найден.")
+    if run.version != version:
+        return  # A retry observes the committed result without repeating the action.
+    if action == "arm" and run.state in ("ready", "swing"):
+        run.swing_at, run.state = received, "swing"
+    elif action == "release" and run.state == "swing":
+        x, ok = landing(run.level, (received - run.swing_at).total_seconds())
+        run.landing_x, run.state = x, "landed" if ok else "lost"
+        if not ok:
+            run.finished_at = datetime.utcnow()
+    elif action == "next" and run.state == "landed" and run.level < 3:
+        run.level += 1
+        run.state, run.landing_x = "ready", None
+    elif action == "bank" and run.state == "landed":
+        run.points, run.finished_at, run.state = BONUS[run.level], datetime.utcnow(), "banked"
+    else:
+        raise ValueError("Это действие уже недоступно.")
+    run.version += 1
+
+
+async def grant_admin_trials(conn, admin_ids):
+    if await db.grant_three_admin_trials(conn, admin_ids, "admin_rope_trials_nov_2026", db.AdminRopeTrial.__table__):
+        logging.getLogger(__name__).info("Issued 3 test rope runs each to %d admins", len(admin_ids))
+
+
+async def admin_trials(uid, body=None, received=None):
+    action = validate_action(body) if body is not None else None
+    async with db.SessionLocal() as session, session.begin():
+        query = select(db.AdminRopeTrial).where(db.AdminRopeTrial.admin_id == uid).order_by(db.AdminRopeTrial.slot)
+        if action:
+            query = query.with_for_update()
+        slots = list(await session.scalars(query))
+        started = [row for row in slots if row.nonce is not None]
+        current = started[-1] if started else None
+        if action == "start":
+            duplicate = any(row.nonce == body["request_id"] for row in started)
+            if not duplicate and not (current and current.state in OPEN):
+                if body["previous_id"] != (current.id if current else 0):
+                    raise ValueError("Обновите состояние забега.")
+                if len(started) == len(slots):
+                    raise ValueError("Все тестовые забеги использованы.")
+                current = slots[len(started)]
+                current.nonce = body["request_id"]
+                started.append(current)
+        elif action:
+            if current is None or current.id != body["id"]:
+                raise ValueError("Тестовый забег не найден.")
+            advance(current, action, body["version"], received)
+        stats = {"banked": [0]*4, "lost": [0]*4}
+        for row in started:
+            if row.state in stats:
+                stats[row.state][row.level] += 1
+        return dict(test=True, remaining=len(slots)-len(started), total=len(slots),
+                    run=record(current), stats=stats, levels=LEVEL_CONFIG)

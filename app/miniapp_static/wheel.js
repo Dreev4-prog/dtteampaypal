@@ -53,9 +53,15 @@
   function paint(){
     if(!root?.isConnected)return;
     unmount();
+    if(ctx.game==='rope_test'){
+      root.innerHTML='<div id="dt-wheel"><div class="dtw-app"><section class="dtw-view" id="dtw-content"></section><button class="action" data-nav="admin_home">В админку</button></div></div>';
+      ropeView=window.mountDTRope($('content'),{...ctx,trial:true});
+      return;
+    }
     if(testing()){paintTest();return;}
     root.innerHTML=`<div id="dt-wheel"><div class="dtw-app"><div class="dtw-hero"><img src="/static/art/home.webp" alt="Альф в клубе DT TEAM"><div class="dtw-hero-copy"><span>DT TEAM / ИГРЫ</span><h1>Игры DT</h1><p>1 € после вывода = 1 балл DT</p></div></div><div class="games-balance">Общий баланс <strong id="dtw-balance">${data.balance==null?'Сохранён':data.balance+' баллов'}</strong></div><nav class="dtw-tabs" aria-label="Разделы акции">${[['rope','Трос Альфа'],['wheel','Колесо'],['bonuses','Бонусы'],['history','История']].map(([id,label])=>`<button data-wheel-tab="${id}" ${(id==='wheel'||id==='rope')&&id!==ctx.game?'data-nav="'+id+'"':''} aria-selected="${id===tab}">${label}${id==='bonuses'?` <span>${data.coupons?.length||0}</span>`:''}</button>`).join('')}</nav>${ctx.admin&&tab==='wheel'?'<button class="action" data-nav="wheel_test">Тестовые вращения ›</button>':''}<section class="dtw-view" id="dtw-content"></section></div></div>`;
     const view=$('content');
+    if(ctx.admin&&tab==='rope')view.insertAdjacentHTML('beforebegin','<button class="action" data-nav="rope_test">Тестовые забеги · Трос Альфа ›</button>');
     if(tab==='rope'&&(data.enabled||data.open_run)){
       ropeView=window.mountDTRope(view,{...ctx,balanceChanged(value){
         data.balance=value.balance;data.available=Math.floor(value.balance/150);
@@ -76,7 +82,7 @@
   function resultHTML(p){
     if(p.test)return `<section class="dtw-result"><div class="dtw-result-kicker">ТЕСТОВЫЙ РЕЗУЛЬТАТ</div><div class="dtw-result-value">${p.cash?`${p.cash} $`:`+${p.points}%`}</div><p>Пробное вращение · без начисления приза</p></section>`;
     return `<section class="dtw-result"><div class="dtw-result-kicker">${p.prize==='jackpot'?'ГЛАВНЫЙ ПРИЗ ТВОЙ':'ТВОЙ ПРИЗ'}</div><div class="dtw-result-value">${p.cash?`${p.cash} $`:`+${p.points}%`}</div><h2>${p.cash?'Баланс пополнен':'Бонус сохранён'}</h2><p>${p.cash?`${p.cash} USDT уже доступны в кошельке.`:`+${p.points}% применятся к следующей подтверждённой оплате в порядке очереди.`}</p></section>`;}
-  function updateControls(){if(!root?.isConnected)return;const b=$('spin');if(!b)return;
+  function updateControls(){if(!root?.isConnected)return;if(ctx.game==='rope_test'){ropeView?.updateControls();return;}const b=$('spin');if(!b)return;
     if(testing()){
       b.disabled=spinning||ctx.isBusy()||(!pending && data.remaining<1);
       b.textContent=spinning?'Колесо вращается…':pending?'Проверить попытку':data.remaining?'Крутить тестово':'Попытки закончились';

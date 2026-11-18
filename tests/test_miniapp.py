@@ -85,6 +85,29 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
     def text(self):
         return '\n'.join(m['html'] for m in self.view['messages'])
 
+    async def test_admin_rope_trials_are_private_resumable_and_available_on_pause(self):
+        url = '/api/rope/test'
+        start = dict(action='start', request_id='test-admin-rope-start', previous_id=0)
+        self.assertEqual((await self.client.get(url)).status, 401)
+        await self.login()
+        self.assertEqual((await self.client.get(url, headers=self.headers)).status, 403)
+        self.assertEqual((await self.client.post(url, json=start, headers=self.headers)).status, 403)
+        self.assertEqual((await self.client.post('/api/action', json={'nav':'rope_test'}, headers=self.headers)).status, 403)
+        async with db.SessionLocal() as session, session.begin():
+            (await session.get(db.User, 999)).status = 'pending'
+        await self.login(999)
+        view = await self.act(nav='rope_test')
+        self.assertEqual(view['route'], 'rope_test')
+        self.assertFalse(view['wheel']['enabled'])
+        self.assertEqual((await (await self.client.get(url, headers=self.headers)).json())['remaining'], 3)
+        denied = await self.client.post('/api/rope', json=start, headers=self.headers)
+        self.assertEqual(denied.status, 403)
+        result = await (await self.client.post(url, json=start, headers=self.headers)).json()
+        self.assertEqual(result['remaining'], 2)
+        await self.login(999)
+        self.assertEqual(result, await (await self.client.get(url, headers=self.headers)).json())
+        self.assertEqual(result, await (await self.client.post(url, json=start, headers=self.headers)).json())
+
     async def test_admin_wheel_trials_when_campaign_paused(self):
         path = '/api/wheel/test'
         self.assertEqual((await self.client.get(path)).status, 401)
