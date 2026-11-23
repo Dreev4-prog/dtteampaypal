@@ -2,6 +2,7 @@ from pathlib import Path
 import asyncio
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from io import BytesIO
@@ -4828,6 +4829,15 @@ def _happy_hours_window(
     return effective_start_msk, end_msk, start_utc, end_utc
 
 
+def _happy_hours_post_body(template: str) -> str:
+    """Drop whole-post monospace inherited when copying the old editor's template."""
+    source = template.strip()
+    if source.startswith("<pre>") and source.endswith("</pre>") and source.count("</pre>") == 1:
+        source = source[len("<pre>"):-len("</pre>")]
+    code = re.fullmatch(r'<code(?: class="[^"]*")?>([^<]*)</code>', source)
+    return code[1] if code else source
+
+
 def _render_happy_hours_text(
     template: str,
     start_text: str,
@@ -4836,7 +4846,7 @@ def _render_happy_hours_text(
     percent: int,
 ) -> str:
     return (
-        template
+        _happy_hours_post_body(template)
         .replace("{start}", start_text)
         .replace("{end}", end_text)
         .replace("{min_amount}", str(min_amount))
@@ -5135,22 +5145,23 @@ async def happy_hours_edit_text(
     if in_miniapp:
         instructions = "Измените текст в поле ниже. Оформление нового текста — обычное."
     else:
-        instructions = "Пришлите отредактированный пост одним сообщением. Можно скопировать текущий шаблон ниже."
+        instructions = "Скопируйте шаблон из следующего сообщения, внесите правки и пришлите текст сюда."
 
     await replace_photo_with_text(
         callback,
         "📝 <b>Текст рассылки Happy Hours</b>\n\n"
         f"{instructions}\n"
         "Поддерживаются переменные:\n"
-        "<code>{start}</code> — начало\n"
-        "<code>{end}</code> — окончание\n"
-        "<code>{min_amount}</code> — минимальная сумма\n"
-        "<code>{percent}</code> — процент\n\n"
+        "{start} — начало\n"
+        "{end} — окончание\n"
+        "{min_amount} — минимальная сумма\n"
+        "{percent} — процент\n\n"
         "Текст ограничен 900 символами, чтобы он помещался в подпись "
-        "к фотографии.\n\n"
-        + ("" if in_miniapp else f"<pre>{escape(current_plain)}</pre>"),
+        "к фотографии.",
         happy_hours_cancel_menu(),
     )
+    if not in_miniapp:
+        await callback.message.answer(current_plain, parse_mode=None)
     await callback.answer()
 
 
@@ -5167,6 +5178,7 @@ async def happy_hours_text_save(
     value = (message.html_text or "").strip() if message.text else ""
     if web_context.get() is not None and message.text and message.text == data.get("happy_initial") and data.get("happy_original"):
         value = data["happy_original"]
+    value = _happy_hours_post_body(value)
     if not value or len(value) > 900:
         await message.answer(
             "Текст должен быть от 1 до 900 символов.",
@@ -5349,7 +5361,7 @@ async def happy_hours_launch_confirm(callback: CallbackQuery) -> None:
         end_at=end_utc,
         min_amount=draft["min_amount"],
         percent=draft["percent"],
-        broadcast_text=draft["text"],
+        broadcast_text=_happy_hours_post_body(draft["text"]),
         photo_file_id=draft["photo"] or None,
         admin_id=callback.from_user.id,
     )

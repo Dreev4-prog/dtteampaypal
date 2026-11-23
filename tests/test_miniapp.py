@@ -130,6 +130,33 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(any('К запуску' in b['label'] for m in self.view['messages'] for row in m['rows'] for b in row))
             self.assertEqual((await db.get_open_happy_hours_campaign()).broadcast_text, campaign.broadcast_text)
 
+    async def test_happy_hours_chat_template_is_plain_and_old_code_pastes_are_unwrapped(self):
+        from datetime import datetime, timezone
+        from aiogram.types import CallbackQuery, Chat, Message, MessageEntity, Update, User
+        from app.handlers import _render_happy_hours_text
+        admin = User(id=999, is_bot=False, first_name="Admin")
+        message = Message(message_id=81, date=datetime.now(timezone.utc), chat=Chat(id=999, type="private"),
+                          from_user=admin, text="Меню")
+        current = 'Сегодня {percent}% & дальше\nДо {end}'
+        stored = 'Сегодня {percent}% &amp; дальше\nДо {end}'
+        await db.set_app_setting('happy_hours_text', '<pre>'+stored+'</pre>')
+        callback = CallbackQuery(id="edit-template", from_user=admin, chat_instance="test", message=message,
+                                 data="happy_hours_edit_text")
+        await self.dp.feed_update(self.bot, Update(update_id=81, callback_query=callback))
+        sent = [m for m in self.fake.calls if m.__api_method__ == 'sendMessage' and m.chat_id == 999]
+        self.assertEqual(sent[-1].text, current)
+        self.assertIsNone(sent[-1].parse_mode)
+        for wrapper in ('<pre>{}</pre>', '<code>{}</code>', '<pre><code class="language-text">{}</code></pre>'):
+            self.assertEqual(_render_happy_hours_text(wrapper.format(stored), '13:00', '17:00', 100, 80),
+                             'Сегодня 80% &amp; дальше\nДо 17:00')
+        inline = '<b>Пост</b> <code>A</code> или <code>B</code>'
+        self.assertEqual(_render_happy_hours_text(inline, '13:00', '17:00', 100, 80), inline)
+        reply = message.model_copy(update={'text':current,'message_id':82,
+                                           'entities':[MessageEntity(type='pre', offset=0, length=len(current))]})
+        await self.dp.feed_update(self.bot, Update(update_id=82, message=reply))
+        self.assertEqual(await db.get_app_setting('happy_hours_text'), stored)
+        self.assertIsNone(await db.get_open_happy_hours_campaign())
+
     async def test_happy_hours_chat_post_preserves_telegram_formatting(self):
         from datetime import datetime, timezone
         from aiogram.types import Chat, Message, MessageEntity, Update, User
