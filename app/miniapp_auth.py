@@ -82,6 +82,18 @@ class SafeTelegramHTML(HTMLParser):
         return "".join(self.parts) + "".join(f"</{tag}>" for tag in reversed(self.opened))
 
 
+def plain_telegram_text(value):
+    class PlainText(HTMLParser):
+        def handle_data(self, text):
+            parts.append(text)
+
+    parts = []
+    parser = PlainText()
+    parser.feed(value)
+    parser.close()
+    return "".join(parts)
+
+
 def safe_html(text, html=True):
     if not html:
         return escape(text or "")

@@ -603,6 +603,7 @@ def happy_hours_menu(is_open: bool, has_photo: bool = False) -> InlineKeyboardMa
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🛑 Завершить Happy Hours", callback_data="happy_hours_stop")],
             [InlineKeyboardButton(text="🔄 Обновить статистику", callback_data="happy_hours_menu")],
+            [InlineKeyboardButton(text="✏️ Пост следующей акции", callback_data="happy_hours_edit_text")],
             [InlineKeyboardButton(text="📜 История акций", callback_data="happy_hours_history")],
             [InlineKeyboardButton(text="⬅️ В админ-панель", callback_data="admin_home")],
         ])
@@ -619,7 +620,7 @@ def happy_hours_menu(is_open: bool, has_photo: bool = False) -> InlineKeyboardMa
             InlineKeyboardButton(text="📈 Процент", callback_data="happy_hours_edit_percent"),
         ],
         [
-            InlineKeyboardButton(text="📝 Текст рассылки", callback_data="happy_hours_edit_text"),
+            InlineKeyboardButton(text="✏️ Изменить текст поста", callback_data="happy_hours_edit_text"),
             InlineKeyboardButton(text=photo_label, callback_data="happy_hours_edit_photo"),
         ],
         [InlineKeyboardButton(text="👁 Предпросмотр рассылки", callback_data="happy_hours_preview")],
@@ -647,17 +648,23 @@ def happy_hours_photo_menu(has_photo: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def happy_hours_launch_confirm_menu() -> InlineKeyboardMarkup:
+def happy_hours_launch_confirm_menu(draft_id: str = "") -> InlineKeyboardMarkup:
+    confirm = f"happy_hours_launch_confirm:{draft_id}" if draft_id else "happy_hours_launch_confirm"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Запустить и разослать", callback_data="happy_hours_launch_confirm")],
+        [InlineKeyboardButton(text="✏️ Изменить текст поста", callback_data="happy_hours_edit_text")],
+        [InlineKeyboardButton(text="✅ Запустить и разослать", callback_data=confirm)],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="happy_hours_menu")],
     ])
 
 
-def happy_hours_preview_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ К Happy Hours", callback_data="happy_hours_menu")]
-    ])
+def happy_hours_preview_menu(can_launch: bool = True) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="✏️ Изменить текст поста", callback_data="happy_hours_edit_text")],
+    ]
+    if can_launch:
+        rows.append([InlineKeyboardButton(text="🚀 К запуску", callback_data="happy_hours_launch_ask")])
+    rows.append([InlineKeyboardButton(text="⬅️ К Happy Hours", callback_data="happy_hours_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def finance_menu() -> InlineKeyboardMarkup:

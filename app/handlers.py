@@ -1,5 +1,7 @@
 from pathlib import Path
 import asyncio
+import hashlib
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from io import BytesIO
@@ -81,6 +83,7 @@ from app.db import (
     get_happy_hours_campaign,
     get_open_happy_hours_campaign,
     create_happy_hours_campaign,
+    save_happy_hours_post,
     stop_happy_hours_campaign,
     list_happy_hours_campaigns,
     get_happy_hours_stats,
@@ -4841,6 +4844,18 @@ def _render_happy_hours_text(
     )
 
 
+def _happy_hours_draft_id(draft: dict) -> str:
+    content = json.dumps(draft, sort_keys=True, ensure_ascii=False).encode()
+    return hashlib.sha256(content).hexdigest()[:20]
+
+
+def _happy_hours_post(draft: dict, window=None) -> str:
+    start, end = draft["start"], draft["end"]
+    if window:
+        start, end = (dt.strftime("%H:%M") for dt in window[:2])
+    return _render_happy_hours_text(draft["text"], start, end, draft["min_amount"], draft["percent"])
+
+
 def _happy_hours_campaign_text(campaign) -> str:
     return _render_happy_hours_text(
         campaign.broadcast_text,
@@ -5110,12 +5125,22 @@ async def happy_hours_edit_text(
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+    from app.miniapp_transport import web_context
+    from app.miniapp_auth import plain_telegram_text
     await state.set_state(HappyHoursForm.text)
-    current = await get_app_setting("happy_hours_text", "")
+    current = (await _happy_hours_draft())["text"]
+    current_plain = plain_telegram_text(current)
+    await state.update_data(happy_original=current, happy_initial=current_plain)
+    in_miniapp = web_context.get() is not None
+    if in_miniapp:
+        instructions = "Измените текст в поле ниже. Оформление нового текста — обычное."
+    else:
+        instructions = "Пришлите отредактированный пост одним сообщением. Можно скопировать текущий шаблон ниже."
+
     await replace_photo_with_text(
         callback,
         "📝 <b>Текст рассылки Happy Hours</b>\n\n"
-        "Пришлите новый текст одним сообщением.\n"
+        f"{instructions}\n"
         "Поддерживаются переменные:\n"
         "<code>{start}</code> — начало\n"
         "<code>{end}</code> — окончание\n"
@@ -5123,7 +5148,7 @@ async def happy_hours_edit_text(
         "<code>{percent}</code> — процент\n\n"
         "Текст ограничен 900 символами, чтобы он помещался в подпись "
         "к фотографии.\n\n"
-        f"<b>Сейчас:</b>\n{current}",
+        + ("" if in_miniapp else f"<pre>{escape(current_plain)}</pre>"),
         happy_hours_cancel_menu(),
     )
     await callback.answer()
@@ -5137,20 +5162,28 @@ async def happy_hours_text_save(
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-    value = (message.html_text or message.text or "").strip()
+    from app.miniapp_transport import web_context
+    data = await state.get_data()
+    value = (message.html_text or "").strip() if message.text else ""
+    if web_context.get() is not None and message.text and message.text == data.get("happy_initial") and data.get("happy_original"):
+        value = data["happy_original"]
     if not value or len(value) > 900:
         await message.answer(
             "Текст должен быть от 1 до 900 символов.",
             reply_markup=happy_hours_cancel_menu(),
         )
         return
-    await set_app_setting("happy_hours_text", value)
+    original = data.get("happy_original")
+    if original is None:
+        original = (await _happy_hours_draft())["text"]
+    saved = await save_happy_hours_post(value, original)
     await state.clear()
+    if not saved:
+        await message.answer("Другой администратор изменил пост. Откройте редактор ещё раз.",
+                             reply_markup=happy_hours_preview_menu(False))
+        return
     draft = await _happy_hours_draft()
-    await message.answer(
-        "✅ Текст Happy Hours сохранён.",
-        reply_markup=happy_hours_menu(False, bool(draft["photo"])),
-    )
+    await _show_happy_hours_preview(message, draft)
 
 
 @router.callback_query(F.data == "happy_hours_edit_photo")
@@ -5219,36 +5252,30 @@ async def happy_hours_photo_delete(
     await callback.answer()
 
 
+async def _show_happy_hours_preview(target: Message | CallbackQuery, draft: dict) -> None:
+    preview = _happy_hours_post(draft, _happy_hours_window(draft["start"], draft["end"]))
+    markup = happy_hours_preview_menu(await get_open_happy_hours_campaign() is None)
+    if isinstance(target, Message):
+        if draft["photo"]:
+            await target.answer_photo(draft["photo"], caption=preview, reply_markup=markup)
+        else:
+            await target.answer(preview, reply_markup=markup)
+    elif draft["photo"]:
+        await target.bot.send_photo(target.message.chat.id, draft["photo"], caption=preview, reply_markup=markup)
+        try:
+            await target.message.delete()
+        except TelegramBadRequest:
+            pass
+    else:
+        await replace_photo_with_text(target, preview, markup)
+
+
 @router.callback_query(F.data == "happy_hours_preview")
 async def happy_hours_preview_handler(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    draft = await _happy_hours_draft()
-    preview = _render_happy_hours_text(
-        draft["text"],
-        draft["start"],
-        draft["end"],
-        draft["min_amount"],
-        draft["percent"],
-    )
-    if draft["photo"]:
-        try:
-            await callback.message.delete()
-        except TelegramBadRequest:
-            pass
-        await callback.bot.send_photo(
-            callback.message.chat.id,
-            draft["photo"],
-            caption=preview,
-            reply_markup=happy_hours_preview_menu(),
-        )
-    else:
-        await replace_photo_with_text(
-            callback,
-            preview,
-            happy_hours_preview_menu(),
-        )
+    await _show_happy_hours_preview(callback, await _happy_hours_draft())
     await callback.answer()
 
 
@@ -5285,22 +5312,27 @@ async def happy_hours_launch_ask(callback: CallbackQuery) -> None:
         f"<b>{end_msk.strftime('%d.%m %H:%M')} МСК</b>\n"
         f"💶 От: <b>{draft['min_amount']} €</b>\n"
         f"📈 Процент: <b>{draft['percent']}%</b>\n\n"
+        f"<b>Пост для участников</b>\n{_happy_hours_post(draft, window)}\n\n"
         "После запуска подготовленная рассылка сразу уйдёт всем "
         "одобренным участникам.\n\n"
         "Важно: акция не действует задним числом. PayPal, выданные "
         "до фактического начала, останутся на стандартных процентах.",
-        happy_hours_launch_confirm_menu(),
+        happy_hours_launch_confirm_menu(_happy_hours_draft_id(draft)),
     )
     await callback.answer()
 
 
 @router.callback_query(F.data == "happy_hours_launch_confirm")
+@router.callback_query(F.data.startswith("happy_hours_launch_confirm:"))
 async def happy_hours_launch_confirm(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
     draft = await _happy_hours_draft()
+    if callback.data != f"happy_hours_launch_confirm:{_happy_hours_draft_id(draft)}":
+        await callback.answer("Настройки изменились. Откройте подтверждение заново.", show_alert=True)
+        return
     window = _happy_hours_window(draft["start"], draft["end"])
     if window is None:
         await callback.answer(
@@ -5309,14 +5341,8 @@ async def happy_hours_launch_confirm(callback: CallbackQuery) -> None:
         )
         return
 
-    start_msk, end_msk, start_utc, end_utc = window
-    rendered_text = _render_happy_hours_text(
-        draft["text"],
-        start_msk.strftime("%H:%M"),
-        end_msk.strftime("%H:%M"),
-        draft["min_amount"],
-        draft["percent"],
-    )
+    _, _, start_utc, end_utc = window
+    rendered_text = _happy_hours_post(draft, window)
 
     campaign, result = await create_happy_hours_campaign(
         start_at=start_utc,

@@ -85,6 +85,81 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
     def text(self):
         return '\n'.join(m['html'] for m in self.view['messages'])
 
+    async def test_happy_hours_edit_preview_confirm_and_stale_draft(self):
+        from datetime import datetime, timedelta
+        from app import handlers
+        from zoneinfo import ZoneInfo
+        start = datetime(2026, 11, 23, 14, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+        end = start + timedelta(hours=2)
+        window = (start, end, datetime.utcnow(), datetime.utcnow()+timedelta(hours=2))
+        text = "Новый пост & новость\n{start}–{end} МСК. От {min_amount} € — {percent}%."
+        await db.set_app_setting('happy_hours_text', '<b>Старый пост</b> {percent}%')
+        await db.set_app_setting('happy_hours_photo', 'test-happy-photo')
+        with patch.object(handlers, '_happy_hours_window', return_value=window):
+            await self.login(999)
+            await self.act(nav='admin_home')
+            await self.act(action=self.button('HAPPY HOURS'))
+            await self.act(action=self.button('Предпросмотр'))
+            edit = await self.act(action=self.button('Изменить текст'))
+            self.assertEqual(edit['form']['initial'], 'Старый пост {percent}%')
+            await self.act(input={'text':edit['form']['initial']})
+            self.assertEqual(await db.get_app_setting('happy_hours_text'), '<b>Старый пост</b> {percent}%')
+            await self.act(action=self.button('К запуску'))
+            self.assertIn('Старый пост', self.text())
+            await self.act(action=self.button('Изменить текст'))
+            await self.act(input={'text':text})
+            rendered = "Новый пост &amp; новость\n14:00–16:00 МСК. От 100 € — 80%."
+            self.assertIn(rendered, self.text())
+            self.assertIsNotNone(self.view['messages'][0]['photo'])
+            await self.act(action=self.button('К запуску'))
+            self.assertIn(rendered, self.text())
+            self.assertIsNone(await db.get_open_happy_hours_campaign())
+            await db.set_app_setting('happy_hours_text', 'Другой пост {percent}%')
+            await self.act(action=self.button('Запустить и разослать'))
+            self.assertIsNone(await db.get_open_happy_hours_campaign())
+            await self.act(action=self.button('Изменить текст'))
+            await self.act(input={'text':text})
+            await self.act(action=self.button('К запуску'))
+            await self.act(action=self.button('Запустить и разослать'))
+            campaign = await db.get_open_happy_hours_campaign()
+            self.assertIn('{percent}', campaign.broadcast_text)
+            sends = [m for m in self.fake.calls if m.__api_method__ == 'sendPhoto' and m.chat_id == 1]
+            self.assertEqual([m.caption for m in sends], [rendered])
+            await self.act(action=self.button('Пост следующей акции'))
+            await self.act(input={'text':'Будущий пост'})
+            self.assertFalse(any('К запуску' in b['label'] for m in self.view['messages'] for row in m['rows'] for b in row))
+            self.assertEqual((await db.get_open_happy_hours_campaign()).broadcast_text, campaign.broadcast_text)
+
+    async def test_happy_hours_chat_post_preserves_telegram_formatting(self):
+        from datetime import datetime, timezone
+        from aiogram.types import Chat, Message, MessageEntity, Update, User
+        from app.handlers import HappyHoursForm
+        admin = User(id=999, is_bot=False, first_name="Admin")
+        state = self.dp.fsm.get_context(bot=self.bot, chat_id=999, user_id=999)
+        await state.set_state(HappyHoursForm.text)
+        await state.update_data(happy_original='Старый')
+        await db.set_app_setting('happy_hours_text', 'Старый')
+        msg = Message(message_id=77, date=datetime.now(timezone.utc), chat=Chat(id=999, type="private"),
+                      from_user=admin, text='Пост {percent}%!', entities=[MessageEntity(type='bold', offset=0, length=4)])
+        await self.dp.feed_update(self.bot, Update(update_id=77, message=msg))
+        self.assertEqual(await db.get_app_setting('happy_hours_text'), '<b>Пост</b> {percent}%!')
+        sent = [m for m in self.fake.calls if m.__api_method__ == 'sendMessage' and m.chat_id == 999]
+        self.assertEqual(sent[-1].text, '<b>Пост</b> 80%!')
+        self.assertIn('happy_hours_edit_text', [b.callback_data for row in sent[-1].reply_markup.inline_keyboard for b in row])
+        self.assertIsNone(await db.get_open_happy_hours_campaign())
+
+    async def test_happy_hours_parallel_edit_preserves_newer_post(self):
+        await db.set_app_setting('happy_hours_text', 'Общий черновик')
+        await self.login(999)
+        await self.act(nav='admin_home')
+        await self.act(action=self.button('HAPPY HOURS'))
+        await self.act(action=self.button('Изменить текст'))
+        await db.set_app_setting('happy_hours_text', 'Правка другого админа')
+        await self.act(input={'text':'Моя правка'})
+        self.assertIn('Другой администратор изменил пост', self.text())
+        await self.act(action=self.button('Изменить текст'))
+        self.assertEqual(self.view['form']['initial'], 'Правка другого админа')
+
     async def test_admin_rope_trials_are_private_resumable_and_available_on_pause(self):
         url = '/api/rope/test'
         start = dict(action='start', request_id='test-admin-rope-start', previous_id=0)

@@ -524,6 +524,9 @@ def form_description(state, data):
         result.update(label="Список PayPal", placeholder="Каждый PayPal с новой строки")
     elif state == "DTPaymentsTagForm:new_tag":
         result.update(label="Ваш тег в DT Payments", placeholder="Введите тег", submit="Сохранить тег")
+    elif state == "HappyHoursForm:text":
+        result.update(label="Текст поста", initial=data.get("happy_initial", ""), rows=8,
+                      placeholder="Введите текст для участников", submit="Сохранить и посмотреть")
     elif state == "AutoPostForm:value":
         field = data.get("ap_field")
         if field == "minute":

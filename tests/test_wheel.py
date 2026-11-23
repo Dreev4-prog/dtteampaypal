@@ -288,6 +288,16 @@ class WheelTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError,'нет доступных'):
             await self.spin()
 
+    @unittest.skipUnless(POSTGRES, 'requires dedicated local PostgreSQL')
+    async def test_parallel_happy_hours_confirmations_only_create_one_campaign(self):
+        await db.set_app_setting("happy_hours_text", "Анонс {percent}%")
+        now = datetime.utcnow()
+        async def confirm():
+            return await db.create_happy_hours_campaign(now, now+timedelta(hours=1), 100, 80,
+                                                       "Анонс {percent}%", None, 999)
+        results = await asyncio.gather(*(confirm() for _ in range(8)))
+        self.assertEqual(sum(campaign is not None for campaign, _ in results), 1)
+
     async def test_fifo_coupons_once_plus_happy_hours_and_returned_coupon_restored(self):
         await self.toggle(True)
         await self.earn(450)

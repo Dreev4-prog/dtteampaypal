@@ -75,7 +75,7 @@
   function formHTML(form){
     if(!form)return '';
     const photo=form.kind==='photo',receipt=form.kind==='receipt';
-    const input=photo?'':form.kind==='time'?`<input id="text-input" type="time" aria-label="${escape(form.label)}">`:`<textarea id="text-input" rows="${form.kind==='number'?1:3}" ${form.kind==='number'?'inputmode="numeric"':''} maxlength="10000" placeholder="${escape(form.placeholder)}"></textarea>`;
+    const input=photo?'':form.kind==='time'?`<input id="text-input" type="time" aria-label="${escape(form.label)}">`:`<textarea id="text-input" rows="${form.rows||(form.kind==='number'?1:3)}" ${form.kind==='number'?'inputmode="numeric"':''} maxlength="10000" placeholder="${escape(form.placeholder)}"></textarea>`;
     return `<form class="form" id="input-form"><label for="${photo?'photo-input':'text-input'}">${escape(form.label)}</label>${input}${form.quick?`<div class="quick-amounts" aria-label="Быстрый ввод суммы">${form.quick.map(n=>`<button type="button" data-amount="${n}">${n} €</button>`).join('')}</div>`:''}${photo||receipt?'<label class="file-picker" for="photo-input">＋ Выбрать фото<input id="photo-input" type="file" accept="image/jpeg,image/png,image/webp"></label><div id="photo-preview" hidden></div><small>JPEG, PNG или WebP · до 8 МБ. Фото сохранится в чате с ботом.</small>':''}${receipt?'<small>После отправки чек получит участник, а выбранные начисления будут отмечены выплаченными.</small>':''}<button type="submit" class="action primary">${escape(form.submit)} <span class="arrow">↗</span></button></form>`;
   }
   function journeyHTML(journey){
@@ -159,7 +159,7 @@
     if(data.user.admin&&(data.route==='wheel_admin'||data.route.startsWith('wheel_toggle:'))){
       const panel=document.createElement('section');screen.append(panel);window.mountDTGameStats(panel,request);
     }
-    const input=document.getElementById('text-input');if(input&&draft!=null)input.value=draft;
+    const input=document.getElementById('text-input');if(input)input.value=draft??data.form?.initial??'';
     paintPhoto();
     document.getElementById('back').hidden=data.route==='home';
     nav.hidden=false;

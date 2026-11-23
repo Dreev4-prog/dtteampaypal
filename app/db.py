@@ -2195,6 +2195,18 @@ async def get_current_happy_hours_campaign(
         )
 
 
+async def save_happy_hours_post(value: str, original: str) -> bool:
+    async with SessionLocal() as session, session.begin():
+        key = await session.scalar(text("""
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES ('happy_hours_text', :value, CURRENT_TIMESTAMP)
+            ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            WHERE app_settings.value = :original OR app_settings.value = excluded.value
+            RETURNING key
+        """), {"value": value, "original": original})
+        return key is not None
+
+
 async def create_happy_hours_campaign(
     start_at: datetime,
     end_at: datetime,
@@ -2207,6 +2219,9 @@ async def create_happy_hours_campaign(
     now = datetime.utcnow()
     async with SessionLocal() as session:
         async with session.begin():
+            # Serialize launch confirmations even when there is no campaign row to lock yet.
+            await session.execute(select(AppSetting.key).where(
+                AppSetting.key == "happy_hours_text").with_for_update())
             # Expired campaigns never block a new manual launch.
             stale = list(await session.scalars(
                 select(HappyHoursCampaign).where(
