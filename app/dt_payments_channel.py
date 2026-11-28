@@ -20,17 +20,16 @@ logger = logging.getLogger(__name__)
 MANUAL_INTERVAL = timedelta(minutes=8)
 
 
-def payment_caption(amount: int, tag: str, *, refunded=False, manual=False) -> str:
+def payment_caption(amount: int, tag: str, *, refunded=False) -> str:
     anonymous = re.fullmatch(r"anonim-([0-9]+)", tag)
     worker = f"#аноним{anonymous[1]}" if anonymous else tag
     title = "↩️ <b>Оплата возвращена</b>" if refunded else "🗝 <b>DT TEAM · НОВЫЙ ЗАВОЗ</b>"
     amount_text = f"{amount:,}".replace(",", " ")
-    source = "\n<i>Внесено вручную</i>" if manual else ""
     return (
         f"{title}\n\n"
         f"<b>{amount_text} €</b>\n"
         f"Воркер <b>{escape(worker)}</b>\n"
-        f"Реквизит <b>♦️ REG EU</b>{source}\n\n"
+        "Реквизит <b>♦️ REG EU</b>\n\n"
         '<a href="https://t.me/DT_TEAM_PAYPAL_BOT">@DT_TEAM_PAYPAL_BOT</a>'
     )
 
@@ -100,7 +99,7 @@ async def deliver_one(bot) -> bool:
     manual = isinstance(row, db.DTPaymentsManual)
     identity = row.id if manual else row.request_id
     refund = row.message_id is not None
-    caption = payment_caption(row.amount, row.tag, refunded=refund, manual=manual)
+    caption = payment_caption(row.amount, row.tag, refunded=refund)
     message_id = row.message_id
     delay = 0
     try:

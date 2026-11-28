@@ -112,7 +112,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await channel.deliver_one(self.bot))
         self.assertFalse(await channel.deliver_one(self.bot))
         self.assertIn("#аноним11931", self.fake.calls[-1].caption)
-        self.assertIn("Внесено вручную", self.fake.calls[-1].caption)
+        self.assertNotIn("Внесено вручную", self.fake.calls[-1].caption)
         async with db.SessionLocal() as session, session.begin():
             first, second = (await session.scalars(select(db.DTPaymentsManual)
                                                    .order_by(db.DTPaymentsManual.position))).all()
