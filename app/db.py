@@ -5,7 +5,7 @@ import re
 from typing import Awaitable, Callable, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Float, Integer, Numeric, String, UniqueConstraint, CheckConstraint, Index, select, text, func, or_, and_, literal, null, union_all
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Float, Integer, Numeric, String, UniqueConstraint, CheckConstraint, Index, select, text, func, or_, and_, case, literal, null, union_all
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -3644,10 +3644,13 @@ def _dt_payments_records():
         User.username.label("username"),
         User.full_name.label("full_name"),
         literal(False).label("manual"),
+        _dt_payments_effective_confirmed_at().label("feed_at"),
     ).join(User, User.id == Request.user_id).where(_dt_payments_success_condition())
     manual = select(
         DTPaymentsManual.id, null(), null(), DTPaymentsManual.amount, DTPaymentsManual.recorded_at,
         DTPaymentsManual.tag, null(), null(), literal(True),
+        # For a completed delivery the worker stores the actual send time here.
+        case((DTPaymentsManual.status == "posted", DTPaymentsManual.next_attempt_at)),
     )
     return union_all(automatic, manual).subquery()
 
@@ -3658,7 +3661,7 @@ async def get_dt_payments_feed(limit: int = 12) -> list[dict]:
     async with SessionLocal() as session:
         rows = (await session.execute(
             select(records.request_id, records.user_id, records.amount, records.confirmed_at,
-                   records.tag, records.username, records.full_name, records.manual)
+                   records.tag, records.username, records.full_name, records.manual, records.feed_at)
             .order_by(records.confirmed_at.desc(), records.manual.desc(), records.entry_id.desc())
             .limit(safe_limit)
         )).mappings().all()

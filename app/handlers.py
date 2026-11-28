@@ -1599,12 +1599,8 @@ async def _show_dt_payments_home(callback: CallbackQuery) -> None:
         lines.append("Пока подтверждённых оплат нет.")
     else:
         for item in feed:
-            lines.append(
-                f"🟢 <b>{escape(item['tag'])}</b> · "
-                f"<b>{item['amount']} €</b> · "
-                f"{'Внесено вручную · ' if item['manual'] else ''}"
-                f"{_dt_payments_feed_time(item['confirmed_at'])}"
-            )
+            time_label = f" · {_dt_payments_feed_time(item['feed_at'])}" if item["feed_at"] else ""
+            lines.append(f"🟢 <b>{escape(item['tag'])}</b> · <b>{item['amount']} €</b>{time_label}")
 
     lines.extend([
         "",
@@ -7325,9 +7321,9 @@ async def crm_user_paypals_handler(callback: CallbackQuery) -> None:
 
 
 
-def _dt_admin_identity(item: dict) -> str:
+def _dt_admin_identity(item: dict) -> str | None:
     if item["user_id"] is None:
-        return "Внесено вручную"
+        return None
     if item.get("username"):
         return f"@{escape(item['username'])}"
     if item.get("full_name"):
@@ -7359,13 +7355,16 @@ async def dt_payments_admin_handler(callback: CallbackQuery, state: FSMContext) 
         lines.append("Подтверждённых оплат пока нет.")
     else:
         for item in feed:
-            lines.append(
-                f"🟢 <b>{escape(item['tag'])}</b> · "
-                f"{_dt_admin_identity(item)} · "
-                f"<b>{item['amount']} €</b> · "
-                f"{_dt_payments_feed_time(item['confirmed_at'])}"
-                + (f" · #{item['request_id']}" if item["request_id"] is not None else "")
-            )
+            details = [f"🟢 <b>{escape(item['tag'])}</b>"]
+            identity = _dt_admin_identity(item)
+            if identity:
+                details.append(identity)
+            details.append(f"<b>{item['amount']} €</b>")
+            if item["feed_at"]:
+                details.append(_dt_payments_feed_time(item["feed_at"]))
+            if item["request_id"] is not None:
+                details.append(f"#{item['request_id']}")
+            lines.append(" · ".join(details))
 
     lines.extend([
         "",
@@ -7506,10 +7505,11 @@ async def dt_payments_admin_top_handler(callback: CallbackQuery) -> None:
         lines.append("Данных за этот период нет.")
     else:
         for item in ranking["top"]:
+            identity = _dt_admin_identity(item)
+            identity_part = f"{identity} · " if identity else ""
             lines.append(
                 f"{_dt_payments_medal(item['rank'])} "
-                f"<b>{escape(item['tag'])}</b> · "
-                f"{_dt_admin_identity(item)} · "
+                f"<b>{escape(item['tag'])}</b> · {identity_part}"
                 f"<b>{item['turnover']:.0f} €</b> · "
                 f"{item['payments']} оплат"
             )
