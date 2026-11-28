@@ -1707,10 +1707,8 @@ async def _show_dt_payments_tag(callback: CallbackQuery) -> None:
         "",
         f"Ваш публичный тег: <b>{escape(profile['tag'])}</b>",
         "",
-        "Он показывается другим пользователям только внутри "
-        "DT Payments и рейтингов.",
-        "Ваш Telegram, имя и Telegram ID другим пользователям "
-        "в этом разделе не показываются.",
+        "Тег виден в ленте DT Payments, рейтингах и в карточках оплат канала, если он подключён.",
+        "Ваше имя и данные Telegram скрыты.",
         "",
     ]
 
@@ -7413,7 +7411,7 @@ async def dt_channel_preview(callback: CallbackQuery, state: FSMContext) -> None
         return
     await state.clear()
     enabled = bool(await get_app_setting(DT_PAYMENTS_CHANNEL))
-    caption = dt_payments_channel.payment_caption(150, "DT-EXAMPLE", datetime.utcnow())
+    caption = dt_payments_channel.payment_caption(150, "anonim-48271", datetime.utcnow())
     await callback.bot.send_photo(
         callback.message.chat.id, FSInputFile(dt_payments_channel.BANNER),
         caption=f"<i>Пример поста</i>\n\n{caption}", reply_markup=dt_payments_channel_menu(enabled),

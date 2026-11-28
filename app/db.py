@@ -1,7 +1,6 @@
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import re
-import secrets
 
 from typing import Awaitable, Callable, Optional
 from zoneinfo import ZoneInfo
@@ -622,7 +621,7 @@ async def init_db() -> None:
         """))
 
     await _backfill_withdrawal_holds()
-    # Existing users receive an anonymous DT Payments tag once after migration.
+    # Replace automatic legacy tags while preserving tags chosen by users.
     await _backfill_dt_payments_tags()
     await _backfill_gestop_dates()
     await _backfill_gestop_history()
@@ -799,7 +798,7 @@ def _mark_tag_gestop(tag: PaypalTag, now: datetime) -> None:
     tag.had_gestop = 1
 
 
-DT_PAYMENTS_TAG_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+DT_PAYMENTS_ANON_PREFIX = "anonim-"
 DT_PAYMENTS_TAG_CHANGE_COOLDOWN = timedelta(days=7)
 DT_PAYMENTS_RESERVED_TAGS = {
     "ADMIN", "ADMINISTRATOR", "OWNER", "SUPPORT",
@@ -807,52 +806,57 @@ DT_PAYMENTS_RESERVED_TAGS = {
 }
 
 
-async def _generate_unique_dt_payments_tag(session: AsyncSession) -> str:
-    for _ in range(100):
-        core = "".join(
-            secrets.choice(DT_PAYMENTS_TAG_ALPHABET)
-            for _ in range(5)
-        )
-        candidate = f"DT-{core}"
-        exists = await session.scalar(
-            select(User.id)
-            .where(func.lower(User.dt_payments_tag) == candidate.lower())
-            .limit(1)
-        )
-        if exists is None:
-            return candidate
-    raise RuntimeError("Could not generate unique DT Payments tag")
+def _needs_anonymous_dt_payments_tag(user: User) -> bool:
+    return not user.dt_payments_tag or (
+        user.dt_payments_tag_changed_at is None
+        and not user.dt_payments_tag.startswith(DT_PAYMENTS_ANON_PREFIX)
+    )
+
+
+async def _assign_anonymous_dt_payments_tag(session: AsyncSession) -> str:
+    # Allocate a public serial independently of the Telegram user ID.
+    number = await session.scalar(text("""
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES ('dt_payments_anon_number', '10000', CURRENT_TIMESTAMP)
+        ON CONFLICT (key) DO UPDATE SET
+            value = CAST(CAST(app_settings.value AS BIGINT) + 1 AS TEXT),
+            updated_at = CURRENT_TIMESTAMP
+        RETURNING value
+    """))
+    return f"{DT_PAYMENTS_ANON_PREFIX}{number}"
 
 
 async def _backfill_dt_payments_tags() -> None:
-    async with SessionLocal() as session:
-        users = list(await session.scalars(
-            select(User).where(User.dt_payments_tag.is_(None))
-        ))
-        if not users:
-            return
+    async with SessionLocal() as session, session.begin():
+        users = await session.scalars(
+            select(User).where(or_(
+                User.dt_payments_tag.is_(None),
+                User.dt_payments_tag == "",
+                and_(User.dt_payments_tag_changed_at.is_(None),
+                     ~User.dt_payments_tag.startswith(DT_PAYMENTS_ANON_PREFIX)),
+            )).order_by(User.id).with_for_update()
+        )
         for user in users:
-            user.dt_payments_tag = await _generate_unique_dt_payments_tag(session)
-        await session.commit()
+            user.dt_payments_tag = await _assign_anonymous_dt_payments_tag(session)
 
 
 async def get_or_create_user(user_id: int, username: str | None, full_name: str | None = None) -> User:
     async with SessionLocal() as session:
-        user = await session.get(User, user_id)
+        user = await session.get(User, user_id, with_for_update=True)
         if user is None:
             user = User(
                 id=user_id,
                 username=username,
                 full_name=full_name,
                 status="pending",
-                dt_payments_tag=await _generate_unique_dt_payments_tag(session),
+                dt_payments_tag=await _assign_anonymous_dt_payments_tag(session),
             )
             session.add(user)
         else:
             user.username = username
             user.full_name = full_name
-            if not user.dt_payments_tag:
-                user.dt_payments_tag = await _generate_unique_dt_payments_tag(session)
+            if _needs_anonymous_dt_payments_tag(user):
+                user.dt_payments_tag = await _assign_anonymous_dt_payments_tag(session)
         await session.commit()
         await session.refresh(user)
         return user
@@ -1834,9 +1838,10 @@ async def _queue_dt_payments_post(session: AsyncSession, req: Request, user: Use
     setting = await session.get(AppSetting, DT_PAYMENTS_CHANNEL)
     if (setting and re.fullmatch(r"-100[0-9]{1,15}", setting.value)
             and user is not None and req.payment_confirmed_at is not None):
-        tag, _ = normalize_dt_payments_tag(user.dt_payments_tag)
+        if _needs_anonymous_dt_payments_tag(user):
+            user.dt_payments_tag = await _assign_anonymous_dt_payments_tag(session)
         session.add(DTPaymentsPost(request_id=req.id, channel_id=int(setting.value),
-                                   tag=tag or "DT-?????", amount=req.amount,
+                                   tag=user.dt_payments_tag, amount=req.amount,
                                    confirmed_at=req.payment_confirmed_at))
 
 
@@ -3470,8 +3475,8 @@ async def ensure_dt_payments_tag(user_id: int) -> str | None:
         user = await session.get(User, user_id, with_for_update=True)
         if user is None:
             return None
-        if not user.dt_payments_tag:
-            user.dt_payments_tag = await _generate_unique_dt_payments_tag(session)
+        if _needs_anonymous_dt_payments_tag(user):
+            user.dt_payments_tag = await _assign_anonymous_dt_payments_tag(session)
             await session.commit()
             await session.refresh(user)
         return user.dt_payments_tag
@@ -3479,12 +3484,12 @@ async def ensure_dt_payments_tag(user_id: int) -> str | None:
 
 async def get_dt_payments_tag_profile(user_id: int) -> dict | None:
     async with SessionLocal() as session:
-        user = await session.get(User, user_id)
+        user = await session.get(User, user_id, with_for_update=True)
         if user is None:
             return None
 
-        if not user.dt_payments_tag:
-            user.dt_payments_tag = await _generate_unique_dt_payments_tag(session)
+        if _needs_anonymous_dt_payments_tag(user):
+            user.dt_payments_tag = await _assign_anonymous_dt_payments_tag(session)
             await session.commit()
             await session.refresh(user)
 

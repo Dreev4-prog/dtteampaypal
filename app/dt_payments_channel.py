@@ -23,7 +23,8 @@ def payment_caption(amount: int, tag: str, confirmed_at: datetime, *, refunded=F
     amount_text = f"{amount:,}".replace(",", " ")
     return (
         f"{title}\n\n"
-        f"<b>{amount_text} €</b>  ·  {escape(tag)}\n"
+        f"💶 <b>{amount_text} €</b>\n"
+        f"🏷 <b>{escape(tag)}</b>\n"
         f"🕒 {moscow:%d.%m.%Y · %H:%M} МСК"
     )
 

@@ -85,7 +85,47 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
     def text(self):
         return '\n'.join(m['html'] for m in self.view['messages'])
 
+    async def test_dt_payments_migrates_only_automatic_tags_and_matches_post(self):
+        from datetime import datetime
+        from app import dt_payments_channel as channel
+
+        async with db.SessionLocal() as session, session.begin():
+            old = await session.get(db.User, 1)
+            old.dt_payments_tag = 'DT-OLD42'
+            chosen = await session.get(db.User, 2)
+            chosen.dt_payments_tag = 'DT-WOLF'
+            chosen.dt_payments_tag_changed_at = datetime.utcnow()
+
+        await db._backfill_dt_payments_tags()
+        automatic = (await db.get_user(1)).dt_payments_tag
+        self.assertRegex(automatic, r'^anonim-[0-9]{5,}$')
+        self.assertIsNone((await db.get_user(1)).dt_payments_tag_changed_at)
+        self.assertEqual((await db.get_user(2)).dt_payments_tag, 'DT-WOLF')
+        await db._backfill_dt_payments_tags()
+        self.assertEqual((await db.get_user(1)).dt_payments_tag, automatic)
+        new = await db.get_or_create_user(445566778, 'not_a_public_tag')
+        self.assertRegex(new.dt_payments_tag, r'^anonim-[0-9]{5,}$')
+        self.assertNotEqual(new.dt_payments_tag, automatic)
+
+        await channel.set_channel(-1001234567890)
+        async with db.SessionLocal() as session, session.begin():
+            request = db.Request(user_id=1, amount=170, status='waiting_check')
+            session.add(request)
+            await session.flush()
+            rid = request.id
+        await db.confirm_payment(rid, 999)
+        self.assertEqual((await db.get_dt_payments_feed(1))[0]['tag'], automatic)
+        await self.login(1)
+        await self.act(nav='dt_payments')
+        self.assertIn(automatic, self.text())
+        self.assertTrue(await channel.deliver_one(self.bot))
+        self.assertIn(f"<b>{automatic}</b>", self.fake.calls[-1].caption)
+        self.assertEqual((await db.change_dt_payments_tag(1, 'FOX'))['tag'], 'DT-FOX')
+        await db._backfill_dt_payments_tags()
+        self.assertEqual((await db.get_user(1)).dt_payments_tag, 'DT-FOX')
+
     async def test_dt_payments_channel_setup_preview_and_refund(self):
+        from datetime import datetime
         from aiogram.types import Chat, ChatMemberAdministrator, User
         from app import dt_payments_channel as channel
 
@@ -115,7 +155,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
             await self.act(action=self.button('DT Payments'))
             await self.act(action=self.button('Канал DT Payments'))
             await self.act(action=self.button('Посмотреть пример'))
-            self.assertIn("DT-EXAMPLE", self.text())
+            self.assertIn("anonim-48271", self.text())
             self.assertTrue(any(m['photo'] and not m['photo']['is_banner'] for m in self.view['messages']))
             self.assertFalse(await channel.deliver_one(self.bot))
 
@@ -131,6 +171,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         async with db.SessionLocal() as session, session.begin():
             user = await session.get(db.User, 1)
             user.dt_payments_tag = 'DT-DESIGN'
+            user.dt_payments_tag_changed_at = datetime.utcnow()
             checked = db.Request(user_id=1, amount=150, status="waiting_check")
             direct = db.Request(user_id=1, amount=250, status="paypal_issued")
             session.add_all([checked, direct])
