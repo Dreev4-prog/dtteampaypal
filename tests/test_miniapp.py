@@ -187,6 +187,7 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Оплата подтверждена', photo_calls[0].caption)
         self.assertIn('150 €', photo_calls[0].caption)
         self.assertIn('DT-DESIGN', photo_calls[0].caption)
+        self.assertNotIn('МСК', photo_calls[0].caption)
         self.assertNotIn('demo_member', photo_calls[0].caption)
 
         # Pause drops the pending item and still corrects an existing post.

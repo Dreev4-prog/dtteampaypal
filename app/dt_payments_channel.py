@@ -1,6 +1,6 @@
 """Publish only newly confirmed DT Payments to the channel chosen by an admin."""
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from html import escape
 import logging
 from pathlib import Path
@@ -17,15 +17,13 @@ BANNER = Path(__file__).resolve().parent.parent / "assets" / "dt_payments_channe
 logger = logging.getLogger(__name__)
 
 
-def payment_caption(amount: int, tag: str, confirmed_at: datetime, *, refunded=False) -> str:
-    moscow = confirmed_at.replace(tzinfo=timezone.utc).astimezone(db.MOSCOW_TZ)
+def payment_caption(amount: int, tag: str, *, refunded=False) -> str:
     title = "↩️ <b>Оплата возвращена</b>" if refunded else "✅ <b>Оплата подтверждена</b>"
     amount_text = f"{amount:,}".replace(",", " ")
     return (
         f"{title}\n\n"
         f"💶 <b>{amount_text} €</b>\n"
-        f"🏷 <b>{escape(tag)}</b>\n"
-        f"🕒 {moscow:%d.%m.%Y · %H:%M} МСК"
+        f"🏷 <b>{escape(tag)}</b>"
     )
 
 
@@ -81,7 +79,7 @@ async def deliver_one(bot) -> bool:
     if row is None:
         return False
     refund = row.message_id is not None
-    caption = payment_caption(row.amount, row.tag, row.confirmed_at, refunded=refund)
+    caption = payment_caption(row.amount, row.tag, refunded=refund)
     message_id = row.message_id
     delay = 0
     try:

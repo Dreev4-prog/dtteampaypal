@@ -7395,7 +7395,7 @@ async def dt_channel_panel(callback: CallbackQuery, state: FSMContext) -> None:
         "📣 <b>Канал DT Payments</b>\n\n"
         f"{enabled}\n\n"
         "После подключения новые подтверждённые оплаты появятся в канале. "
-        "В посте видны сумма, анонимный DT-тег и время подтверждения.\n\n"
+        "В посте видны сумма и анонимный DT-тег.\n\n"
         f"Опубликовано: <b>{counts.get('posted', 0) + counts.get('refunded', 0) + counts.get('refund_failed', 0)}</b>\n"
         f"Ожидают публикации: <b>{counts.get('pending', 0) + counts.get('sending', 0)}</b>\n"
         f"Ошибок публикации или правки: <b>{counts.get('failed', 0) + counts.get('refund_failed', 0)}</b>",
@@ -7411,7 +7411,7 @@ async def dt_channel_preview(callback: CallbackQuery, state: FSMContext) -> None
         return
     await state.clear()
     enabled = bool(await get_app_setting(DT_PAYMENTS_CHANNEL))
-    caption = dt_payments_channel.payment_caption(150, "anonim-48271", datetime.utcnow())
+    caption = dt_payments_channel.payment_caption(150, "anonim-48271")
     await callback.bot.send_photo(
         callback.message.chat.id, FSInputFile(dt_payments_channel.BANNER),
         caption=f"<i>Пример поста</i>\n\n{caption}", reply_markup=dt_payments_channel_menu(enabled),
