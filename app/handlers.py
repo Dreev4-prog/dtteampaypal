@@ -13,11 +13,12 @@ from openpyxl import Workbook
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
+    ChatMemberAdministrator,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -25,6 +26,7 @@ from aiogram.types import (
     Message,
 )
 
+from app import dt_payments_channel
 from app.config import settings
 from app.rules import MIN_PAYPAL_AMOUNT, MAX_PAYPAL_AMOUNT, valid_paypal_request_amount
 from app.identity import user_id_query
@@ -108,7 +110,7 @@ from app.db import (
     list_approved_user_ids, mark_payment_gs,
     get_dashboard_summary, get_user_crm_stats, global_admin_search, get_period_statistics,
     ensure_dt_payments_tag, get_dt_payments_tag_profile, change_dt_payments_tag,
-    get_dt_payments_feed, get_dt_payments_ranking,
+    DT_PAYMENTS_CHANNEL, get_dt_payments_feed, get_dt_payments_ranking,
     get_user_payout_method, set_user_payout_method, get_user_balance,
     get_user_home_summary,
     list_users_with_available_balance, get_payout_user_details, complete_manual_payout,
@@ -171,7 +173,7 @@ from app.keyboards import (
     global_search_cancel_menu, global_search_results_menu, crm_user_menu, user_paypal_limit_menu, statistics_period_menu, quick_notify_menu,
     content_menu, content_cancel_menu, content_image_menu,
     dt_payments_menu, dt_payments_ranking_menu, dt_payments_tag_menu,
-    dt_payments_tag_cancel_menu, dt_payments_admin_menu,
+    dt_payments_tag_cancel_menu, dt_payments_admin_menu, dt_payments_channel_menu,
     payout_method_menu, wallet_menu, payout_method_wallet_menu, payout_history_menu, payout_history_card_menu, payouts_users_menu, payout_user_menu, manual_payout_cancel_menu,
 )
 
@@ -194,6 +196,10 @@ class PaypalRequestForm(StatesGroup):
     amount = State()
     gender = State()
     screenshot = State()
+
+
+class DTPaymentsChannelForm(StatesGroup):
+    channel = State()
 
 
 class DTPaymentsTagForm(StatesGroup):
@@ -7329,11 +7335,12 @@ def _dt_admin_identity(item: dict) -> str:
 
 
 @router.callback_query(F.data == "dt_payments_admin")
-async def dt_payments_admin_handler(callback: CallbackQuery) -> None:
+async def dt_payments_admin_handler(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
+    await state.clear()
     today = await get_dt_payments_ranking("day", limit=10)
     feed = await get_dt_payments_feed(12)
 
@@ -7371,6 +7378,105 @@ async def dt_payments_admin_handler(callback: CallbackQuery) -> None:
         dt_payments_admin_menu(),
     )
     await callback.answer("DT Payments обновлён")
+
+
+@router.callback_query(F.data == "dt_channel")
+@router.callback_query(F.data == "dt_channel_off")
+async def dt_channel_panel(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    if callback.data == "dt_channel_off":
+        await dt_payments_channel.set_channel(None)
+    channel_id = await get_app_setting(DT_PAYMENTS_CHANNEL)
+    counts = await dt_payments_channel.channel_counts()
+    enabled = f"Подключён канал <code>{escape(channel_id)}</code>" if channel_id else "Публикации выключены"
+    await replace_photo_with_text(
+        callback,
+        "📣 <b>Канал DT Payments</b>\n\n"
+        f"{enabled}\n\n"
+        "После подключения новые подтверждённые оплаты появятся в канале. "
+        "В посте видны сумма, анонимный DT-тег и время подтверждения.\n\n"
+        f"Опубликовано: <b>{counts.get('posted', 0) + counts.get('refunded', 0) + counts.get('refund_failed', 0)}</b>\n"
+        f"Ожидают публикации: <b>{counts.get('pending', 0) + counts.get('sending', 0)}</b>\n"
+        f"Ошибок публикации или правки: <b>{counts.get('failed', 0) + counts.get('refund_failed', 0)}</b>",
+        dt_payments_channel_menu(bool(channel_id)),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "dt_channel_preview")
+async def dt_channel_preview(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    enabled = bool(await get_app_setting(DT_PAYMENTS_CHANNEL))
+    caption = dt_payments_channel.payment_caption(150, "DT-EXAMPLE", datetime.utcnow())
+    await callback.bot.send_photo(
+        callback.message.chat.id, FSInputFile(dt_payments_channel.BANNER),
+        caption=f"<i>Пример поста</i>\n\n{caption}", reply_markup=dt_payments_channel_menu(enabled),
+    )
+    await callback.answer()
+
+
+def _dt_channel_back():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К настройкам канала", callback_data="dt_channel")]
+    ])
+
+
+@router.callback_query(F.data == "dt_channel_edit")
+async def dt_channel_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.set_state(DTPaymentsChannelForm.channel)
+    await replace_photo_with_text(
+        callback,
+        "🔗 <b>Подключить канал DT Payments</b>\n\n"
+        "Добавьте бота в канал администратором с правами на публикацию и редактирование сообщений.\n\n"
+        "Пришлите @username канала или его числовой ID вида <code>-100…</code>. "
+        "Публикации новых подтверждённых оплат начнутся после успешного подключения.",
+        _dt_channel_back(),
+    )
+    await callback.answer()
+
+
+@router.message(DTPaymentsChannelForm.channel)
+async def dt_channel_save(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    raw = (message.text or "").strip()
+    if re.fullmatch(r"-100[0-9]{1,15}", raw):
+        target = int(raw)
+    elif re.fullmatch(r"@[A-Za-z][A-Za-z0-9_]{3,31}", raw):
+        target = raw
+    else:
+        await message.answer("Пришлите @username канала или его ID вида -100…", reply_markup=_dt_channel_back())
+        return
+
+    try:
+        chat = await message.bot.get_chat(target, request_timeout=10)
+        member = await message.bot.get_chat_member(chat.id, message.bot.id, request_timeout=10)
+    except (TelegramAPIError, asyncio.TimeoutError):
+        await message.answer("Канал недоступен. Проверьте его ID и права бота.", reply_markup=_dt_channel_back())
+        return
+    if chat.type != "channel" or not isinstance(member, ChatMemberAdministrator) or not (
+        member.can_post_messages and member.can_edit_messages
+    ):
+        await message.answer("Укажите канал, где бот может публиковать и редактировать сообщения.",
+                             reply_markup=_dt_channel_back())
+        return
+    await dt_payments_channel.set_channel(chat.id)
+    await state.clear()
+    await message.answer(
+        f"✅ Подключён канал <b>{escape(chat.title or str(chat.id))}</b>. "
+        "Новые подтверждённые оплаты будут публиковаться автоматически.",
+        reply_markup=dt_payments_channel_menu(True),
+    )
 
 
 @router.callback_query(F.data.startswith("dt_payments_admin_top:"))

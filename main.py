@@ -19,6 +19,7 @@ from app.autopost_handlers import router as auto_post_router
 from app.user_messages import router as user_message_router
 from app.autoposts import seed_auto_posts, auto_post_loop
 from app.stock_warmup import stock_warmup_loop
+from app.dt_payments_channel import channel_post_loop
 from app.miniapp import start_web_server
 from app.miniapp_transport import SurfaceStorage, WebTransport
 
@@ -108,6 +109,7 @@ async def main() -> None:
         workers.append(asyncio.create_task(
             stock_warmup_loop(bot, _notify_stock_after_replenishment), name="paypal-stock-warmup"
         ))
+        workers.append(asyncio.create_task(channel_post_loop(bot), name="dt-payments-channel"))
         await dp.start_polling(bot, close_bot_session=False)
     finally:
         if web_runner is not None:

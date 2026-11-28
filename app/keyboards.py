@@ -123,6 +123,7 @@ def dt_payments_tag_cancel_menu() -> InlineKeyboardMarkup:
 
 def dt_payments_admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📣 Канал DT Payments", callback_data="dt_channel")],
         [
             InlineKeyboardButton(
                 text="📡 Живая лента",
@@ -152,6 +153,18 @@ def dt_payments_admin_menu() -> InlineKeyboardMarkup:
             )
         ],
     ])
+
+
+def dt_payments_channel_menu(enabled=False) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="🔗 Подключить канал" if not enabled else "🔗 Сменить канал",
+                              callback_data="dt_channel_edit")],
+        [InlineKeyboardButton(text="👁 Посмотреть пример поста", callback_data="dt_channel_preview")],
+    ]
+    if enabled:
+        buttons.append([InlineKeyboardButton(text="⏸ Отключить публикации", callback_data="dt_channel_off")])
+    buttons.append([InlineKeyboardButton(text="⬅️ DT Payments", callback_data="dt_payments_admin")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def membership_apply_menu() -> InlineKeyboardMarkup:

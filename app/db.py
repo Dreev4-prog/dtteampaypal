@@ -329,6 +329,22 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+DT_PAYMENTS_CHANNEL = "dt_payments_channel"
+
+
+class DTPaymentsPost(Base):
+    __tablename__ = "dt_payments_posts"
+
+    request_id: Mapped[int] = mapped_column(ForeignKey("requests.id"), primary_key=True)
+    channel_id: Mapped[int] = mapped_column(BigInteger)
+    tag: Mapped[str] = mapped_column(String(32))
+    amount: Mapped[int] = mapped_column(Integer)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+
 class AutoPost(Base):
     __tablename__ = "auto_posts"
 
@@ -1814,12 +1830,22 @@ async def wait_paypal_withdrawal(request_id: int, expected_count: int) -> tuple[
         return req, "waiting"
 
 
+async def _queue_dt_payments_post(session: AsyncSession, req: Request, user: User | None) -> None:
+    setting = await session.get(AppSetting, DT_PAYMENTS_CHANNEL)
+    if (setting and re.fullmatch(r"-100[0-9]{1,15}", setting.value)
+            and user is not None and req.payment_confirmed_at is not None):
+        tag, _ = normalize_dt_payments_tag(user.dt_payments_tag)
+        session.add(DTPaymentsPost(request_id=req.id, channel_id=int(setting.value),
+                                   tag=tag or "DT-?????", amount=req.amount,
+                                   confirmed_at=req.payment_confirmed_at))
+
+
 async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
     async with SessionLocal() as session:
         user_id = await session.scalar(select(Request.user_id).where(Request.id == request_id))
         if user_id is None:
             return None
-        await session.get(User, user_id, with_for_update=True)
+        user = await session.get(User, user_id, with_for_update=True)
         req = await session.get(Request, request_id, with_for_update=True)
         if req is None or req.status != "waiting_check":
             return None
@@ -1842,6 +1868,7 @@ async def confirm_payment(request_id: int, admin_id: int) -> Request | None:
                 amount=req.payout_amount,
                 status="held",
             ))
+        await _queue_dt_payments_post(session, req, user)
         await session.commit()
         await session.refresh(req)
         return req
@@ -1857,7 +1884,7 @@ async def confirm_working_payment(request_id: int, admin_id: int) -> Request | N
         user_id = await session.scalar(select(Request.user_id).where(Request.id == request_id))
         if user_id is None:
             return None
-        await session.get(User, user_id, with_for_update=True)
+        user = await session.get(User, user_id, with_for_update=True)
         req = await session.get(Request, request_id, with_for_update=True)
         if req is None or req.status != "paypal_issued":
             return None
@@ -1911,6 +1938,7 @@ async def confirm_working_payment(request_id: int, admin_id: int) -> Request | N
                         or remaining_req.updated_at
                         or remaining_req.created_at
                     )
+        await _queue_dt_payments_post(session, req, user)
         await session.commit()
         await session.refresh(req)
         return req

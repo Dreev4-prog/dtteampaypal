@@ -522,6 +522,8 @@ def form_description(state, data):
         result.update(label="Тег PayPal", placeholder="Введите тег PayPal")
     elif state == "PaypalAddForm:bulk":
         result.update(label="Список PayPal", placeholder="Каждый PayPal с новой строки")
+    elif state == "DTPaymentsChannelForm:channel":
+        result.update(label="Канал DT Payments", placeholder="@username или ID канала", submit="Проверить и подключить")
     elif state == "DTPaymentsTagForm:new_tag":
         result.update(label="Ваш тег в DT Payments", placeholder="Введите тег", submit="Сохранить тег")
     elif state == "HappyHoursForm:text":

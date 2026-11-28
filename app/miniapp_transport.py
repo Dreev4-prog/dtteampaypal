@@ -105,7 +105,7 @@ class WebTransport(BaseRequestMiddleware):
         if isinstance(source, FSInputFile):
             filename = source.path.name if isinstance(source.path, Path) else Path(source.path).name
         ctx.media[token] = {"source": source, "filename": filename, "kind": kind}
-        builtin = isinstance(source, FSInputFile) and filename not in {"auto_post_day.png", "auto_post_evening.png"}
+        builtin = isinstance(source, FSInputFile) and filename not in {"auto_post_day.png", "auto_post_evening.png", "dt_payments_channel.jpg"}
         return {"id": token, "filename": filename, "is_banner": builtin}
 
     @staticmethod

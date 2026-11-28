@@ -85,6 +85,80 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
     def text(self):
         return '\n'.join(m['html'] for m in self.view['messages'])
 
+    async def test_dt_payments_channel_setup_preview_and_refund(self):
+        from aiogram.types import Chat, ChatMemberAdministrator, User
+        from app import dt_payments_channel as channel
+
+        chat_id = -1001234567890
+        telegram = self.fake.make_request
+        access = False
+
+        async def mock_telegram(bot, method, timeout=None):
+            if method.__api_method__ == "getChat":
+                return Chat(id=chat_id, type="channel", title="Test & Channel")
+            if method.__api_method__ == "getChatMember":
+                return ChatMemberAdministrator(
+                    user=User(id=bot.id, is_bot=True, first_name="Bot"), can_be_edited=False,
+                    is_anonymous=False, can_manage_chat=True, can_delete_messages=False,
+                    can_manage_video_chats=False, can_restrict_members=False, can_promote_members=False,
+                    can_change_info=False, can_invite_users=False, can_post_stories=False,
+                    can_edit_stories=False, can_delete_stories=False, can_post_messages=access,
+                    can_edit_messages=access,
+                )
+            return await telegram(bot, method, timeout=timeout)
+
+        self.assertFalse(await channel.deliver_one(self.bot))
+        with patch.object(self.fake, "make_request", side_effect=mock_telegram):
+            await self.login(999)
+            await self.act(nav='admin_home')
+            await self.act(action=self.button('Пользователи и статистика'))
+            await self.act(action=self.button('DT Payments'))
+            await self.act(action=self.button('Канал DT Payments'))
+            await self.act(action=self.button('Посмотреть пример'))
+            self.assertIn("DT-EXAMPLE", self.text())
+            self.assertTrue(any(m['photo'] and not m['photo']['is_banner'] for m in self.view['messages']))
+            self.assertFalse(await channel.deliver_one(self.bot))
+
+            await self.act(action=self.button('Подключить канал'))
+            await self.act(input={'text':'@Test_payments'})
+            self.assertIn('где бот может', self.text())
+            self.assertEqual(await db.get_app_setting(db.DT_PAYMENTS_CHANNEL), "")
+            access = True
+            await self.act(input={'text':'@Test_payments'})
+            self.assertIn('Test &amp; Channel', self.text())
+        self.assertEqual(await db.get_app_setting(db.DT_PAYMENTS_CHANNEL), str(chat_id))
+
+        async with db.SessionLocal() as session, session.begin():
+            user = await session.get(db.User, 1)
+            user.dt_payments_tag = 'DT-DESIGN'
+            checked = db.Request(user_id=1, amount=150, status="waiting_check")
+            direct = db.Request(user_id=1, amount=250, status="paypal_issued")
+            session.add_all([checked, direct])
+            await session.flush()
+            checked_id, direct_id = checked.id, direct.id
+
+        self.assertIsNotNone(await db.confirm_payment(checked_id, 999))
+        self.assertIsNone(await db.confirm_payment(checked_id, 999))
+        self.assertIsNotNone(await db.confirm_working_payment(direct_id, 999))
+        self.assertTrue(await channel.deliver_one(self.bot))
+        photo_calls = [m for m in self.fake.calls if m.__api_method__ == 'sendPhoto' and m.chat_id == chat_id]
+        self.assertEqual(len(photo_calls), 1)
+        self.assertIn('Оплата подтверждена', photo_calls[0].caption)
+        self.assertIn('150 €', photo_calls[0].caption)
+        self.assertIn('DT-DESIGN', photo_calls[0].caption)
+        self.assertNotIn('demo_member', photo_calls[0].caption)
+
+        # Pause drops the pending item and still corrects an existing post.
+        await channel.set_channel(None)
+        self.assertFalse(await channel.deliver_one(self.bot))
+        self.assertEqual((await db.refund_confirmed_payment(checked_id, 999))[1], 'refunded')
+        self.assertTrue(await channel.deliver_one(self.bot))
+        self.assertFalse(await channel.deliver_one(self.bot))
+        edits = [m for m in self.fake.calls if m.__api_method__ == 'editMessageCaption' and m.chat_id == chat_id]
+        self.assertEqual(len(edits), 1)
+        self.assertIn('Оплата возвращена', edits[0].caption)
+        self.assertEqual(await channel.channel_counts(), {'refunded':1, 'skipped':1})
+
     async def test_happy_hours_edit_preview_confirm_and_stale_draft(self):
         from datetime import datetime, timedelta
         from app import handlers
