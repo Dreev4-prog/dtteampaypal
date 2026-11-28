@@ -10,24 +10,27 @@ from aiogram.exceptions import (
     TelegramAPIError, TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter, TelegramServerError,
 )
 from aiogram.types import FSInputFile
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, literal, select, text, update
+from sqlalchemy.orm import aliased
 
 from app import db
 
 BANNER = Path(__file__).resolve().parent.parent / "assets" / "dt_payments_channel.jpg"
 logger = logging.getLogger(__name__)
+MANUAL_INTERVAL = timedelta(minutes=8)
 
 
-def payment_caption(amount: int, tag: str, *, refunded=False) -> str:
+def payment_caption(amount: int, tag: str, *, refunded=False, manual=False) -> str:
     anonymous = re.fullmatch(r"anonim-([0-9]+)", tag)
     worker = f"#аноним{anonymous[1]}" if anonymous else tag
     title = "↩️ <b>Оплата возвращена</b>" if refunded else "🗝 <b>DT TEAM · НОВЫЙ ЗАВОЗ</b>"
     amount_text = f"{amount:,}".replace(",", " ")
+    source = "\n<i>Внесено вручную</i>" if manual else ""
     return (
         f"{title}\n\n"
         f"<b>{amount_text} €</b>\n"
         f"Воркер <b>{escape(worker)}</b>\n"
-        "Реквизит <b>♦️ REG EU</b>\n\n"
+        f"Реквизит <b>♦️ REG EU</b>{source}\n\n"
         '<a href="https://t.me/DT_TEAM_PAYPAL_BOT">@DT_TEAM_PAYPAL_BOT</a>'
     )
 
@@ -39,32 +42,43 @@ async def set_channel(channel_id: int | None) -> None:
             VALUES (:key, :value, CURRENT_TIMESTAMP)
             ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
         """), {"key": db.DT_PAYMENTS_CHANNEL, "value": str(channel_id) if channel_id else ""})
-        post = db.DTPaymentsPost
-        await session.execute(update(post).where(post.status == "pending", post.channel_id != (channel_id or 0))
-                              .values(status="skipped"))
+        for post in (db.DTPaymentsPost, db.DTPaymentsManual):
+            await session.execute(update(post).where(post.status == "pending", post.channel_id != (channel_id or 0))
+                                  .values(status="skipped"))
 
 
 async def channel_counts() -> dict[str, int]:
-    post = db.DTPaymentsPost
+    totals: dict[str, int] = {}
     async with db.SessionLocal() as session:
-        return dict((await session.execute(select(post.status, func.count()).group_by(post.status))).all())
+        for post in (db.DTPaymentsPost, db.DTPaymentsManual):
+            counts = await session.execute(select(post.status, func.count()).group_by(post.status))
+            for status, count in counts:
+                totals[status] = totals.get(status, 0) + count
+    return totals
 
 
-async def claim_post():
-    post = db.DTPaymentsPost
+async def claim_post(*, manual=False):
+    post = db.DTPaymentsManual if manual else db.DTPaymentsPost
     now = datetime.utcnow()
     async with db.SessionLocal() as session, session.begin():
-        # An interrupted send may already have reached Telegram. Replaying it
-        # automatically could publish the same payment twice.
+        # A timed-out send may have reached Telegram already.
         await session.execute(update(post).where(post.status == "sending", post.next_attempt_at <= now)
                               .values(status="failed"))
-        item = (await session.execute(
-            select(post, db.Request.status).join(db.Request, db.Request.id == post.request_id)
-            .where(post.next_attempt_at <= now,
-                   (post.status == "pending") | ((post.status == "posted") & (db.Request.status == "payment_refunded")))
-            .order_by(post.next_attempt_at, post.request_id)
-            .limit(1).with_for_update(of=post, skip_locked=True)
-        )).first()
+        if manual:
+            previous = aliased(db.DTPaymentsManual)
+            earlier = select(previous.id).where(
+                previous.batch_key == post.batch_key, previous.position < post.position,
+                previous.status.in_(("pending", "sending")),
+            ).exists()
+            query = select(post, literal(None)).where(post.status == "pending", ~earlier)
+            order = post.id
+        else:
+            query = (select(post, db.Request.status).join(db.Request, db.Request.id == post.request_id)
+                     .where((post.status == "pending") | ((post.status == "posted") & (db.Request.status == "payment_refunded"))))
+            order = post.request_id
+        item = (await session.execute(query.where(post.next_attempt_at <= now)
+                                     .order_by(post.next_attempt_at, order)
+                                     .limit(1).with_for_update(of=post, skip_locked=True))).first()
         if item is None:
             return None
         row, request_status = item
@@ -80,11 +94,13 @@ async def claim_post():
 
 
 async def deliver_one(bot) -> bool:
-    row = await claim_post()
+    row = await claim_post() or await claim_post(manual=True)
     if row is None:
         return False
+    manual = isinstance(row, db.DTPaymentsManual)
+    identity = row.id if manual else row.request_id
     refund = row.message_id is not None
-    caption = payment_caption(row.amount, row.tag, refunded=refund)
+    caption = payment_caption(row.amount, row.tag, refunded=refund, manual=manual)
     message_id = row.message_id
     delay = 0
     try:
@@ -105,13 +121,21 @@ async def deliver_one(bot) -> bool:
             status, delay = "posted", 60  # Repeating a caption edit is safe.
         else:
             status = "refund_failed" if refund else "failed"
-            logger.warning("DT Payments channel delivery failed for request %s (%s)",
-                           row.request_id, type(exc).__name__)
+            logger.warning("DT Payments channel delivery failed for %s %s (%s)",
+                           "manual record" if manual else "request", identity, type(exc).__name__)
     async with db.SessionLocal() as session, session.begin():
-        await session.execute(update(db.DTPaymentsPost)
-                              .where(db.DTPaymentsPost.request_id == row.request_id)
+        model = type(row)
+        key = model.id if manual else model.request_id
+        now = datetime.utcnow()
+        await session.execute(update(model).where(key == identity)
                               .values(status=status, message_id=message_id,
-                                      next_attempt_at=datetime.utcnow() + timedelta(seconds=delay)))
+                                      next_attempt_at=now + timedelta(seconds=delay)))
+        if manual and status == "posted":
+            earliest = now + MANUAL_INTERVAL
+            await session.execute(update(model).where(
+                model.batch_key == row.batch_key, model.position == row.position + 1,
+                model.status == "pending", model.next_attempt_at < earliest,
+            ).values(next_attempt_at=earliest))
     return True
 
 

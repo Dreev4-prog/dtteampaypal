@@ -1602,6 +1602,7 @@ async def _show_dt_payments_home(callback: CallbackQuery) -> None:
             lines.append(
                 f"🟢 <b>{escape(item['tag'])}</b> · "
                 f"<b>{item['amount']} €</b> · "
+                f"{'Внесено вручную · ' if item['manual'] else ''}"
                 f"{_dt_payments_feed_time(item['confirmed_at'])}"
             )
 
@@ -7325,6 +7326,8 @@ async def crm_user_paypals_handler(callback: CallbackQuery) -> None:
 
 
 def _dt_admin_identity(item: dict) -> str:
+    if item["user_id"] is None:
+        return "Внесено вручную"
     if item.get("username"):
         return f"@{escape(item['username'])}"
     if item.get("full_name"):
@@ -7360,8 +7363,8 @@ async def dt_payments_admin_handler(callback: CallbackQuery, state: FSMContext) 
                 f"🟢 <b>{escape(item['tag'])}</b> · "
                 f"{_dt_admin_identity(item)} · "
                 f"<b>{item['amount']} €</b> · "
-                f"{_dt_payments_feed_time(item['confirmed_at'])} · "
-                f"#{item['request_id']}"
+                f"{_dt_payments_feed_time(item['confirmed_at'])}"
+                + (f" · #{item['request_id']}" if item["request_id"] is not None else "")
             )
 
     lines.extend([

@@ -5,7 +5,7 @@ import re
 from typing import Awaitable, Callable, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Float, Integer, Numeric, String, UniqueConstraint, CheckConstraint, Index, select, text, func, or_, and_
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Float, Integer, Numeric, String, UniqueConstraint, CheckConstraint, Index, select, text, func, or_, and_, literal, null, union_all
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -331,17 +331,35 @@ class AppSetting(Base):
 DT_PAYMENTS_CHANNEL = "dt_payments_channel"
 
 
-class DTPaymentsPost(Base):
-    __tablename__ = "dt_payments_posts"
-
-    request_id: Mapped[int] = mapped_column(ForeignKey("requests.id"), primary_key=True)
+class DTPaymentsDelivery:
     channel_id: Mapped[int] = mapped_column(BigInteger)
     tag: Mapped[str] = mapped_column(String(32))
     amount: Mapped[int] = mapped_column(Integer)
-    confirmed_at: Mapped[datetime] = mapped_column(DateTime)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+
+class DTPaymentsPost(DTPaymentsDelivery, Base):
+    __tablename__ = "dt_payments_posts"
+
+    request_id: Mapped[int] = mapped_column(ForeignKey("requests.id"), primary_key=True)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class DTPaymentsManual(DTPaymentsDelivery, Base):
+    """Documented off-bot payments. These records don't participate in balances."""
+
+    __tablename__ = "dt_payments_manual"
+    __table_args__ = (
+        UniqueConstraint("batch_key", "position", name="uq_dt_payments_manual_batch_position"),
+        CheckConstraint("amount > 0 AND position > 0", name="ck_dt_payments_manual_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    batch_key: Mapped[str] = mapped_column(String(64))
+    position: Mapped[int] = mapped_column(Integer)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
 class AutoPost(Base):
@@ -815,15 +833,19 @@ def _needs_anonymous_dt_payments_tag(user: User) -> bool:
 
 async def _assign_anonymous_dt_payments_tag(session: AsyncSession) -> str:
     # Allocate a public serial independently of the Telegram user ID.
-    number = await session.scalar(text("""
-        INSERT INTO app_settings (key, value, updated_at)
-        VALUES ('dt_payments_anon_number', '10000', CURRENT_TIMESTAMP)
-        ON CONFLICT (key) DO UPDATE SET
-            value = CAST(CAST(app_settings.value AS BIGINT) + 1 AS TEXT),
-            updated_at = CURRENT_TIMESTAMP
-        RETURNING value
-    """))
-    return f"{DT_PAYMENTS_ANON_PREFIX}{number}"
+    while True:
+        number = await session.scalar(text("""
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES ('dt_payments_anon_number', '10000', CURRENT_TIMESTAMP)
+            ON CONFLICT (key) DO UPDATE SET
+                value = CAST(CAST(app_settings.value AS BIGINT) + 1 AS TEXT),
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING value
+        """))
+        tag = f"{DT_PAYMENTS_ANON_PREFIX}{number}"
+        reserved = await session.scalar(select(DTPaymentsManual.id).where(DTPaymentsManual.tag == tag).limit(1))
+        if reserved is None:
+            return tag
 
 
 async def _backfill_dt_payments_tags() -> None:
@@ -3611,48 +3633,36 @@ def _dt_payments_effective_confirmed_at():
     )
 
 
+def _dt_payments_records():
+    automatic = select(
+        Request.id.label("entry_id"),
+        Request.id.label("request_id"),
+        Request.user_id.label("user_id"),
+        Request.amount.label("amount"),
+        _dt_payments_effective_confirmed_at().label("confirmed_at"),
+        User.dt_payments_tag.label("tag"),
+        User.username.label("username"),
+        User.full_name.label("full_name"),
+        literal(False).label("manual"),
+    ).join(User, User.id == Request.user_id).where(_dt_payments_success_condition())
+    manual = select(
+        DTPaymentsManual.id, null(), null(), DTPaymentsManual.amount, DTPaymentsManual.recorded_at,
+        DTPaymentsManual.tag, null(), null(), literal(True),
+    )
+    return union_all(automatic, manual).subquery()
+
+
 async def get_dt_payments_feed(limit: int = 12) -> list[dict]:
     safe_limit = max(1, min(int(limit), 50))
+    records = _dt_payments_records().c
     async with SessionLocal() as session:
         rows = (await session.execute(
-            select(
-                Request.id,
-                Request.user_id,
-                Request.amount,
-                _dt_payments_effective_confirmed_at().label("dt_confirmed_at"),
-                User.dt_payments_tag,
-                User.username,
-                User.full_name,
-            )
-            .join(User, User.id == Request.user_id)
-            .where(_dt_payments_success_condition())
-            .order_by(
-                _dt_payments_effective_confirmed_at().desc(),
-                Request.id.desc(),
-            )
+            select(records.request_id, records.user_id, records.amount, records.confirmed_at,
+                   records.tag, records.username, records.full_name, records.manual)
+            .order_by(records.confirmed_at.desc(), records.manual.desc(), records.entry_id.desc())
             .limit(safe_limit)
-        )).all()
-
-        return [
-            {
-                "request_id": int(request_id),
-                "user_id": int(user_id),
-                "amount": int(amount or 0),
-                "confirmed_at": confirmed_at,
-                "tag": dt_tag or "DT-?????",
-                "username": username,
-                "full_name": full_name,
-            }
-            for (
-                request_id,
-                user_id,
-                amount,
-                confirmed_at,
-                dt_tag,
-                username,
-                full_name,
-            ) in rows
-        ]
+        )).mappings().all()
+    return [dict(row, tag=row["tag"] or "DT-?????") for row in rows]
 
 
 async def get_dt_payments_ranking(
@@ -3662,37 +3672,21 @@ async def get_dt_payments_ranking(
 ) -> dict:
     period = period if period in {"day", "week", "all"} else "day"
     start, end = _dt_payments_period_bounds(period)
+    records = _dt_payments_records().c
+    conditions = []
+    if start is not None:
+        conditions.append(records.confirmed_at >= start)
+    if end is not None:
+        conditions.append(records.confirmed_at < end)
 
     async with SessionLocal() as session:
-        effective_confirmed_at = _dt_payments_effective_confirmed_at()
-        conditions = [_dt_payments_success_condition()]
-        if start is not None:
-            conditions.append(effective_confirmed_at >= start)
-        if end is not None:
-            conditions.append(effective_confirmed_at < end)
-
         rows = (await session.execute(
-            select(
-                Request.user_id,
-                User.dt_payments_tag,
-                User.username,
-                User.full_name,
-                func.sum(Request.amount).label("turnover"),
-                func.count(Request.id).label("payments"),
-            )
-            .join(User, User.id == Request.user_id)
+            select(records.user_id, records.tag, records.username, records.full_name,
+                   func.sum(records.amount).label("turnover"), func.count().label("payments"))
             .where(*conditions)
-            .group_by(
-                Request.user_id,
-                User.dt_payments_tag,
-                User.username,
-                User.full_name,
-            )
-            .order_by(
-                func.sum(Request.amount).desc(),
-                func.count(Request.id).desc(),
-                Request.user_id.asc(),
-            )
+            .group_by(records.user_id, records.tag, records.username, records.full_name)
+            .order_by(func.sum(records.amount).desc(), func.count().desc(),
+                      records.user_id.asc(), records.tag.asc())
         )).all()
 
     ranking = []
@@ -3707,7 +3701,7 @@ async def get_dt_payments_ranking(
         ) = row
         ranking.append({
             "rank": index,
-            "user_id": int(ranked_user_id),
+            "user_id": ranked_user_id,
             "tag": dt_tag or "DT-?????",
             "username": username,
             "full_name": full_name,

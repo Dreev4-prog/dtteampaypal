@@ -85,6 +85,44 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
     def text(self):
         return '\n'.join(m['html'] for m in self.view['messages'])
 
+    async def test_manual_dt_payments_enter_feed_and_post_in_order_without_ledger_effects(self):
+        from datetime import datetime
+        from app import dt_payments_channel as channel
+
+        chat_id = -1001234567890
+        await channel.set_channel(chat_id)
+        balance = await db.get_user_balance(1)
+        async with db.SessionLocal() as session, session.begin():
+            before = await session.scalar(select(func.count()).select_from(db.Request))
+            for position, (tag, amount) in enumerate((("anonim-11931", 147), ("anonim-78901", 120)), 1):
+                session.add(db.DTPaymentsManual(batch_key="test-manual", position=position, amount=amount,
+                                               tag=tag, channel_id=chat_id, next_attempt_at=datetime(2026, 1, 1)))
+        await db.set_app_setting("dt_payments_anon_number", "11930")
+        user = await db.get_or_create_user(87651234, "new")
+        self.assertEqual(user.dt_payments_tag, "anonim-11932")
+        feed = await db.get_dt_payments_feed(2)
+        self.assertEqual({(p["tag"], p["amount"], p["manual"]) for p in feed},
+                         {("anonim-11931", 147, True), ("anonim-78901", 120, True)})
+        ranking = await db.get_dt_payments_ranking("all")
+        self.assertEqual(next(p for p in ranking["top"] if p["tag"] == "anonim-11931")["turnover"], 147)
+        await self.login(1)
+        await self.act(nav="dt_payments")
+        self.assertIn("Внесено вручную", self.text())
+
+        self.assertTrue(await channel.deliver_one(self.bot))
+        self.assertFalse(await channel.deliver_one(self.bot))
+        self.assertIn("#аноним11931", self.fake.calls[-1].caption)
+        self.assertIn("Внесено вручную", self.fake.calls[-1].caption)
+        async with db.SessionLocal() as session, session.begin():
+            first, second = (await session.scalars(select(db.DTPaymentsManual)
+                                                   .order_by(db.DTPaymentsManual.position))).all()
+            self.assertGreaterEqual(second.next_attempt_at - first.next_attempt_at, channel.MANUAL_INTERVAL)
+            second.next_attempt_at = datetime(2026, 1, 1)
+            self.assertEqual(await session.scalar(select(func.count()).select_from(db.Request)), before)
+        self.assertTrue(await channel.deliver_one(self.bot))
+        self.assertIn("#аноним78901", self.fake.calls[-1].caption)
+        self.assertEqual(await db.get_user_balance(1), balance)
+
     async def test_dt_payments_migrates_only_automatic_tags_and_matches_post(self):
         from datetime import datetime
         from app import dt_payments_channel as channel
