@@ -184,8 +184,9 @@ class MiniAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await channel.deliver_one(self.bot))
         photo_calls = [m for m in self.fake.calls if m.__api_method__ == 'sendPhoto' and m.chat_id == chat_id]
         self.assertEqual(len(photo_calls), 1)
-        self.assertIn('Новый профит', photo_calls[0].caption)
-        self.assertIn('Сумма: <b>150€</b>', photo_calls[0].caption)
+        self.assertIn('DT TEAM · НОВЫЙ ЗАВОЗ', photo_calls[0].caption)
+        self.assertNotIn('Оплата подтверждена', photo_calls[0].caption)
+        self.assertIn('<b>150 €</b>\nВоркер', photo_calls[0].caption)
         self.assertIn('REG EU', photo_calls[0].caption)
         self.assertIn('@DT_TEAM_PAYPAL_BOT', photo_calls[0].caption)
         self.assertIn('DT-DESIGN', photo_calls[0].caption)

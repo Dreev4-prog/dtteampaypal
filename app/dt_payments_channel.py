@@ -21,13 +21,13 @@ logger = logging.getLogger(__name__)
 def payment_caption(amount: int, tag: str, *, refunded=False) -> str:
     anonymous = re.fullmatch(r"anonim-([0-9]+)", tag)
     worker = f"#аноним{anonymous[1]}" if anonymous else tag
-    title = "↩️ <b>Оплата возвращена</b>" if refunded else "🏁 <b>Новый профит</b>"
+    title = "↩️ <b>Оплата возвращена</b>" if refunded else "🗝 <b>DT TEAM · НОВЫЙ ЗАВОЗ</b>"
     amount_text = f"{amount:,}".replace(",", " ")
     return (
         f"{title}\n\n"
-        "┏  Реквизит: ♦️ REG EU\n"
-        f"▫️ Воркер: {escape(worker)}\n"
-        f"┗  Сумма: <b>{amount_text}€</b>\n\n"
+        f"<b>{amount_text} €</b>\n"
+        f"Воркер <b>{escape(worker)}</b>\n"
+        "Реквизит <b>♦️ REG EU</b>\n\n"
         '<a href="https://t.me/DT_TEAM_PAYPAL_BOT">@DT_TEAM_PAYPAL_BOT</a>'
     )
 
